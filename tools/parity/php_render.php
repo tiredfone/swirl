@@ -1,5 +1,5 @@
 <?php
-$a = getopt('', ['ids::', 'colors::', 'out:', 'size::', 'view::', 'rig::', 'stance::', 'exact::', 'smooth::']);
+$a = getopt('', ['ids::', 'colors::', 'out:', 'size::', 'view::', 'rig::', 'stance::', 'exact::', 'smooth::', 'scale::', 'pose::']);
 $vr = getenv('VANILLA_DIR') ?: '/var/www/html/core/vanilla-rcc';
 require_once $vr . '/src/Vanilla.php';
 @ini_set('memory_limit', '1500M');
@@ -28,6 +28,8 @@ $ids = isset($a['ids']) && $a['ids'] !== '' ? explode(',', $a['ids']) : [];
 $req['ids'] = $ids;
 if (!empty($a['colors'])) $req['colors'] = array_map('intval', explode(',', $a['colors']));
 $req['rig'] = $a['rig'] ?? 'R6';
+if (!empty($a['scale'])) { $sc = []; foreach (explode(',', $a['scale']) as $kv) { [$k, $v] = explode(':', $kv); $sc[$k] = (float)$v; } $req['scale'] = $sc; }
+if (!empty($a['pose'])) $req['pose'] = $a['pose'];
 if (isset($a['stance'])) $req['stance'] = $a['stance'];
 if (isset($a['smooth']) && $a['smooth'] === '0') $req['smooth'] = false;
 $r = $av->render($req);

@@ -124,10 +124,19 @@ fn main() {
             }
         }
     }
-    let (cfs, base, btex) = swirl_render::items::build_look(&ctx, &base, &mut look, &ids, &view, a.get("stance").map(|s| s.as_str()).unwrap_or("normal"));
+    let rig = if a.get("rig").map(|s| s.as_str()) == Some("R15") { Some(swirl_render::r15::load_rig(&data).unwrap_or_else(|e| panic!("{}", e))) } else { None };
+    let opts = swirl_render::items::BuildOpts {
+        view: &view,
+        stance: a.get("stance").map(|s| s.as_str()).unwrap_or("normal"),
+        rig: rig.as_ref(),
+        scale: a.get("scale").map(|s| swirl_render::r15::parse_scale(s)).unwrap_or([1.0; 4]),
+        pose: a.get("pose").cloned(),
+    };
+    let out_b = swirl_render::items::build_look(&ctx, &base, &mut look, &ids, &opts);
+    let (cfs, base, btex) = (out_b.cfs, out_b.base, out_b.tex);
     for n in &look.notes {
         eprintln!("note: {}", n);
     }
-    let png = draw(&base, &btex, &look, &cfs, w, h, 4, &view);
+    let png = draw(&base, &btex, out_b.r15.as_ref(), &look, &cfs, w, h, 4, &view);
     std::fs::write(out, png).unwrap();
 }

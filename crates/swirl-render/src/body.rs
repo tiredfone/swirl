@@ -74,15 +74,17 @@ fn mesh_from(ctx: &Ctx, v: Option<&Value>) -> Option<Mesh> {
     parse_mesh2016(&b).ok().map(|m| clean_mesh(&m))
 }
 
-fn composite_layer(ctx: &Ctx, out: &mut Img, name: &str, image: &Img, color: [f64; 3]) {
+pub fn composite_layer(ctx: &Ctx, out: &mut Img, name: &str, image: &Img, color: [f64; 3]) {
+    composite_layer_with(ctx, out, name, image, color, 0.75, 512.0)
+}
+
+pub fn composite_layer_with(ctx: &Ctx, out: &mut Img, name: &str, image: &Img, color: [f64; 3], sx: f64, flip_h: f64) {
     let mesh = match character_mesh(ctx, name) {
         Ok(m) => m,
         Err(_) => return,
     };
     let mut tex = Texture::new(image.clone(), false);
     tex.repeat = false;
-    let sx = 0.75;
-    let flip_h = 512.0;
     let mut visited = vec![false; out.w * out.h];
     let n = mesh.pos.len();
     let mut i = 0;
@@ -321,4 +323,27 @@ pub fn character_base_2012(ctx: &Ctx, base: &Base, look: &mut Look) -> (Base, Bo
         }
     }
     (base, tex)
+}
+
+pub fn layer_over(base: &Img, top: &Img) -> Option<Texture> {
+    let (w, h) = (base.w, base.h);
+    let t = if top.w == w && top.h == h { top.clone() } else { top.resized(w, h) };
+    if t.px.iter().all(|c| ((c >> 24) & 255) >= 250) {
+        return None;
+    }
+    let mut px = base.px.clone();
+    for i in 0..w * h {
+        let c = t.px[i];
+        let a = (c >> 24) & 255;
+        if a == 0 {
+            continue;
+        }
+        let b = px[i];
+        let f = a as f64 / 255.0;
+        let ch = |s: u32| (((c >> s) & 255) as f64 * f + ((b >> s) & 255) as f64 * (1.0 - f)).round() as u32;
+        px[i] = (255 << 24) | (ch(16) << 16) | (ch(8) << 8) | ch(0);
+    }
+    let mut tex = Texture::new(Img { w, h, px }, false);
+    tex.repeat = false;
+    Some(tex)
 }

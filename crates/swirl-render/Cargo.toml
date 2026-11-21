@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 swirl-core = { path = "../swirl-core" }
 png = "0.17"
+serde_json = "1"

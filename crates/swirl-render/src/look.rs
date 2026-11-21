@@ -152,6 +152,12 @@ pub fn absorb(ctx: &Ctx, look: &mut Look, roots: &[Inst], tag: &str, face_set: &
                 continue;
             }
             if x.cls == "Folder" && x.name == "R15ArtistIntent" {
+                for mp in &x.children {
+                    if matches!(mp.cls.as_str(), "MeshPart" | "Part") && crate::r15::GROUPS.iter().any(|g| g.0 == mp.name) {
+                        look.r15_parts.retain(|(n, _)| *n != mp.name);
+                        look.r15_parts.push((mp.name.clone(), mp.clone()));
+                    }
+                }
                 continue;
             }
             if x.name.to_lowercase().starts_with("r15") && !matches!(x.cls.as_str(), "Hat" | "Accessory" | "Accoutrement" | "Tool") {

@@ -4,6 +4,7 @@ pub mod img;
 pub mod items;
 pub mod look;
 pub mod mesh;
+pub mod r15;
 pub mod raster;
 pub mod scene;
 pub mod texture;

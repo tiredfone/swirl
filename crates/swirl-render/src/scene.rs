@@ -72,7 +72,13 @@ pub struct Item {
     pub alpha: f64,
 }
 
+pub struct R15Draw {
+    pub calls: Vec<(Mesh, CF, Rc<Texture>)>,
+    pub head: Mesh,
+}
+
 pub struct Look {
+    pub r15_parts: Vec<(String, swirl_core::rbx::Inst)>,
     pub body_meshes: [Option<swirl_core::rbx::Inst>; 6],
     pub head_mesh: Option<swirl_core::rbx::Inst>,
     pub face_set: bool,
@@ -101,7 +107,7 @@ pub fn brick(n: i64) -> [f64; 3] {
 
 impl Look {
     pub fn empty() -> Look {
-        Look { body_meshes: Default::default(), head_mesh: None, face_set: false, colors: [brick(194); 6], shirt: None, pants: None, tshirt: None, face: None, items: vec![], n_hats: 0, tool: false, notes: vec![] }
+        Look { r15_parts: vec![], body_meshes: Default::default(), head_mesh: None, face_set: false, colors: [brick(194); 6], shirt: None, pants: None, tshirt: None, face: None, items: vec![], n_hats: 0, tool: false, notes: vec![] }
     }
 }
 
@@ -210,7 +216,7 @@ fn scale_translate(s: f64, tx: f64, ty: f64) -> M4 {
     [s, 0.0, 0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, tx, ty, 0.0, 1.0]
 }
 
-pub fn draw(base: &Base, tex: &crate::body::BodyTex, look: &Look, cfs: &Cfs, w: usize, h: usize, ss: usize, view: &str) -> Vec<u8> {
+pub fn draw(base: &Base, tex: &crate::body::BodyTex, r15: Option<&R15Draw>, look: &Look, cfs: &Cfs, w: usize, h: usize, ss: usize, view: &str) -> Vec<u8> {
     let head_view = view == "head";
     let items: Vec<&Item> = look.items.iter().collect();
     let n_hats = look.n_hats.min(items.len());
@@ -343,15 +349,6 @@ pub fn draw(base: &Base, tex: &crate::body::BodyTex, look: &Look, cfs: &Cfs, w: 
         mk(&base.left_leg, cfs.lleg, 1, None, Some(lo_tex.clone()), false, None),
         mk(&base.head, cfs.head, 2, Some(look.colors[HEAD]), Some(face_tex), false, None),
     ];
-    for it in &items {
-        let blend = it.alpha < 0.999;
-        if let Some(t) = &it.tex {
-            calls.push(Call { geom: &it.geom, cf: it.cf, mode: 3, color: None, tex: Some(t.clone()), studs: false, half: None, tint: it.tint, alpha: it.alpha, blend });
-        } else {
-            let c = [it.color[0] * it.tint[0], it.color[1] * it.tint[1], it.color[2] * it.tint[2]];
-            calls.push(Call { geom: &it.geom, cf: it.cf, mode: 0, color: Some(c), tex: None, studs: false, half: None, tint: [1.0; 3], alpha: it.alpha, blend });
-        }
-    }
     let slots = [(0usize, 0usize), (1, 1), (2, 2), (3, 3), (4, 4)];
     for (ci, pi) in slots {
         if let Some(t) = &tex.parts[pi] {
@@ -368,6 +365,21 @@ pub fn draw(base: &Base, tex: &crate::body::BodyTex, look: &Look, cfs: &Cfs, w: 
         c.mode = 3;
         c.color = None;
         c.tex = Some(t.clone());
+    }
+    if let Some(r) = r15 {
+        let mut head = calls.pop().unwrap();
+        head.geom = &r.head;
+        calls = r.calls.iter().map(|(m, cf, t)| Call { geom: m, cf: *cf, mode: 3, color: None, tex: Some(t.clone()), studs: false, half: None, tint: [1.0; 3], alpha: 1.0, blend: false }).collect();
+        calls.push(head);
+    }
+    for it in &items {
+        let blend = it.alpha < 0.999;
+        if let Some(t) = &it.tex {
+            calls.push(Call { geom: &it.geom, cf: it.cf, mode: 3, color: None, tex: Some(t.clone()), studs: false, half: None, tint: it.tint, alpha: it.alpha, blend });
+        } else {
+            let c = [it.color[0] * it.tint[0], it.color[1] * it.tint[1], it.color[2] * it.tint[2]];
+            calls.push(Call { geom: &it.geom, cf: it.cf, mode: 0, color: Some(c), tex: None, studs: false, half: None, tint: [1.0; 3], alpha: it.alpha, blend });
+        }
     }
     let mut solid = Vec::new();
     let mut glass = Vec::new();

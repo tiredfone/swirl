@@ -426,7 +426,23 @@ pub fn build_decals(ctx: &Ctx, h: &Inst, cf: CF) -> Vec<Item> {
     out
 }
 
-pub fn build_look(ctx: &Ctx, base: &Base, look: &mut Look, ids: &[String], view: &str, stance: &str) -> (Cfs, Base, crate::body::BodyTex) {
+pub struct BuildOut {
+    pub cfs: Cfs,
+    pub base: Base,
+    pub tex: crate::body::BodyTex,
+    pub r15: Option<R15Draw>,
+}
+
+pub struct BuildOpts<'a> {
+    pub view: &'a str,
+    pub stance: &'a str,
+    pub rig: Option<&'a crate::r15::Rig>,
+    pub scale: [f64; 4],
+    pub pose: Option<String>,
+}
+
+pub fn build_look(ctx: &Ctx, base: &Base, look: &mut Look, ids: &[String], o: &BuildOpts) -> BuildOut {
+    let (view, stance) = (o.view, o.stance);
     let mut face_set = false;
     let mut accs: Vec<Inst> = vec![];
     let mut tool: Option<Inst> = None;
@@ -442,15 +458,35 @@ pub fn build_look(ctx: &Ctx, base: &Base, look: &mut Look, ids: &[String], view:
     let mut cfs = part_cfs(look.tool, std::f64::consts::PI / 2.0);
     stance_r6(&mut cfs, look.tool, stance);
     let mut notes = std::mem::take(&mut look.notes);
+    let mut r15 = o.rig.map(|rig| crate::r15::R15::new(rig, o.scale, stance, o.pose.clone()));
+    if let Some(r) = r15.as_mut() {
+        r.use_package(&look.r15_parts);
+        r.compute_world(ctx, look.tool, &mut notes);
+        r.apply_cfs(&mut cfs);
+        if std::env::var("SWIRL_DEBUG").is_ok() {
+            for n in r.world.keys().cloned().collect::<Vec<_>>() {
+                eprintln!("{} {:?}", n, r.world[&n].p);
+            }
+        }
+    }
     let mut items: Vec<Item> = vec![];
     for acc in &accs {
         match handle_of(acc) {
             None => notes.push("a hat has no Handle part so it was skipped".into()),
             Some(h) => {
-                let cf = accessory_cf(acc, h, &cfs);
-                if let Some(it) = build_handle(ctx, base, h, cf, &mut notes) {
+                let cf = r15.as_ref().and_then(|r| r.accessory_frame(h)).unwrap_or_else(|| accessory_cf(acc, h, &cfs));
+                if let Some(mut it) = build_handle(ctx, base, h, cf, &mut notes) {
+                    let k = r15.as_ref().map(|r| r.accessory_scale(h));
+                    if let (Some(r), Some(k)) = (r15.as_ref(), k) {
+                        r.scale_item(&mut it, k);
+                    }
                     items.push(it);
-                    items.extend(build_decals(ctx, h, cf));
+                    for mut d in build_decals(ctx, h, cf) {
+                        if let (Some(r), Some(k)) = (r15.as_ref(), k) {
+                            r.scale_item(&mut d, k);
+                        }
+                        items.push(d);
+                    }
                 }
             }
         }
@@ -460,7 +496,10 @@ pub fn build_look(ctx: &Ctx, base: &Base, look: &mut Look, ids: &[String], view:
         match handle_of(t) {
             None => notes.push("the gear has no Handle part so it was skipped".into()),
             Some(th) => {
-                let cf = cfs.rarm.mul(&right_grip_c0()).mul(&grip_cf(t).inv());
+                let cf = match r15.as_ref() {
+                    Some(r) => r.tool_frame(t),
+                    None => cfs.rarm.mul(&right_grip_c0()).mul(&grip_cf(t).inv()),
+                };
                 if let Some(it) = build_handle(ctx, base, th, cf, &mut notes) {
                     let icf = it.cf;
                     items.push(it);
@@ -478,7 +517,8 @@ pub fn build_look(ctx: &Ctx, base: &Base, look: &mut Look, ids: &[String], view:
     look.items = items;
     look.notes = notes;
     let (nb, bt) = crate::body::character_base_2012(ctx, base, look);
-    (cfs, nb, bt)
+    let r15d = r15.as_ref().map(|r| R15Draw { calls: r.body_calls(ctx, look), head: r.mesh_scaled("Head", &nb.head) });
+    BuildOut { cfs, base: nb, tex: bt, r15: r15d }
 }
 
 pub fn stance_r6(cfs: &mut Cfs, tool: bool, stance: &str) {
@@ -503,4 +543,8 @@ pub fn stance_r6(cfs: &mut Cfs, tool: bool, stance: &str) {
             _ => cfs.lleg = m,
         }
     }
+}
+
+pub fn mesh_bytes_pub(ctx: &Ctx, r: &str) -> Option<Vec<u8>> {
+    mesh_bytes(ctx, r)
 }
