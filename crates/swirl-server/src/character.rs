@@ -232,3 +232,115 @@ pub fn sync_tools(dm: &mut DataModel, ch: &Char) {
 }
 
 pub type Chars = HashMap<InstId, Char>;
+
+static CONTENT_DIR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub fn chocolate_dir() -> Option<&'static str> {
+    CONTENT_DIR.get().map(|s| s.as_str())
+}
+
+pub fn set_content_dir(dir: &str) {
+    let _ = CONTENT_DIR.set(dir.to_string());
+}
+
+pub fn add_scripts(dm: &mut DataModel, model: InstId, era: i32) {
+    let dir = match CONTENT_DIR.get() {
+        Some(d) => d,
+        None => return,
+    };
+    let bytes = match std::fs::read(format!("{}/content/fonts/humanoidHealth.rbxm", dir)) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    let tree = match swirl_core::rbx::parse(&bytes) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    let made = dm.load_tree(&tree, model);
+    for m in made {
+        let name = dm.get(m).map(|i| i.name.clone()).unwrap_or_default();
+        if era == 2018 && name != "Health" {
+            dm.destroy(m);
+            continue;
+        }
+        if let Some(gui) = dm.find_child(m, "HealthGUI", false) {
+            if let Some(tray) = dm.find_child(gui, "Tray", false) {
+                let _ = dm.set_prop(tray, "Visible", Val::Bool(false));
+            }
+        }
+    }
+}
+
+pub fn copy_player_scripts(dm: &mut DataModel, player: InstId) {
+    let ps = match dm.create_any("PlayerScripts", Some(player)) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    dm.set_prop_quiet(ps, "Name", Val::Str("PlayerScripts".into()));
+    dm.get_mut_name(ps, "PlayerScripts");
+    let sp = match dm.services.get("StarterPlayer") {
+        Some(s) => *s,
+        None => return,
+    };
+    let sps = match dm.find_child_of_class(sp, "StarterPlayerScripts") {
+        Some(s) => s,
+        None => return,
+    };
+    let kids: Vec<InstId> = dm.get(sps).map(|s| s.children.clone()).unwrap_or_default();
+    for k in kids {
+        if let Some(c) = dm.clone_tree(k) {
+            let _ = dm.set_parent(c, Some(ps));
+        }
+    }
+}
+
+pub fn copy_character_scripts(dm: &mut DataModel, model: InstId) {
+    let sp = match dm.services.get("StarterPlayer") {
+        Some(s) => *s,
+        None => return,
+    };
+    let scs = match dm.find_child_of_class(sp, "StarterCharacterScripts") {
+        Some(s) => s,
+        None => return,
+    };
+    let kids: Vec<InstId> = dm.get(scs).map(|s| s.children.clone()).unwrap_or_default();
+    for k in kids {
+        let name = dm.get(k).map(|i| i.name.clone()).unwrap_or_default();
+        if let Some(old) = dm.find_child(model, &name, false) {
+            dm.destroy(old);
+        }
+        if let Some(c) = dm.clone_tree(k) {
+            let _ = dm.set_parent(c, Some(model));
+        }
+    }
+}
+
+pub fn copy_starter_gui(dm: &mut DataModel, player: InstId, first: bool) {
+    let gui = match dm.find_child_of_class(player, "PlayerGui") {
+        Some(g) => g,
+        None => return,
+    };
+    let sg = match dm.services.get("StarterGui") {
+        Some(s) => *s,
+        None => return,
+    };
+    if !first {
+        let reset = !matches!(dm.get_prop(sg, "ResetPlayerGuiOnSpawn"), Some(Val::Bool(false)));
+        if !reset {
+            return;
+        }
+        let old: Vec<InstId> = dm.get(gui).map(|g| g.children.clone()).unwrap_or_default();
+        for c in old {
+            if dm.is_a(c, "ScreenGui") && matches!(dm.get_prop(c, "ResetOnSpawn"), Some(Val::Bool(false))) {
+                continue;
+            }
+            dm.destroy(c);
+        }
+    }
+    let kids: Vec<InstId> = dm.get(sg).map(|s| s.children.clone()).unwrap_or_default();
+    for k in kids {
+        if let Some(c) = dm.clone_tree(k) {
+            let _ = dm.set_parent(c, Some(gui));
+        }
+    }
+}

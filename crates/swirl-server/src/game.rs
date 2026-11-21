@@ -31,6 +31,7 @@ pub struct Game {
     loose_refresh: f64,
     joined_at: HashMap<InstId, usize>,
     looks: HashMap<InstId, crate::appearance::Look>,
+    gui_copied: HashSet<InstId>,
     invokes: HashMap<u32, (InstId, i64)>,
     invoke_seq: u32,
     pub remote_out: Vec<(Vec<InstId>, J)>,
@@ -79,11 +80,21 @@ impl Game {
             }
         }
         dm.service("NetworkServer").ok();
+        let bundle = if era == 2018 { character::chocolate_dir().and_then(crate::core2018::Bundle::load) } else { None };
+        if let Some(b) = bundle.as_ref() {
+            b.prepare(&mut dm)?;
+        }
         dm.journal.clear();
         let dm = Rc::new(RefCell::new(dm));
         let mut host = Host::new(dm.clone()).map_err(|e| e.to_string())?;
         host.scan_scripts();
-        Ok(Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], last_chat: HashMap::new() })
+        if let Some(b) = bundle.as_ref() {
+            let started = b.server_starter(&mut dm.borrow_mut());
+            if let Some(id) = started {
+                host.scan_subtree(id);
+            }
+        }
+        Ok(Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], last_chat: HashMap::new() })
     }
 
     pub fn join(&mut self, name: &str, user: Option<i64>, look: crate::appearance::Look) -> (J, InstId) {
@@ -111,6 +122,9 @@ impl Game {
                 }
             }
             character::assign_team(&mut dm, player);
+            if self.era == 2018 {
+                character::copy_player_scripts(&mut dm, player);
+            }
             dm.set_parent(player, Some(players)).unwrap();
             let snap = codec::snapshot_for(&dm, &self.roots, player);
             self.joined_at.insert(player, dm.journal.len());
@@ -135,6 +149,12 @@ impl Game {
             let look = self.looks.get(&player);
             match character::build(&mut dm, ws, player, name, origin, look) {
                 Ok(ch) => {
+                    character::add_scripts(&mut dm, ch.model, self.era);
+                    if self.era == 2018 {
+                        character::copy_character_scripts(&mut dm, ch.model);
+                    }
+                    let first = self.gui_copied.insert(player);
+                    character::copy_starter_gui(&mut dm, player, first);
                     let own = json!({"t": "own", "id": ch.model, "s": ch.seq, "c": ch.cf});
                     self.pending.entry(player).or_default().push(own);
                     self.chars.insert(ch.model, ch);

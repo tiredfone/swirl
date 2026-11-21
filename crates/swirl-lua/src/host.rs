@@ -52,6 +52,8 @@ struct State {
     logs: Vec<LogLine>,
     running: HashSet<u32>,
     t0: std::time::Instant,
+    settings: Option<u32>,
+    user_settings: Option<u32>,
 }
 
 pub struct Host {
@@ -61,12 +63,13 @@ pub struct Host {
     step: Function,
 }
 
-const METHODS: [&str; 50] = [
+const METHODS: &[&str] = &[
     "GetChildren", "children", "getChildren", "FindFirstChild", "findFirstChild", "FindFirstChildOfClass", "FindFirstChildWhichIsA", "GetDescendants", "GetFullName", "IsA", "isA",
     "IsDescendantOf", "IsAncestorOf", "Clone", "clone", "Destroy", "destroy", "ClearAllChildren", "GetService", "service", "getService", "WaitForChild", "Remove", "remove",
     "TakeDamage", "LoadCharacter", "AddItem", "GetPlayers", "getPlayers", "GetPlayerFromCharacter", "getPlayerFromCharacter", "Fire", "Invoke",
     "playerFromCharacter", "PlayerFromCharacter", "Play", "play", "Stop", "stop", "Pause", "pause", "Resume", "EquipTool", "UnequipTools", "Move",
     "FireServer", "FireClient", "FireAllClients", "InvokeServer", "InvokeClient",
+    "FilterStringAsync", "FilterStringForPlayerAsync", "FilterStringForBroadcast", "CanUserChatAsync", "CanUsersChatAsync", "IsInGroup", "isInGroup", "GetRankInGroup", "GetRoleInGroup", "SetEntries", "IsUserFeatureEnabled", "__UserSettings", "__settings", "GetFFlag", "GetFastFlag", "DefineFastFlag", "GetFVariable", "GetFastVariable", "IsRunning", "IsStudio", "IsServer", "IsClient", "IsRunMode", "IsEdit", "GetRobloxVersion", "AddCoreScriptLocal",
 ];
 
 fn event_names(class: &str) -> Vec<&'static str> {
@@ -433,6 +436,15 @@ fn virtual_get(d: &DataModel, id: InstId, class: &str, key: &str) -> Option<Wire
             _ => None,
         };
     }
+    if class == "Player" && key == "Team" {
+        if matches!(d.get_prop(id, "Neutral"), Some(Val::Bool(true))) {
+            return Some(Wire::Nil);
+        }
+        let tc = d.get_prop(id, "TeamColor").cloned();
+        let teams = d.services.get("Teams").copied()?;
+        let found = d.get(teams)?.children.iter().copied().find(|c| d.get(*c).map(|i| i.class == "Team").unwrap_or(false) && d.get_prop(*c, "TeamColor").cloned() == tc);
+        return Some(found.map(Wire::I).unwrap_or(Wire::Nil));
+    }
     if class == "Player" && (key == "Backpack" || key == "PlayerGui") {
         return Some(d.find_child_of_class(id, key).map(Wire::I).unwrap_or(Wire::Nil));
     }
@@ -489,14 +501,14 @@ fn can_run(d: &DataModel, id: InstId) -> bool {
         Some(i) if !i.destroyed => i,
         _ => return false,
     };
-    if i.class != "Script" || matches!(i.props.get("Disabled"), Some(Val::Bool(true))) {
+    if (i.class != "Script" && i.class != "CoreScript") || matches!(i.props.get("Disabled"), Some(Val::Bool(true))) {
         return false;
     }
     let mut cur = i.parent;
     let mut guard = 0;
     while let Some(c) = cur {
         if let Some(ci) = d.get(c) {
-            if matches!(ci.class.as_str(), "Workspace" | "ServerScriptService" | "Players") && d.services.get(&ci.class) == Some(&c) {
+            if matches!(ci.class.as_str(), "Workspace" | "ServerScriptService" | "Players" | "ScriptContext") && d.services.get(&ci.class) == Some(&c) {
                 return true;
             }
             if ci.class == "StarterPack" || ci.class == "StarterGui" {
@@ -561,7 +573,7 @@ fn after_parent_change(st: &Rc<RefCell<State>>, dm: &DataModel, id: InstId, old:
 impl Host {
     pub fn new(dm: Rc<RefCell<DataModel>>) -> mlua::Result<Host> {
         let lua = unsafe { Lua::unsafe_new() };
-        let st = Rc::new(RefCell::new(State { reqs: vec![], queue: vec![], subs: HashSet::new(), logs: vec![], running: HashSet::new(), t0: std::time::Instant::now() }));
+        let st = Rc::new(RefCell::new(State { reqs: vec![], queue: vec![], subs: HashSet::new(), logs: vec![], running: HashSet::new(), t0: std::time::Instant::now(), settings: None, user_settings: None }));
         let j = lua.create_table()?;
         {
             let dm = dm.clone();
@@ -701,7 +713,21 @@ impl Host {
                             };
                             ok(Wire::S(src))
                         }
-                        "__coreCode" | "__robloxLocked" => Ok(Value::Boolean(false)),
+                        "__robloxLocked" => {
+                            let b = d.services.get("CoreGui").map(|cg| *cg == id || d.is_descendant_of(id, *cg)).unwrap_or(false);
+                            Ok(Value::Boolean(b))
+                        }
+                        "__coreCode" => {
+                            let mut b = d.get(id).map(|i| i.class == "CoreScript").unwrap_or(false);
+                            for svc in ["CoreGui", "RobloxReplicatedStorage"] {
+                                if let Some(cg) = d.services.get(svc) {
+                                    if d.is_descendant_of(id, *cg) {
+                                        b = true;
+                                    }
+                                }
+                            }
+                            Ok(Value::Boolean(b))
+                        }
                         "__TweenState" => ok(Wire::Nil),
                         "__DestroySelf" | "Destroy" | "destroy" | "Remove" | "remove" => {
                             let old = d.get(id).and_then(|i| i.parent);
@@ -832,6 +858,50 @@ impl Host {
                                 None => ok(Wire::Nil),
                             }
                         }
+                        "__settings" => {
+                            let cur = st2.borrow().settings;
+                            if let Some(g) = cur {
+                                return ok(Wire::I(g));
+                            }
+                            match d.create_any("GlobalSettings", None) {
+                                Ok(g) => {
+                                    d.set_prop_quiet(g, "Name", Val::Str("Settings".into()));
+                                    st2.borrow_mut().settings = Some(g);
+                                    ok(Wire::I(g))
+                                }
+                                Err(e) => err(&e),
+                            }
+                        }
+                        "SetEntries" => ok(Wire::Nil),
+                        "FilterStringAsync" | "FilterStringForPlayerAsync" | "FilterStringForBroadcast" => ok(args.first().cloned().unwrap_or(Wire::Nil)),
+                        "CanUserChatAsync" | "CanUsersChatAsync" => Ok(Value::Boolean(true)),
+                        "IsInGroup" | "isInGroup" => Ok(Value::Boolean(false)),
+                        "GetRankInGroup" => ok(Wire::N(0.0)),
+                        "GetRoleInGroup" => ok(Wire::S("Guest".into())),
+                        "IsUserFeatureEnabled" => Ok(Value::Boolean(false)),
+                        "__UserSettings" => {
+                            let cur = st2.borrow().user_settings;
+                            if let Some(g) = cur {
+                                return ok(Wire::I(g));
+                            }
+                            match d.create_any("UserSettings", None) {
+                                Ok(g) => {
+                                    d.set_prop_quiet(g, "Name", Val::Str("UserSettings".into()));
+                                    if let Ok(gs) = d.create_any("UserGameSettings", Some(g)) {
+                                        d.set_prop_quiet(gs, "Name", Val::Str("GameSettings".into()));
+                                    }
+                                    st2.borrow_mut().user_settings = Some(g);
+                                    ok(Wire::I(g))
+                                }
+                                Err(e) => err(&e),
+                            }
+                        }
+                        "GetFFlag" | "GetFastFlag" | "DefineFastFlag" => Ok(Value::Boolean(false)),
+                        "GetFVariable" | "GetFastVariable" => ok(Wire::S(String::new())),
+                        "IsRunning" | "IsServer" | "IsRunMode" => Ok(Value::Boolean(true)),
+                        "IsStudio" | "IsClient" | "IsEdit" => Ok(Value::Boolean(false)),
+                        "GetRobloxVersion" => ok(Wire::S("Swirl".into())),
+                        "AddCoreScriptLocal" => ok(Wire::Nil),
                         "GetService" | "service" | "getService" => {
                             let n = name_arg(0);
                             match d.service(&n) {

@@ -213,6 +213,9 @@ pub fn ops_for(dm: &DataModel, roots: &[InstId], journal: &[swirl_core::instance
                     if sent_new.iter().any(|s| *s == *id || dm.is_descendant_of(*id, *s)) {
                         continue;
                     }
+                    if new_roots.iter().any(|r| r != id && dm.is_descendant_of(*id, *r)) {
+                        continue;
+                    }
                     let mut recs = vec![];
                     subtree(dm, *id, &mut recs, viewer);
                     sent_new.insert(*id);

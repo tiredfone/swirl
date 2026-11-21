@@ -248,7 +248,7 @@ fn xml_tree(src: &str) -> Result<El, String> {
             continue;
         }
         count += 1;
-        if count > 500000 {
+        if count > 6000000 {
             return Err("xml has too many elements".into());
         }
         let el = El { tag: tag.to_string(), attrs: parse_attrs(&inner[tend..]), kids: vec![], text: String::new() };

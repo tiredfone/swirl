@@ -14,6 +14,7 @@ if [ -n "$WASM_OPT" ] && command -v wasm-opt >/dev/null 2>&1; then
     wasm-opt -O1 "$out.tmp/swirl_client_bg.wasm" -o "$out.tmp/swirl_client_bg.wasm.opt" && mv "$out.tmp/swirl_client_bg.wasm.opt" "$out.tmp/swirl_client_bg.wasm"
 fi
 cp crates/swirl-client/entry.js "$out.tmp/entry.js"
+cp crates/swirl-client/lua.js "$out.tmp/lua.js"
 cat > "$out.tmp/manifest.json" <<JSON
 {"version":"$version","era":[2012,2018],"entry":"entry.js","build":"$short","profile":"$profile"}
 JSON

@@ -4,6 +4,7 @@ use std::rc::Rc;
 use std::collections::HashMap;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use swirl_server::appearance;
+use swirl_server::character;
 use swirl_server::fetch::Site;
 use swirl_server::game::Game;
 use swirl_server::redeem::Redeemer;
@@ -23,6 +24,7 @@ async fn main() {
         std::process::exit(2);
     }
     let era: i32 = arg("era").and_then(|s| s.parse().ok()).unwrap_or(2012);
+    character::set_content_dir(&arg("chocolate").unwrap_or("/var/www/html/chocolate".into()));
     let assets = arg("assets").unwrap_or("/var/www/assets".into());
     let redeemer: Option<Rc<Redeemer>> = match (arg("redeem-url"), arg("redeem-key-file")) {
         (Some(u), Some(f)) => {

@@ -80,6 +80,9 @@ struct State {
     textures: HashMap<String, Option<web_sys::WebGlTexture>>,
     requested: HashSet<String>,
     remotes: Vec<String>,
+    tap: Vec<String>,
+    eye: [f32; 3],
+    view_fov: f32,
     queue: Vec<(String, String)>,
 }
 
@@ -325,6 +328,9 @@ impl Client {
             textures: HashMap::new(),
             requested: HashSet::new(),
             remotes: vec![],
+            tap: vec![],
+            eye: [0.0, 0.0, 0.0],
+            view_fov: 1.0,
             queue: vec![],
         }));
         let s2 = st.clone();
@@ -385,12 +391,10 @@ impl Client {
         let on = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |e: web_sys::MessageEvent| {
             if let Some(t) = e.data().as_string() {
                 let mut st = s.borrow_mut();
+                if st.tap.len() < 6000 {
+                    st.tap.push(t.clone());
+                }
                 if let Some(kind) = st.world.apply(&t) {
-                    if matches!(kind.as_str(), "re" | "rfc" | "rfr" | "chat" | "sys" | "fre") {
-                        if st.remotes.len() < 500 {
-                            st.remotes.push(t.clone());
-                        }
-                    }
                     if kind == "init" {
                         st.fitted = false;
                         st.status = "Loaded".into();
@@ -515,6 +519,17 @@ impl Client {
         serde_json::Value::Array(items).to_string()
     }
 
+    pub fn take_tap(&self) -> String {
+        let mut st = self.st.borrow_mut();
+        let v: Vec<String> = std::mem::take(&mut st.tap);
+        serde_json::Value::Array(v.into_iter().map(serde_json::Value::String).collect()).to_string()
+    }
+
+    pub fn camera_pose(&self) -> String {
+        let st = self.st.borrow();
+        format!("[{},{},{},{},{},{},{}]", st.eye[0], st.eye[1], st.eye[2], st.target[0], st.target[1], st.target[2], st.view_fov)
+    }
+
     pub fn take_remote(&self) -> String {
         let mut st = self.st.borrow_mut();
         let v: Vec<String> = std::mem::take(&mut st.remotes);
@@ -631,6 +646,7 @@ impl Client {
             st.target[1] + st.dist * st.pitch.sin(),
             st.target[2] + st.dist * st.pitch.cos() * st.yaw.cos(),
         ];
+        st.eye = eye;
         let proj = mat::perspective(1.0, w as f32 / h as f32, 0.5, 20000.0);
         let view = mat::look_at(eye, st.target, [0.0, 1.0, 0.0]);
         let vp = mat::mul(&proj, &view);
