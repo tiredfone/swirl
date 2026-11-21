@@ -16,7 +16,7 @@ The main session plans, checks results and talks to the owner. Subagents read, w
 
 Use the Agent tool with `model: "sonnet"` and `run_in_background: true`. The prompt must stand alone and give:
 
-1. Where and what: "Swirl at /var/www/swirl, a Rust rewrite of Chocolate (/var/www/html/chocolate) and vanilla (/var/www/html/core/vanilla-rcc)." Tell it to read /var/www/swirl/CLAUDE.md and PLAN.md first, and `export PATH=$HOME/.cargo/bin:$PATH`.
+1. Where and what: "Swirl at /var/www/swirl, a Rust rewrite of Chocolate (/var/www/html/chocolate) and the PHP renderer it replaced (kept untracked in tools/parity/php-ref for parity checks)." Tell it to read /var/www/swirl/CLAUDE.md and PLAN.md first, and `export PATH=$HOME/.cargo/bin:$PATH`.
 2. The rules: no code comments, never print secrets or read core/config.php, do not modify /var/www/html or /var/www/assets, do not touch ports 4201 and 4202 or the database, read-only fetches only.
 3. The task: the module, the source files, what is already ported, the PLAN.md row.
 4. How to verify: `cargo test`, the `render-parity` skill, PNGs under /tmp/swirl viewed with the Read tool.

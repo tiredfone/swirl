@@ -150,6 +150,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
+name = "byteorder-lite"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
+
+[[package]]
 name = "bytes"
 version = "1.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -201,6 +207,12 @@ checksum = "0ced0551234e87afee12411d535648dd89d2e7f34c78b753395567aff3d447ff"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "color_quant"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
 
 [[package]]
 name = "combine"
@@ -610,6 +622,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gif"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ae047235e33e2829703574b54fdec96bfbad892062d97fed2f76022287de61b"
+dependencies = [
+ "color_quant",
+ "weezl",
+]
+
+[[package]]
 name = "gl_generator"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -827,6 +849,16 @@ checksum = "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
+]
+
+[[package]]
+name = "image-webp"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
+dependencies = [
+ "byteorder-lite",
+ "quick-error",
 ]
 
 [[package]]
@@ -1585,6 +1617,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "quick-error"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2026,8 +2064,9 @@ dependencies = [
 
 [[package]]
 name = "swirl-client"
-version = "1.12.0"
+version = "1.13.0"
 dependencies = [
+ "serde_json",
  "swirl-net",
  "wasm-bindgen",
  "web-sys",
@@ -2035,7 +2074,7 @@ dependencies = [
 
 [[package]]
 name = "swirl-core"
-version = "1.12.0"
+version = "1.13.0"
 dependencies = [
  "ruzstd",
  "serde_json",
@@ -2059,15 +2098,16 @@ dependencies = [
 
 [[package]]
 name = "swirl-lua"
-version = "1.12.0"
+version = "1.13.0"
 dependencies = [
  "mlua",
+ "serde_json",
  "swirl-core",
 ]
 
 [[package]]
 name = "swirl-net"
-version = "1.12.0"
+version = "1.13.0"
 dependencies = [
  "serde_json",
  "swirl-core",
@@ -2075,15 +2115,17 @@ dependencies = [
 
 [[package]]
 name = "swirl-physics"
-version = "1.12.0"
+version = "1.13.0"
 dependencies = [
  "swirl-core",
 ]
 
 [[package]]
 name = "swirl-render"
-version = "1.12.0"
+version = "1.13.0"
 dependencies = [
+ "gif",
+ "image-webp",
  "jpeg-decoder",
  "png",
  "regex",
@@ -2093,7 +2135,7 @@ dependencies = [
 
 [[package]]
 name = "swirl-server"
-version = "1.12.0"
+version = "1.13.0"
 dependencies = [
  "futures-util",
  "serde_json",
@@ -2105,7 +2147,7 @@ dependencies = [
 
 [[package]]
 name = "swirl-vanilla"
-version = "1.12.0"
+version = "1.13.0"
 dependencies = [
  "png",
  "swirl-core",
@@ -2524,6 +2566,12 @@ checksum = "7265c9301c16a8711c992c2d8da90ee77ef54b1ed51482d6dfeb00dc756b1297"
 dependencies = [
  "rustls-pki-types",
 ]
+
+[[package]]
+name = "weezl"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "which"

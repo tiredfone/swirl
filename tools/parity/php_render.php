@@ -1,6 +1,6 @@
 <?php
 $a = getopt('', ['ids::', 'colors::', 'out:', 'size::', 'view::', 'rig::', 'stance::', 'exact::', 'smooth::', 'scale::', 'pose::', 'item::', 'with::', 'zoom::', 'yaw::', 'pitch::']);
-$vr = getenv('VANILLA_DIR') ?: '/var/www/html/core/vanilla-rcc';
+$vr = getenv('VANILLA_DIR') ?: '/var/www/swirl/tools/parity/php-ref';
 require_once $vr . '/src/Vanilla.php';
 @ini_set('memory_limit', '1500M');
 $root = getenv('ASSET_DIR') ?: '/var/www/assets';

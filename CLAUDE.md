@@ -34,11 +34,11 @@ Rust rewrite of Chocolate (browser game client and node game server) and vanilla
 
 ## Status
 
-See PLAN.md. Avatars (R6 and R15, scale, pose, stances, packages), headshots, animation thumbnails and item thumbnails are ported and match PHP's default renderer (see the parity table). Model, mesh and place scenes are not ported and stay on PHP. Solar calls the `swirl-vanilla` binary through `core/class/Arbiter.php` and `core/vanilla-rcc/avatar.php` only while `/var/www/html/core/swirl.enabled` exists, and falls back to PHP on any error. Exit codes: 3 item error, 4 unsupported format, 5 asset not on local disk.
+See PLAN.md. Everything Solar renders is ported and Solar uses only Swirl (no PHP fallback, no toggle file): avatars (R6 and R15, scale, pose, stances, packages), headshots, animation, item, model, mesh and place thumbnails (era, terrain parts, Hint and Message overlays), Draco meshes and GIF, WebP and BMP textures. The 2016 renderer is not ported (Solar never selects it). The binary is `bin/swirl` and Solar calls it through `core/class/Swirl.php`, with render data in `/var/www/assets/render-data` (`--data`, never in this repository). Subcommands: `mesh-convert <in> <out>` and `mesh-json <in> <out>` (Solar's mesh converter, `version 1.00` output, byte-identical to the old PHP), `body-colors <file>` and `character-colors <file>` (six `#rrggbb` colours), `image-png <in> <out>`, `diff`, `dump`. Options `--extra-assets=DIR`, `--allow-missing` (exit 0 despite `missing: <id>` lines on stderr) and `--smooth=0`. Exit codes: 2 unknown option, 3 item error, 4 unsupported format, 5 asset not on local disk.
 
 ## Installing for Solar
 
-Solar runs `/var/www/swirl/bin/swirl-vanilla`, never the build dir. `tools/install.sh` builds, runs five parity checks against PHP (every channel must stay under 0.5 mean error) and only then copies the binary to `bin/` through a temp file and `mv`. Run it after every renderer change that should go live; `bin/` is not in git.
+Solar runs `/var/www/swirl/bin/swirl`, never the build dir. `tools/install.sh` builds `swirl-vanilla` (the package that produces the `swirl` binary), runs the parity gates against a frozen PHP copy in `tools/parity/php-ref` (untracked, git-ignored; its `data` is a symlink to `/var/www/assets/render-data`): five avatar and item checks (every channel under 0.5 mean error), model, place, mesh and place-overlay scene checks, WebP, GIF and BMP decode checks (exact), and `mesh-convert` against the sha256 hashes in `tools/parity/mesh-golden.txt`; only then it copies the binary to `bin/` through a temp file and `mv`. Run it after every renderer change that should go live; `bin/` is not in git.
 
 ## Client builds
 

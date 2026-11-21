@@ -1011,6 +1011,10 @@ fn sky_pixels(faces: &[Img], eye: V3, target: V3, fov: f64, w: usize, h: usize) 
     out
 }
 
+pub fn gd_resample_pub(src: &[u32], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u32> {
+    gd_resample(src, sw, sh, dw, dh)
+}
+
 fn gd_resample(src: &[u32], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u32> {
     let mut out = Vec::with_capacity(dw * dh);
     for y in 0..dh {
@@ -1131,7 +1135,7 @@ pub fn render_scene(ctx: &Ctx, base: &Base, req: &SceneReq) -> Result<(Vec<u8>, 
     let mut parts_for_sparkles: Vec<(CF, V3, Vec<Inst>)> = vec![];
     let mut thumb: Option<Inst> = None;
     let mut cam: Option<Inst> = None;
-    let mut overlays = false;
+    let mut overlays = crate::overlay::Overlays { message: None, hint: None };
     if kind == "mesh" {
         let mesh = clean_mesh(&parse_mesh2016(&req.bytes)?);
         items = vec![SItem { cf: CF::identity(), scale: [1.0; 3], off: [0.0; 3], color: [0.64, 0.64, 0.66], alpha: 1.0, tex: None, tex_url: None, smooth: true, size: None, refl: 0.0, mesh: Rc::new(mesh), tiles: None, unlit: false, decal: false }];
@@ -1194,8 +1198,12 @@ pub fn render_scene(ctx: &Ctx, base: &Base, req: &SceneReq) -> Result<(Vec<u8>, 
             }
             if kind == "place" && (x.cls == "Hint" || x.cls == "Message") {
                 if let Some(Value::Str(t)) = x.props.get("Text") {
-                    if !t.trim().is_empty() {
-                        overlays = true;
+                    let t = t.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\0' | '\x0b'));
+                    if !t.is_empty() {
+                        let slot = if x.cls == "Hint" { &mut overlays.hint } else { &mut overlays.message };
+                        if slot.is_none() {
+                            *slot = Some(t.to_string());
+                        }
                     }
                 }
             }
@@ -1207,9 +1215,6 @@ pub fn render_scene(ctx: &Ctx, base: &Base, req: &SceneReq) -> Result<(Vec<u8>, 
         }
         if parts.is_empty() {
             return Err(format!("nothing to draw in this {}", kind));
-        }
-        if overlays {
-            return Err("not ported: scene overlays".into());
         }
         cam = saved.or(cam);
         let part_list: Vec<Inst> = parts.into_iter().map(|p| p.0).collect();
@@ -1256,6 +1261,9 @@ pub fn render_scene(ctx: &Ctx, base: &Base, req: &SceneReq) -> Result<(Vec<u8>, 
         c = gd_resample(&c, w, h, req.out_w, req.out_h);
         ow = req.out_w;
         oh = req.out_h;
+    }
+    if overlays.message.is_some() || overlays.hint.is_some() {
+        crate::overlay::apply(&mut c, ow, oh, &overlays, &ctx.data);
     }
     Ok((encode_gd_png(&c, ow, oh), notes))
 }

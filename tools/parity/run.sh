@@ -5,7 +5,7 @@ export PATH=$HOME/.cargo/bin:$PATH
 out=/tmp/swirl
 mkdir -p $out
 here=$(dirname "$0")
-bin=/var/www/swirl/target/release/swirl-vanilla
+bin=/var/www/swirl/target/release/swirl
 args="$*"
 php $here/php_render.php --out=$out/$name.php.png $args 2>&1 | grep -v libpng
 $bin --out=$out/$name.swirl.png $args 2>&1 | grep -v "^$"

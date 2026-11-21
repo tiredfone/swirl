@@ -4,8 +4,8 @@ Swirl is the Rust rewrite of Chocolate (game client and server) and vanilla (sof
 
 ## Phases
 
-1. vanilla to parity: done for avatars, headshots, animations, R15, items, model, mesh and place scenes (with era and terrain parts). Remaining: Draco meshes, WebP/GIF textures, 2016 renderer, scene Hint/Message overlays, jpg/webp output; these exit 4 and fall back to PHP.
-2. Switch Solar renders to Swirl behind one toggle file (`/var/www/html/core/swirl.enabled`) with PHP vanilla as the fallback. Code is in place and off by default; see Solar switch below.
+1. vanilla to parity: done for avatars, headshots, animations, R15, items, model, mesh and place scenes (with era and terrain parts). Draco meshes, WebP/GIF/BMP textures, scene Hint/Message overlays and a `--smooth=0` option are done; jpg/webp output is done in Solar's endpoint with GD; the 2016 renderer is dropped (Solar never selects it).
+2. Switch Solar renders to Swirl: done. Solar calls only `bin/swirl`; the PHP renderer and the toggle file are gone; see Solar switch below.
 3. 3D views. Finding: the site's 3D views (`avatar3d.js`, `chocolate/client/avatarview.js`) never call vanilla or Arbiter; they build the character in the browser from `/asset` data with chocolate's own renderer, so they keep working unchanged while renders move to Swirl. The Swirl-driven viewer is part of phase 5 (swirl-client compiled to wasm). Original idea, kept for phase 5: `swirl-vanilla` gets a `scene` mode that prints the data the viewer needs (per-part CFrames from `items::build_look`, converted meshes as typed arrays, textures as PNG URLs, body colours, stance), served next to the render endpoint. `js/mobile/avatar3d.js` asks for it and falls back to the current chocolate `avatarview.js` path on any error. Later, `swirl-render` compiled to wasm replaces the JS viewer. Not started.
 4. swirl-core and swirl-server: instance tree, class tables, rbxl/rbxm readers, Lua host (mlua, lua51 + vendored), physics, humanoid, replication, WebSocket protocol identical to `chocolate/server`.
 5. swirl-client (wasm32-unknown-unknown + wasm-bindgen, WebGL2 via wgpu or raw web-sys), 2012 and 2018 eras. The JS client keeps working against the Swirl server during the transition.
@@ -20,7 +20,7 @@ Swirl is the Rust rewrite of Chocolate (game client and server) and vanilla (sof
 | `Rbxm.php` (binary, LZ4, zstd) | `swirl-core/rbx.rs` | done; tree and property counts match PHP on 8 real binary models (only invalid-UTF-8 names differ) |
 | `Img.php` | `swirl-render/img.rs` | PNG and JPEG; WebP, GIF, BMP todo (flagged unsupported); GD alpha quantisation matched; GD `imagescale` not matched exactly |
 | `Texture.php` | `swirl-render/texture.rs` | done |
-| `Meshes.php` | `swirl-render/mesh.rs` | v1 to v5 and uncompressed v6/v7 done; Draco todo (reported as unsupported so Solar falls back) |
+| `Meshes.php` | `swirl-render/mesh.rs` | v1 to v5 and uncompressed v6/v7 done; Draco done (`swirl-core/draco.rs`, shared with `meshconv.rs`) |
 | `LookBuilder.php` (clothes, face, hats, gear, welds, decals) | `swirl-render/look.rs`, `items.rs` | done except material tiles, `packageGripOf` |
 | `Scene.php` draw (body, head views), `setup` | `swirl-render/scene.rs`, `raster.rs` | done |
 | `ReferenceRaster.php` | `swirl-render/raster.rs` | done (bit exact vs PHP `exact`) |
@@ -30,7 +30,7 @@ Swirl is the Rust rewrite of Chocolate (game client and server) and vanilla (sof
 | `ItemRender.php` | `swirl-render/body.rs`, `items.rs` | done: avatar base, item thumbnails (items, head, packages, thumbnail cameras) |
 | `SceneRender.php` (places, sky, materials, terrain parts, eras) | `swirl-render/place.rs` | todo |
 | `Particles*.php` | `swirl-render/particles.rs` | todo |
-| `Vanilla.php`, `avatar.php` entry | `swirl-vanilla` | CLI done (ids, item, with, colors, size, view, rig, scale, pose, stance, straight-legs); exit 4 for unsupported formats, 5 for assets missing locally, 3 for item errors |
+| `Vanilla.php`, `avatar.php` entry | `swirl-vanilla` (binary `swirl`) | CLI done (ids, item, with, colors, size, view, rig, scale, pose, stance, straight-legs); exit 4 for unsupported formats, 5 for assets missing locally, 3 for item errors |
 | `CharApp.php`, `Net.php`, `PngStream.php` | `swirl-vanilla` | todo (Arbiter passes ids and colours directly, so charapp fetching is low priority) |
 
 ## Chocolate mapping (JS to Rust)
@@ -58,11 +58,11 @@ What stays JS for now: the Studio UI, CoreScripts (Lua, run on the Lua host), co
 
 ## Parity method
 
-`tools/parity/run.sh <name> <options>` renders with PHP vanilla (`tools/parity/php_render.php`: read-only fetcher over `/var/www/assets/assets` then `/cache`, throwaway cache dir under /tmp, never touches the live cache or slot locks) and with `swirl-vanilla`, then prints a pixel diff. `PARITY_EXACT=1` also renders PHP with `exact` (the reference rasteriser) and diffs against that, which isolates port errors from the fast-rasteriser approximation. Outputs are in `/tmp/swirl/<name>.{php,phpexact,swirl,diff,diffexact}.png`.
+`tools/parity/run.sh <name> <options>` renders with the frozen PHP reference in `tools/parity/php-ref` (`tools/parity/php_render.php`: read-only fetcher over `/var/www/assets/assets` then `/cache`, throwaway cache dir under /tmp, never touches the live cache or slot locks) and with `swirl-vanilla`, then prints a pixel diff. `PARITY_EXACT=1` also renders PHP with `exact` (the reference rasteriser) and diffs against that, which isolates port errors from the fast-rasteriser approximation. Outputs are in `/tmp/swirl/<name>.{php,phpexact,swirl,diff,diffexact}.png`.
 
 ## Solar switch
 
-`core/class/Arbiter.php` (`swirlRender`, used by avatar, headshot, animation, R15 package and item renders) and `core/vanilla-rcc/avatar.php` (`swirl_png`, `/api/v1/render` for 2012, no zoom/yaw/pitch, png, smooth) run `/var/www/swirl/target/release/swirl-vanilla` as a child process with an argument list (no shell), a 45 second limit and a temp PNG under /tmp. Any non-zero exit, timeout or empty image falls back to the PHP renderer, and Arbiter logs `swirl fallback code=N` to render.log. Exit codes: 3 item error, 4 unsupported asset format, 5 asset not on local disk (Solar's PHP path then fetches it over HTTP as before). The switch is the file `/var/www/html/core/swirl.enabled`: create it to turn Swirl on, delete it to turn it off at once. It does not exist yet. `RENDER_VERSION` in avatar.php was bumped to `vanilla-1.7-lighting-12`. Model, mesh and place renders go through `swirlScene` in Arbiter (place bytes and the terrain mesh blobs from `withTerrainParts` are written to /tmp and passed as `--scene-file` and `--content-dir`), with the same fallback. `tools/install.sh` also gates on a model, a place and a mesh parity check. The binary rejects unknown options (exit 2) so a stale binary can never answer a newer request wrongly.
+Done. `core/class/Swirl.php` in Solar runs `/var/www/swirl/bin/swirl` with an argument list (no shell, 45 second limit), `--data=/var/www/assets/render-data` and `--assets=SOLAR_ASSETS`. `Arbiter` (avatar, headshot, animation, R15 package, item, model, mesh and place renders) calls only Swirl; on a failure it keeps the old image and logs to render.log. Assets that are on neither `assets/` nor `cache/` are printed as `missing: <id>` on stderr; `Solar\Swirl::render` fetches them from `/asset` into a temporary directory passed as `--extra-assets` and runs again, at most twice. `/api/v1/render` is `router/api/render/v1.php` (2012 renderer only; png, jpg and webp through GD). `MeshConverter` uses `mesh-convert` and `mesh-json`, and the body-colour and character-colour helpers use `body-colors` and `character-colors`. Render cache busting is `SOLAR_RENDER_VERSION` in `core/render.php`. The binary rejects unknown options (exit 2) so a stale binary can never answer a newer request wrongly.
 
 ## Parity status
 

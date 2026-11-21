@@ -1,6 +1,6 @@
 <?php
 $a = getopt('', ['kind:', 'file:', 'size:', 'outsize:', 'era::', 'out:', 'content-dir::']);
-require_once '/var/www/html/core/vanilla-rcc/src/Vanilla.php';
+require_once '/var/www/swirl/tools/parity/php-ref/src/Vanilla.php';
 @ini_set('memory_limit', '1500M');
 $root = '/var/www/assets';
 $tmp = sys_get_temp_dir() . '/swirl-php-scene-' . getmypid();

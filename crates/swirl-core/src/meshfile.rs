@@ -9,7 +9,7 @@ pub struct Mesh {
 
 pub const MAX_MESH_VERTS: usize = 150000;
 
-fn php_float(s: &str) -> f64 {
+pub fn php_float(s: &str) -> f64 {
     let t = s.trim();
     let b = t.as_bytes();
     let mut i = 0;
@@ -201,33 +201,39 @@ fn parse_chunked(bytes: &[u8]) -> Result<Mesh, String> {
     if size < 8 {
         return Err("truncated mesh".into());
     }
-    if ver != 1 {
-        return Err("Draco meshes are not ported yet".into());
-    }
-    let nv = rd_u32(bytes, o)?;
-    let fo = o + 4 + nv * 40 + 4;
-    if fo > o + size {
-        return Err("truncated mesh".into());
-    }
-    let nf = rd_u32(bytes, fo - 4)?;
-    if fo + nf * 12 > o + size {
-        return Err("truncated mesh".into());
-    }
-    let mut pv = vec![];
-    let mut nv_ = vec![];
-    let mut uv_ = vec![];
-    for i in 0..nv {
-        let b = o + 4 + i * 40;
-        let f: Result<Vec<f64>, String> = (0..8).map(|k| rd_f32(bytes, b + k * 4)).collect();
-        let f = f?;
-        pv.push([f[0], f[1], f[2]]);
-        nv_.push([f[3], f[4], f[5]]);
-        uv_.push([f[6], f[7]]);
-    }
-    let mut faces = vec![];
-    for i in 0..nf {
-        faces.push([rd_u32(bytes, fo + i * 12)?, rd_u32(bytes, fo + i * 12 + 4)?, rd_u32(bytes, fo + i * 12 + 8)?]);
-    }
+    let (pv, nv_, uv_, faces): (Vec<V3>, Vec<Option<V3>>, Vec<Option<[f64; 2]>>, Vec<[usize; 3]>) = if ver != 1 {
+        let g = crate::draco::geometry(bytes, o, size)?;
+        let n = g.pos.len();
+        let nn = g.nrm.map(|v| v.into_iter().map(Some).collect()).unwrap_or_else(|| vec![None; n]);
+        let uu = g.uv.map(|v| v.into_iter().map(Some).collect()).unwrap_or_else(|| vec![None; n]);
+        (g.pos, nn, uu, g.faces)
+    } else {
+        let nv = rd_u32(bytes, o)?;
+        let fo = o + 4 + nv * 40 + 4;
+        if fo > o + size {
+            return Err("truncated mesh".into());
+        }
+        let nf = rd_u32(bytes, fo - 4)?;
+        if fo + nf * 12 > o + size {
+            return Err("truncated mesh".into());
+        }
+        let mut pv = vec![];
+        let mut nv_ = vec![];
+        let mut uv_ = vec![];
+        for i in 0..nv {
+            let b = o + 4 + i * 40;
+            let f: Result<Vec<f64>, String> = (0..8).map(|k| rd_f32(bytes, b + k * 4)).collect();
+            let f = f?;
+            pv.push([f[0], f[1], f[2]]);
+            nv_.push(Some([f[3], f[4], f[5]]));
+            uv_.push(Some([f[6], f[7]]));
+        }
+        let mut faces = vec![];
+        for i in 0..nf {
+            faces.push([rd_u32(bytes, fo + i * 12)?, rd_u32(bytes, fo + i * 12 + 4)?, rd_u32(bytes, fo + i * 12 + 8)?]);
+        }
+        (pv, nv_, uv_, faces)
+    };
     let mut from = 0;
     let mut to = faces.len();
     if lods.len() >= 2 && lods[0] < lods[1] && lods[1] <= to {
@@ -242,8 +248,11 @@ fn parse_chunked(bytes: &[u8]) -> Result<Mesh, String> {
         for &i in &faces[t] {
             let p = pv.get(i).ok_or("bad mesh index")?;
             m.pos.push(*p);
-            m.nrm.push(nv_[i]);
-            m.uv.push([uv_[i][0], 1.0 - uv_[i][1]]);
+            m.nrm.push(nv_[i].unwrap_or([0.0, 1.0, 0.0]));
+            m.uv.push(match uv_[i] {
+                Some(t) => [t[0], 1.0 - t[1]],
+                None => [0.0, 0.0],
+            });
         }
     }
     Ok(m)

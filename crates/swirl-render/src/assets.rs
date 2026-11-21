@@ -12,6 +12,13 @@ impl DirAssets {
     pub fn solar(root: &str) -> DirAssets {
         DirAssets { dirs: vec![PathBuf::from(format!("{}/assets", root)), PathBuf::from(format!("{}/cache", root))] }
     }
+
+    pub fn with_extra(mut self, extra: &str) -> DirAssets {
+        for d in extra.split(',').filter(|d| !d.is_empty()) {
+            self.dirs.push(PathBuf::from(d));
+        }
+        self
+    }
 }
 
 impl AssetSource for DirAssets {

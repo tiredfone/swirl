@@ -42,6 +42,15 @@ impl Img {
         if b.starts_with(b"\xff\xd8\xff") {
             return Img::decode_jpeg(b, max_side);
         }
+        if b.starts_with(b"GIF8") {
+            return Img::decode_gif(b, max_side);
+        }
+        if b.starts_with(b"RIFF") {
+            return Img::decode_webp(b, max_side);
+        }
+        if b.starts_with(b"BM") {
+            return Img::decode_bmp(b, max_side);
+        }
         if !b.starts_with(b"\x89PNG") {
             return None;
         }
@@ -75,6 +84,125 @@ impl Img {
             px.push((a8 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | bl as u32);
         }
         Some(Img { w, h, px })
+    }
+
+    fn from_rgba(w: usize, h: usize, rgba: &[u8], max_side: usize) -> Option<Img> {
+        if w < 1 || h < 1 || w > max_side || h > max_side || rgba.len() < w * h * 4 {
+            return None;
+        }
+        let mut px = Vec::with_capacity(w * h);
+        for i in 0..w * h {
+            let s = &rgba[i * 4..i * 4 + 4];
+            let a7 = 127 - (s[3] as u32 >> 1);
+            let a8 = if a7 == 0 {
+                255
+            } else if a7 == 127 {
+                0
+            } else {
+                (((127 - a7) as f64) * 255.0 / 127.0).round() as u32
+            };
+            px.push((a8 << 24) | ((s[0] as u32) << 16) | ((s[1] as u32) << 8) | s[2] as u32);
+        }
+        Some(Img { w, h, px })
+    }
+
+    fn decode_gif(b: &[u8], max_side: usize) -> Option<Img> {
+        let mut opts = gif::DecodeOptions::new();
+        opts.set_color_output(gif::ColorOutput::RGBA);
+        let mut d = opts.read_info(std::io::Cursor::new(b)).ok()?;
+        let (sw, sh) = (d.width() as usize, d.height() as usize);
+        let f = d.read_next_frame().ok()??;
+        let (fw, fh, fl, ft) = (f.width as usize, f.height as usize, f.left as usize, f.top as usize);
+        let mut rgba = vec![0u8; sw * sh * 4];
+        for y in 0..fh {
+            for x in 0..fw {
+                if x + fl < sw && y + ft < sh {
+                    let s = (y * fw + x) * 4;
+                    let t = ((y + ft) * sw + x + fl) * 4;
+                    rgba[t..t + 4].copy_from_slice(&f.buffer[s..s + 4]);
+                }
+            }
+        }
+        Img::from_rgba(sw, sh, &rgba, max_side)
+    }
+
+    fn decode_webp(b: &[u8], max_side: usize) -> Option<Img> {
+        let mut d = image_webp::WebPDecoder::new(std::io::Cursor::new(b)).ok()?;
+        let (w, h) = d.dimensions();
+        let (w, h) = (w as usize, h as usize);
+        if w > max_side || h > max_side {
+            return None;
+        }
+        let alpha = d.has_alpha();
+        let ch = if alpha { 4 } else { 3 };
+        let mut buf = vec![0u8; d.output_buffer_size()?];
+        d.read_image(&mut buf).ok()?;
+        let mut rgba = Vec::with_capacity(w * h * 4);
+        for i in 0..w * h {
+            rgba.extend_from_slice(&buf[i * ch..i * ch + 3]);
+            rgba.push(if alpha { buf[i * ch + 3] } else { 255 });
+        }
+        Img::from_rgba(w, h, &rgba, max_side)
+    }
+
+    fn decode_bmp(b: &[u8], max_side: usize) -> Option<Img> {
+        let le32 = |o: usize| -> Option<i64> { b.get(o..o + 4).map(|s| i32::from_le_bytes([s[0], s[1], s[2], s[3]]) as i64) };
+        let le16 = |o: usize| -> Option<usize> { b.get(o..o + 2).map(|s| u16::from_le_bytes([s[0], s[1]]) as usize) };
+        let off = le32(10)? as usize;
+        let hdr = le32(14)? as usize;
+        if hdr < 40 {
+            return None;
+        }
+        let w = le32(18)?;
+        let hraw = le32(22)?;
+        let bits = le16(28)?;
+        let comp = le32(30)?;
+        if comp != 0 && !(comp == 3 && bits == 32) {
+            return None;
+        }
+        let (w, h, top_down) = (w as usize, hraw.unsigned_abs() as usize, hraw < 0);
+        if w < 1 || h < 1 || w > max_side || h > max_side {
+            return None;
+        }
+        let mut palette: Vec<[u8; 3]> = vec![];
+        if bits <= 8 {
+            let n = match le32(46)? {
+                0 => 1usize << bits,
+                n => n as usize,
+            };
+            for i in 0..n {
+                let o = 14 + hdr + i * 4;
+                let s = b.get(o..o + 3)?;
+                palette.push([s[2], s[1], s[0]]);
+            }
+        }
+        let row = ((w * bits + 31) / 32) * 4;
+        let mut rgba = vec![0u8; w * h * 4];
+        for y in 0..h {
+            let sy = if top_down { y } else { h - 1 - y };
+            let base = off + sy * row;
+            for x in 0..w {
+                let (r, g, bl, a) = match bits {
+                    24 => {
+                        let s = b.get(base + x * 3..base + x * 3 + 3)?;
+                        (s[2], s[1], s[0], 255)
+                    }
+                    32 => {
+                        let s = b.get(base + x * 4..base + x * 4 + 4)?;
+                        (s[2], s[1], s[0], 255)
+                    }
+                    8 => {
+                        let i = *b.get(base + x)? as usize;
+                        let p = palette.get(i)?;
+                        (p[0], p[1], p[2], 255)
+                    }
+                    _ => return None,
+                };
+                let t = (y * w + x) * 4;
+                rgba[t..t + 4].copy_from_slice(&[r, g, bl, a]);
+            }
+        }
+        Img::from_rgba(w, h, &rgba, max_side)
     }
 
     fn decode_jpeg(b: &[u8], max_side: usize) -> Option<Img> {

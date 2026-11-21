@@ -11,6 +11,7 @@ pub struct Ctx<'a> {
     pub images: RefCell<HashMap<String, Option<Img>>>,
     pub unsupported: std::cell::Cell<bool>,
     pub missing: std::cell::Cell<bool>,
+    pub missing_ids: RefCell<Vec<String>>,
     pub content_dir: RefCell<Option<String>>,
 }
 
@@ -49,13 +50,17 @@ pub fn asset_id(r: &str) -> Option<String> {
 
 impl<'a> Ctx<'a> {
     pub fn new(src: &'a dyn AssetSource, data: &str) -> Ctx<'a> {
-        Ctx { src, data: data.to_string(), images: RefCell::new(HashMap::new()), unsupported: std::cell::Cell::new(false), missing: std::cell::Cell::new(false), content_dir: RefCell::new(None) }
+        Ctx { src, data: data.to_string(), images: RefCell::new(HashMap::new()), unsupported: std::cell::Cell::new(false), missing: std::cell::Cell::new(false), missing_ids: RefCell::new(vec![]), content_dir: RefCell::new(None) }
     }
 
     pub fn fetch(&self, id: &str) -> Option<Vec<u8>> {
         let r = self.src.fetch(id);
         if r.is_none() && !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) {
             self.missing.set(true);
+            let mut m = self.missing_ids.borrow_mut();
+            if !m.iter().any(|x| x == id) {
+                m.push(id.to_string());
+            }
         }
         r.filter(|b| b.len() <= 8 * 1024 * 1024)
     }
@@ -306,6 +311,60 @@ pub fn body_colors(roots: &[Inst]) -> Option<[[f64; 3]; 6]> {
                 out[j] = brick(*n as i64);
             }
         }
+    }
+    Some(out)
+}
+
+pub fn character_colors(roots: &[Inst]) -> Option<[[f64; 3]; 6]> {
+    fn find<'a>(list: &'a [Inst], depth: usize) -> Option<(&'a Inst, HashMap<String, &'a Inst>)> {
+        for x in list {
+            if x.cls == "Model" {
+                let mut names: HashMap<String, &Inst> = HashMap::new();
+                let mut hum = false;
+                for c in &x.children {
+                    if c.cls == "Humanoid" {
+                        hum = true;
+                    }
+                    if c.cls == "Part" || c.cls == "MeshPart" {
+                        names.insert(c.name.to_lowercase(), c);
+                    }
+                }
+                if hum && names.contains_key("head") && names.contains_key("torso") {
+                    return Some((x, names));
+                }
+            }
+            if depth < 6 {
+                if let Some(r) = find(&x.children, depth + 1) {
+                    return Some(r);
+                }
+            }
+        }
+        None
+    }
+    let (model, parts) = find(roots, 0)?;
+    for c in &model.children {
+        if c.cls != "BodyColors" {
+            continue;
+        }
+        let names = ["HeadColor", "TorsoColor", "LeftArmColor", "RightArmColor", "LeftLegColor", "RightLegColor"];
+        let mut out = [[0.0; 3]; 6];
+        for (j, n) in names.iter().enumerate() {
+            let v3 = c.props.get(&format!("{}3", n));
+            out[j] = match (v3, c.props.get(*n)) {
+                (Some(Value::Color3(r, g, b)), _) => [*r, *g, *b],
+                (_, Some(Value::Brick(b))) => brick(*b),
+                (_, Some(Value::Num(b))) => brick(*b as i64),
+                _ => brick(194),
+            };
+        }
+        return Some(out);
+    }
+    let mut out = [[0.0; 3]; 6];
+    for (j, n) in ["head", "torso", "left arm", "right arm", "left leg", "right leg"].iter().enumerate() {
+        out[j] = match parts.get(*n) {
+            Some(p) => crate::items::part_color(p),
+            None => brick(194),
+        };
     }
     Some(out)
 }

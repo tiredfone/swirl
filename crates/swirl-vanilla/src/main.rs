@@ -90,25 +90,96 @@ fn main() {
         }
         return;
     }
+    if raw.get(1).map(|s| s.as_str()) == Some("mesh-convert") || raw.get(1).map(|s| s.as_str()) == Some("mesh-json") {
+        let (inp, outp) = match (raw.get(2), raw.get(3)) {
+            (Some(i), Some(o)) => (i, o),
+            _ => {
+                eprintln!("error: usage: mesh-convert|mesh-json <in> <out>");
+                std::process::exit(2)
+            }
+        };
+        let data = std::fs::read(inp).unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(3)
+        });
+        if raw[1] == "mesh-convert" {
+            std::fs::write(outp, swirl_core::meshconv::convert_v100(&data)).unwrap();
+        } else {
+            match swirl_core::meshconv::parse(&data) {
+                Ok(Some(c)) => std::fs::write(outp, swirl_core::meshconv::to_json(&c)).unwrap(),
+                Ok(None) => {
+                    eprintln!("error: not a mesh");
+                    std::process::exit(4)
+                }
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    std::process::exit(3)
+                }
+            }
+        }
+        return;
+    }
+    if raw.get(1).map(|s| s.as_str()) == Some("image-png") && raw.len() >= 4 {
+        let data = std::fs::read(&raw[2]).unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(3)
+        });
+        match swirl_render::img::Img::decode(&data, 8192) {
+            Some(im) => {
+                let mut rgba = Vec::with_capacity(im.w * im.h * 4);
+                for p in &im.px {
+                    rgba.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8, (p >> 24) as u8]);
+                }
+                std::fs::write(&raw[3], swirl_render::img::encode_png(im.w, im.h, &rgba)).unwrap();
+            }
+            None => {
+                eprintln!("error: unsupported image");
+                std::process::exit(4)
+            }
+        }
+        return;
+    }
+    if raw.get(1).map(|s| s.as_str()) == Some("body-colors") || raw.get(1).map(|s| s.as_str()) == Some("character-colors") {
+        let b = std::fs::read(raw.get(2).map(|s| s.as_str()).unwrap_or("")).unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(3)
+        });
+        let tree = match swirl_core::rbx::parse(&b) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                std::process::exit(4)
+            }
+        };
+        let cols = if raw[1] == "body-colors" { swirl_render::look::body_colors(&tree.roots) } else { swirl_render::look::character_colors(&tree.roots) };
+        match cols {
+            Some(c) => {
+                let hex: Vec<String> = c.iter().map(|x| format!("#{:02x}{:02x}{:02x}", (x[0] * 255.0).round() as u32, (x[1] * 255.0).round() as u32, (x[2] * 255.0).round() as u32)).collect();
+                println!("{}", hex.join(","));
+                return;
+            }
+            None => std::process::exit(4),
+        }
+    }
     if raw.get(1).map(|s| s.as_str()) == Some("diff") {
         diff(&raw[2], &raw[3], raw.get(4).map(|s| s.as_str()));
         return;
     }
     let a = args();
-    let known = ["data", "assets", "out", "size", "view", "colors", "ids", "item", "with", "rig", "scale", "pose", "stance", "straight-legs", "exact", "zoom", "yaw", "pitch", "scene", "scene-file", "scene-size", "out-size", "era", "content-dir"];
+    let known = ["data", "assets", "out", "size", "view", "colors", "ids", "item", "with", "rig", "scale", "pose", "stance", "straight-legs", "exact", "zoom", "yaw", "pitch", "scene", "scene-file", "scene-size", "out-size", "era", "content-dir", "extra-assets", "allow-missing", "smooth"];
     for k in a.keys() {
         if !known.contains(&k.as_str()) {
             eprintln!("error: unknown option {}", k);
             std::process::exit(2);
         }
     }
-    let data = a.get("data").cloned().unwrap_or("/var/www/html/core/vanilla-rcc/data".into());
+    let data = a.get("data").cloned().unwrap_or("/var/www/assets/render-data".into());
     let root = a.get("assets").cloned().unwrap_or("/var/www/assets".into());
     let out = a.get("out").expect("--out required");
     let size = a.get("size").cloned().unwrap_or("352x352".into());
     let (w, h) = size.split_once('x').map(|(w, h)| (w.parse().unwrap(), h.parse().unwrap())).expect("bad size");
     let view = a.get("view").cloned().unwrap_or("body".into());
-    let src = DirAssets::solar(&root);
+    let src = DirAssets::solar(&root).with_extra(a.get("extra-assets").map(|s| s.as_str()).unwrap_or(""));
     let ctx = Ctx::new(&src, &data);
     let base = Base::load(&data).unwrap_or_else(|e| panic!("{}", e));
     let mut look = Look::empty();
@@ -152,6 +223,9 @@ fn main() {
         };
         *ctx.content_dir.borrow_mut() = req.content_dir.clone();
         let res = swirl_render::place::render_scene(&ctx, &base, &req);
+        for m in ctx.missing_ids.borrow().iter() {
+            eprintln!("missing: {}", m);
+        }
         if ctx.unsupported.get() {
             eprintln!("error: unsupported asset format");
             std::process::exit(4);
@@ -208,7 +282,10 @@ fn main() {
         std::process::exit(3)
     });
     let (cfs, base, btex) = (out_b.cfs, out_b.base, out_b.tex);
-    if ctx.missing.get() {
+    for m in ctx.missing_ids.borrow().iter() {
+        eprintln!("missing: {}", m);
+    }
+    if ctx.missing.get() && !a.contains_key("allow-missing") {
         eprintln!("error: asset missing locally");
         std::process::exit(5);
     }
@@ -219,7 +296,7 @@ fn main() {
     for n in &look.notes {
         eprintln!("note: {}", n);
     }
-    let png = draw(&base, &btex, out_b.r15.as_ref(), &look, &cfs, w, h, 4, &view, a.contains_key("exact"), [a.get("zoom").and_then(|s| s.parse().ok()).unwrap_or(1.0), a.get("yaw").and_then(|s| s.parse().ok()).unwrap_or(0.0), a.get("pitch").and_then(|s| s.parse().ok()).unwrap_or(0.0)]);
+    let png = draw(&base, &btex, out_b.r15.as_ref(), &look, &cfs, w, h, if a.get("smooth").map(|s| s.as_str()) == Some("0") { 1 } else { 4 }, &view, a.contains_key("exact"), [a.get("zoom").and_then(|s| s.parse().ok()).unwrap_or(1.0), a.get("yaw").and_then(|s| s.parse().ok()).unwrap_or(0.0), a.get("pitch").and_then(|s| s.parse().ok()).unwrap_or(0.0)]);
     std::fs::write(out, png).unwrap();
 }
 
@@ -227,6 +304,9 @@ fn src_fetch_item(ctx: &Ctx, id: &str) -> (Vec<String>, bool) {
     let body = match ctx.fetch(id) {
         Some(b) => b,
         None => {
+            for m in ctx.missing_ids.borrow().iter() {
+                eprintln!("missing: {}", m);
+            }
             eprintln!("error: item could not be fetched");
             std::process::exit(3)
         }

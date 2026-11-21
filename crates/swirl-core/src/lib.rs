@@ -1,7 +1,9 @@
 pub mod brickcolors;
 pub mod classes;
+pub mod draco;
 pub mod instance;
 pub mod math;
+pub mod meshconv;
 pub mod meshfile;
 pub mod rbx;
 
