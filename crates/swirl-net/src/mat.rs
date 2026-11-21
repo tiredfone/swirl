@@ -85,3 +85,17 @@ pub fn cf_yaw(pos: [f32; 3], theta: f32) -> Cf {
     let (s, c) = theta.sin_cos();
     [pos[0], pos[1], pos[2], c, 0.0, s, 0.0, 1.0, 0.0, -s, 0.0, c]
 }
+
+pub fn cf_t(p: [f32; 3]) -> Cf {
+    [p[0], p[1], p[2], 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+}
+
+pub fn cf_rx(a: f32) -> Cf {
+    let (s, c) = a.sin_cos();
+    [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, c, -s, 0.0, s, c]
+}
+
+pub fn pivot_rotate(off: &Cf, pivot: [f32; 3], a: f32) -> Cf {
+    let neg = [-pivot[0], -pivot[1], -pivot[2]];
+    cf_mul(&cf_t(pivot), &cf_mul(&cf_rx(a), &cf_mul(&cf_t(neg), off)))
+}

@@ -72,19 +72,20 @@ pub struct World {
     pub chars: HashMap<u32, CharRec>,
     pub tp_seq: i64,
     pub teleport: Option<[f32; 12]>,
+    pub t: f32,
     pub pending_own: Option<(u32, [f32; 12], i64)>,
 }
 
 pub struct Own {
     pub model: u32,
     pub torso: u32,
-    pub offsets: Vec<(u32, [f32; 12])>,
+    pub offsets: Vec<(u32, [f32; 12], u8)>,
     pub start: [f32; 12],
 }
 
 pub struct CharRec {
     pub torso: u32,
-    pub offsets: Vec<(u32, [f32; 12])>,
+    pub offsets: Vec<(u32, [f32; 12], u8)>,
 }
 
 fn arr(v: Option<&J>, n: usize) -> Option<Vec<f32>> {
@@ -213,7 +214,10 @@ impl World {
                                 for k in 0..12 {
                                     cf[k] = a[1 + k].as_f64().unwrap_or(0.0) as f32;
                                 }
-                                self.move_char(model, cf);
+                                let vx = a.get(13).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                                let vz = a.get(15).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                                let st = a.get(16).and_then(|v| v.as_u64()).unwrap_or(7) as u8;
+                                self.move_char(model, cf, (vx * vx + vz * vz).sqrt(), st);
                             }
                         }
                     }
@@ -305,7 +309,7 @@ impl World {
 
     pub fn is_own_part(&self, id: u32) -> bool {
         match &self.own {
-            Some(o) => o.torso == id || o.offsets.iter().any(|(p, _)| *p == id),
+            Some(o) => o.torso == id || o.offsets.iter().any(|(p, _, _)| *p == id),
             None => false,
         }
     }
@@ -351,12 +355,50 @@ impl World {
         parts.first().copied()
     }
 
-    fn offsets_for(&self, model: u32, torso: u32) -> Vec<(u32, [f32; 12])> {
+    fn offsets_for(&self, model: u32, torso: u32) -> Vec<(u32, [f32; 12], u8)> {
         let inv = crate::mat::cf_inv(&self.cf_of(torso));
-        self.model_parts(model).into_iter().filter(|p| *p != torso).map(|p| (p, crate::mat::cf_mul(&inv, &self.cf_of(p)))).collect()
+        self.model_parts(model)
+            .into_iter()
+            .filter(|p| *p != torso)
+            .map(|p| {
+                let name = self.insts.get(&p).and_then(|i| i.props.get("Name")).and_then(|v| v.as_str()).unwrap_or("");
+                let kind = match name {
+                    "Left Arm" => 1,
+                    "Right Arm" => 2,
+                    "Left Leg" => 3,
+                    "Right Leg" => 4,
+                    _ => 0,
+                };
+                (p, crate::mat::cf_mul(&inv, &self.cf_of(p)), kind)
+            })
+            .collect()
     }
 
-    fn move_char(&mut self, model: u32, cf: [f32; 12]) {
+    fn pose(&mut self, torso_cf: [f32; 12], offs: &[(u32, [f32; 12], u8)], speed: f32, state: u8) {
+        let amount = (speed / 6.0).clamp(0.0, 1.0);
+        let rate = (speed / 16.0).clamp(0.5, 1.6);
+        let swing = (self.t * 10.0 * rate).sin() * 0.9 * amount;
+        for (p, o, kind) in offs {
+            let a = match kind {
+                1 => swing,
+                2 => -swing,
+                3 => -swing,
+                4 => swing,
+                _ => 0.0,
+            };
+            let a = if (*kind == 1 || *kind == 2) && (state == 2 || state == 3) { 2.8 } else { a };
+            let rel = if *kind == 0 || a == 0.0 {
+                *o
+            } else {
+                let pivot = [o[0], o[1] + 1.0, o[2]];
+                crate::mat::pivot_rotate(o, pivot, a)
+            };
+            let w = crate::mat::cf_mul(&torso_cf, &rel);
+            self.set_cf(*p, &w);
+        }
+    }
+
+    fn move_char(&mut self, model: u32, cf: [f32; 12], speed: f32, state: u8) {
         if !self.chars.contains_key(&model) {
             let torso = match self.torso_of(model) {
                 Some(t) => t,
@@ -370,10 +412,7 @@ impl World {
             (c.torso, c.offsets.clone())
         };
         self.set_cf(torso, &cf);
-        for (p, o) in offs {
-            let w = crate::mat::cf_mul(&cf, &o);
-            self.set_cf(p, &w);
-        }
+        self.pose(cf, &offs, speed, state);
     }
 
     pub fn take_own(&mut self, model: u32, cf: [f32; 12], seq: i64) {
@@ -391,16 +430,13 @@ impl World {
         self.teleport = Some(cf);
     }
 
-    pub fn move_own(&mut self, cf: [f32; 12]) {
+    pub fn move_own(&mut self, cf: [f32; 12], speed: f32, state: u8) {
         let (torso, offs) = match &self.own {
             Some(o) => (o.torso, o.offsets.clone()),
             None => return,
         };
         self.set_cf(torso, &cf);
-        for (p, o) in offs {
-            let w = crate::mat::cf_mul(&cf, &o);
-            self.set_cf(p, &w);
-        }
+        self.pose(cf, &offs, speed, state);
     }
 
     pub fn colliders(&self) -> Vec<crate::controller::Obb> {

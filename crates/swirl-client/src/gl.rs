@@ -527,6 +527,7 @@ impl Client {
         }
         let dt = if st.last_t > 0.0 { ((now - st.last_t) / 1000.0).clamp(0.0, 0.1) as f32 } else { 0.0 };
         st.last_t = now;
+        st.world.t = (now / 1000.0) as f32;
         if st.world.own.is_some() {
             if let Some(cf) = st.world.teleport.take() {
                 let (ws, jp) = st.world.humanoid_of(st.world.own.as_ref().unwrap().model);
@@ -559,7 +560,9 @@ impl Client {
             if let Some(c) = st.ctl.as_ref() {
                 let cf = mat::cf_yaw(c.pos, c.yaw);
                 let (pos, vel, state) = (c.pos, c.vel, c.state);
-                st.world.move_own(cf);
+                st.world.t = (now / 1000.0) as f32;
+                let sp = (vel[0] * vel[0] + vel[2] * vel[2]).sqrt();
+                st.world.move_own(cf, sp, state);
                 st.target = match st.focus {
                     Some(f) => f,
                     None => [pos[0], pos[1] + 1.5, pos[2]],

@@ -112,3 +112,8 @@ Note: the live server kicks the test account if it reconnects too quickly ("star
 - `swirl-desktop` 1.0: native `SolarPlayer`: redeem (`POST /api/v1/client/launch/redeem`), join over wss (tungstenite + rustls), `swirl-net` World and Controller, glow renderer with the wasm client's box shaders. Verified through `--offscreen` (EGL pbuffer under Xvfb) against swirl-server and against a real launch token for place 564.
 - Not verified: the winit window path (this server lacks `libxkbcommon-x11`), anything on Windows (no mingw linker; `cargo check` for the Windows target passes with a dummy C compiler), the protocol handoff from a browser.
 - Next: move the game loop (`swirl-desktop/src/game.rs`) and the shape meshes (`shapes.rs`) into `swirl-net` so the wasm client and the desktop client share them, then follow the wasm client's features (meshes, textures, sky, GUI). Code signing and a signed manifest for launcher self-update. Windows build and test. A site download page for the launchers.
+
+## Client 1.10 and 1.11
+
+1.10: Sky box from the Sky instance (or Chocolate's default `content/sky` faces) drawn per pixel with vanilla's face mapping, scene lighting from the Lighting instance (vanilla's `lightingFrom`), and Decal and Texture instances drawn on part faces. 1.11: procedural limb swing for R6 characters (own and others, from speed and state; arms up when airborne). The limb angles are not sent to the server because the Motor angle convention of Chocolate's `j` field is not matched yet.
+Release rules: only real versions are published; the release script runs the walk gate on place 564 and the mesh gate on place 972, waiting 80 s between joins.

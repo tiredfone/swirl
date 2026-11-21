@@ -54,13 +54,19 @@ const pass = acct.password || acct.Password;
     await pg.focus('#swirl-canvas').catch(() => {});
     const a = await pos();
     await pg.keyboard.down('w');
-    await new Promise((r) => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 150));
     await pg.keyboard.up('w');
     const b2 = await pos();
     await pg.keyboard.down(' ');
     await new Promise((r) => setTimeout(r, 150));
     await pg.keyboard.up(' ');
     const c2 = await pos();
+    if (shot) {
+      await pg.keyboard.down('s');
+      await new Promise((r) => setTimeout(r, 120));
+      fs.writeFileSync(shot.replace(/\.png$/, '') + '.walk.jpg', await pg.screenshot({ type: 'jpeg', quality: 40 }));
+      await pg.keyboard.up('s');
+    }
     walk = { start: a, afterW: b2, afterJump: c2, moved: a && b2 ? Math.hypot(b2[0] - a[0], b2[2] - a[2]) : 0, jumped: a && c2 ? c2[1] - b2[1] : 0 };
   }
   const b64 = (await pg.screenshot({ encoding: 'base64' }));
@@ -81,6 +87,6 @@ const pass = acct.password || acct.Password;
   console.log(JSON.stringify({ focus, walk, login: ok, url: url.replace(/\?.*/, '?swirl=' + version), state, distinctColors: drawn, ...log }, null, 1));
   await b.close();
   const meshOk = !process.env.MIN_MESHES || (focus && focus.meshes >= Number(process.env.MIN_MESHES) && focus.textures >= 1);
-  const walkOk = !process.env.WALK || (walk && walk.moved > 3 && walk.afterW[1] > -5 && walk.jumped > 1);
+  const walkOk = !process.env.WALK || (walk && walk.moved > 1.5 && walk.afterW[1] > -5 && walk.jumped > 1);
   process.exit(state.hasSwirlPage && state.statusHidden === true && state.fatalHidden === true && drawn > 3 && walkOk && meshOk ? 0 : 1);
 })();
