@@ -111,11 +111,18 @@ fn main() {
     }
     }
     if let Some(c) = a.get("colors") {
-        let v: Vec<i64> = c.split(',').map(|s| s.trim().parse().unwrap()).collect();
+        let v: Vec<&str> = c.split(',').collect();
         assert!(v.len() == 6, "six colours");
         let names = [HEAD, TORSO, LARM, RARM, LLEG, RLEG];
         for (j, k) in names.iter().enumerate() {
-            look.colors[*k] = parse_color_int(v[j]);
+            let s = v[j].trim();
+            look.colors[*k] = match s.strip_prefix('#') {
+                Some(h) if h.len() == 6 => {
+                    let n = u32::from_str_radix(h, 16).unwrap_or(0);
+                    [((n >> 16) & 255) as f64 / 255.0, ((n >> 8) & 255) as f64 / 255.0, (n & 255) as f64 / 255.0]
+                }
+                _ => parse_color_int(s.parse().unwrap_or(194)),
+            };
         }
     }
     let item_mode = a.contains_key("item");
@@ -149,12 +156,17 @@ fn main() {
         pose: a.get("pose").cloned(),
         item: item_mode,
         keep_pkg_colors: is_pkg,
+        straight_legs: a.contains_key("straight-legs"),
     };
     let out_b = swirl_render::items::build_look(&ctx, &base, &mut look, &ids, &opts).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
         std::process::exit(3)
     });
     let (cfs, base, btex) = (out_b.cfs, out_b.base, out_b.tex);
+    if ctx.missing.get() {
+        eprintln!("error: asset missing locally");
+        std::process::exit(5);
+    }
     if ctx.unsupported.get() {
         eprintln!("error: unsupported asset format");
         std::process::exit(4);

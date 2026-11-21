@@ -116,7 +116,7 @@ pub fn parse_mesh(bytes: &[u8]) -> Result<Mesh, String> {
         return Ok(m);
     }
     if major == 6 || major == 7 {
-        return Err("chunked meshes (6.x, 7.x) are not ported yet".into());
+        return parse_chunked(bytes);
     }
     let at = 13usize;
     let len = bytes.len();
@@ -504,4 +504,81 @@ pub fn alpha_cuts_out(img: &crate::img::Img, uv: &[[f64; 2]]) -> bool {
         i += 3;
     }
     tot > 0 && clear as f64 / tot as f64 <= 0.9
+}
+
+fn parse_chunked(bytes: &[u8]) -> Result<Mesh, String> {
+    let mut o = 13usize;
+    let n = bytes.len();
+    let mut core: Option<(usize, usize, usize)> = None;
+    let mut lods: Vec<usize> = vec![];
+    while o + 16 <= n {
+        let name: Vec<u8> = bytes[o..o + 8].iter().copied().take_while(|&b| b != 0).collect();
+        let ver = rd_u32(bytes, o + 8)?;
+        let size = rd_u32(bytes, o + 12)?;
+        o += 16;
+        if o + size > n {
+            return Err("truncated mesh".into());
+        }
+        if name == b"COREMESH" {
+            core = Some((ver, o, size));
+        } else if name == b"LODS" && size >= 7 {
+            let cnt = rd_u32(bytes, o + 3)?;
+            if cnt < 64 && 7 + cnt * 4 <= size {
+                for i in 0..cnt {
+                    lods.push(rd_u32(bytes, o + 7 + i * 4)?);
+                }
+            }
+        }
+        o += size;
+    }
+    let (ver, o, size) = core.ok_or("mesh has no geometry")?;
+    if size < 8 {
+        return Err("truncated mesh".into());
+    }
+    if ver != 1 {
+        return Err("Draco meshes are not ported yet".into());
+    }
+    let nv = rd_u32(bytes, o)?;
+    let fo = o + 4 + nv * 40 + 4;
+    if fo > o + size {
+        return Err("truncated mesh".into());
+    }
+    let nf = rd_u32(bytes, fo - 4)?;
+    if fo + nf * 12 > o + size {
+        return Err("truncated mesh".into());
+    }
+    let mut pv = vec![];
+    let mut nv_ = vec![];
+    let mut uv_ = vec![];
+    for i in 0..nv {
+        let b = o + 4 + i * 40;
+        let f: Result<Vec<f64>, String> = (0..8).map(|k| rd_f32(bytes, b + k * 4)).collect();
+        let f = f?;
+        pv.push([f[0], f[1], f[2]]);
+        nv_.push([f[3], f[4], f[5]]);
+        uv_.push([f[6], f[7]]);
+    }
+    let mut faces = vec![];
+    for i in 0..nf {
+        faces.push([rd_u32(bytes, fo + i * 12)?, rd_u32(bytes, fo + i * 12 + 4)?, rd_u32(bytes, fo + i * 12 + 8)?]);
+    }
+    let mut from = 0;
+    let mut to = faces.len();
+    if lods.len() >= 2 && lods[0] < lods[1] && lods[1] <= to {
+        from = lods[0];
+        to = lods[1];
+    }
+    if (to - from) * 3 > MAX_MESH_VERTS {
+        return Err("a mesh is too large".into());
+    }
+    let mut m = Mesh::default();
+    for t in from..to {
+        for &i in &faces[t] {
+            let p = pv.get(i).ok_or("bad mesh index")?;
+            m.pos.push(*p);
+            m.nrm.push(nv_[i]);
+            m.uv.push([uv_[i][0], 1.0 - uv_[i][1]]);
+        }
+    }
+    Ok(m)
 }

@@ -231,6 +231,10 @@ impl<'a> R15<'a> {
         R15 { rig, scale, pkg: HashMap::new(), world: HashMap::new(), stance: stance.to_string(), pose, straight_legs: false }
     }
 
+    pub fn set_straight_legs(&mut self, on: bool) {
+        self.straight_legs = on;
+    }
+
     pub fn use_package(&mut self, parts: &[(String, Inst)]) {
         self.pkg.clear();
         for (name, mp) in parts {

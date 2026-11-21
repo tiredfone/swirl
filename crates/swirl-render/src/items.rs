@@ -444,6 +444,7 @@ pub struct BuildOpts<'a> {
     pub pose: Option<String>,
     pub item: bool,
     pub keep_pkg_colors: bool,
+    pub straight_legs: bool,
 }
 
 pub fn build_look(ctx: &Ctx, base: &Base, look: &mut Look, ids: &[String], o: &BuildOpts) -> Result<BuildOut, String> {
@@ -490,6 +491,7 @@ pub fn build_look(ctx: &Ctx, base: &Base, look: &mut Look, ids: &[String], o: &B
     let mut notes = std::mem::take(&mut look.notes);
     let mut r15 = o.rig.map(|rig| crate::r15::R15::new(rig, o.scale, stance, o.pose.clone()));
     if let Some(r) = r15.as_mut() {
+        r.set_straight_legs(o.straight_legs);
         r.use_package(&look.r15_parts);
         r.compute_world(ctx, look.tool, &mut notes);
         r.apply_cfs(&mut cfs);
