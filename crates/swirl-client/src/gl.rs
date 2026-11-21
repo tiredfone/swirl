@@ -15,11 +15,37 @@ out vec3 vn; out vec2 vuv;
 void main(){ vn = mat3(m) * n; vuv = uv; gl_Position = vp * m * vec4(p,1.0); }";
 const FS: &str = "#version 300 es
 precision mediump float;
-in vec3 vn; in vec2 vuv; uniform vec4 col; uniform sampler2D tex; uniform float useTex; out vec4 o;
-void main(){ vec3 N = normalize(vn); float d = max(dot(N, normalize(vec3(0.47,0.82,-0.31))), 0.0); float f = max(dot(N, normalize(vec3(-0.5,-0.2,0.6))), 0.0);
-float l = 0.5 + 0.6*d + 0.2*f; vec4 c = col; if (useTex > 0.5) { vec4 t = texture(tex, vuv); c = vec4(mix(col.rgb, t.rgb, t.a), col.a); } o = vec4(c.rgb * l, c.a); }";
+in vec3 vn; in vec2 vuv; uniform vec4 col; uniform sampler2D tex; uniform float useTex; uniform vec4 lt; uniform vec3 tint; out vec4 o;
+void main(){ vec3 N = normalize(vn); float d = max(dot(N, normalize(vec3(0.45,0.8,-0.4))), 0.0); float f = max(dot(N, normalize(vec3(-0.5,0.2,0.6))), 0.0);
+float l = min(1.17, lt.x + lt.y*d + lt.z*f); vec4 c = col; if (useTex > 0.5) { vec4 t = texture(tex, vuv); if (useTex > 1.5) { c = vec4(t.rgb, t.a * col.a); } else { c = vec4(mix(col.rgb, t.rgb, t.a), col.a); } } o = vec4(min(c.rgb * l * tint, vec3(1.0)), c.a); }";
+
+const SKY_VS: &str = "#version 300 es
+out vec2 q;
+void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)); q = p * 2.0 - 1.0; gl_Position = vec4(q, 0.9999, 1.0); }";
+const SKY_FS: &str = "#version 300 es
+precision mediump float;
+in vec2 q; out vec4 o;
+uniform vec3 dir; uniform vec3 right; uniform vec3 up; uniform vec2 tanv;
+uniform sampler2D f0; uniform sampler2D f1; uniform sampler2D f2; uniform sampler2D f3; uniform sampler2D f4; uniform sampler2D f5;
+vec4 pick(int face, vec2 st){ if (face == 0) return texture(f0, st); if (face == 1) return texture(f1, st); if (face == 2) return texture(f2, st); if (face == 3) return texture(f3, st); if (face == 4) return texture(f4, st); return texture(f5, st); }
+void main(){
+  vec3 r = dir + q.x * tanv.x * right + q.y * tanv.y * up;
+  float rx = -r.x; float ry = r.y; float rz = r.z;
+  float ax = abs(rx); float ay = abs(ry); float az = abs(rz);
+  int face; float sc; float tc; float ma;
+  if (ax >= ay && ax >= az) { ma = ax; if (rx > 0.0) { face = 0; sc = -rz; tc = -ry; } else { face = 1; sc = rz; tc = -ry; } }
+  else if (ay >= az) { ma = ay; if (ry > 0.0) { face = 2; sc = rx; tc = rz; } else { face = 3; sc = rx; tc = -rz; } }
+  else { ma = az; if (rz > 0.0) { face = 4; sc = rx; tc = -ry; } else { face = 5; sc = -rx; tc = -ry; } }
+  float s = (sc / ma + 1.0) / 2.0; float t = (tc / ma + 1.0) / 2.0;
+  if (face == 2) { float ns = 1.0 - t; t = s; s = ns; } else if (face == 3) { float ns = t; t = 1.0 - s; s = ns; }
+  o = vec4(pick(face, vec2(s, t)).rgb, 1.0);
+}";
 
 struct State {
+    sky_prog: WebGlProgram,
+    sky_vao: Option<web_sys::WebGlVertexArrayObject>,
+    u_lt: Option<WebGlUniformLocation>,
+    u_tint: Option<WebGlUniformLocation>,
     world: World,
     gl: G,
     prog: WebGlProgram,
@@ -39,6 +65,7 @@ struct State {
     cyl: Mesh,
     cyl_y: Mesh,
     wedge: Mesh,
+    decal_faces: Vec<Mesh>,
     ctl: Option<Controller>,
     keys: HashSet<String>,
     last_t: f64,
@@ -183,6 +210,24 @@ fn wedge_data() -> Vec<f32> {
     v
 }
 
+fn decal_face_data(face: usize) -> Vec<f32> {
+    let g = 0.502f32;
+    let q: ([f32; 3], [f32; 3], [f32; 3], [f32; 3], [f32; 3]) = match face {
+        0 => ([g, 0.5, 0.5], [g, 0.5, -0.5], [g, -0.5, -0.5], [g, -0.5, 0.5], [1.0, 0.0, 0.0]),
+        1 => ([0.5, g, 0.5], [-0.5, g, 0.5], [-0.5, g, -0.5], [0.5, g, -0.5], [0.0, 1.0, 0.0]),
+        2 => ([-0.5, 0.5, g], [0.5, 0.5, g], [0.5, -0.5, g], [-0.5, -0.5, g], [0.0, 0.0, 1.0]),
+        3 => ([-g, 0.5, -0.5], [-g, 0.5, 0.5], [-g, -0.5, 0.5], [-g, -0.5, -0.5], [-1.0, 0.0, 0.0]),
+        4 => ([-0.5, -g, 0.5], [0.5, -g, 0.5], [0.5, -g, -0.5], [-0.5, -g, -0.5], [0.0, -1.0, 0.0]),
+        _ => ([0.5, 0.5, -g], [-0.5, 0.5, -g], [-0.5, -0.5, -g], [0.5, -0.5, -g], [0.0, 0.0, -1.0]),
+    };
+    let (tl, tr, br, bl, n) = q;
+    let mut v = vec![];
+    for (p, uv) in [(tl, [0.0f32, 0.0]), (bl, [0.0, 1.0]), (br, [1.0, 1.0]), (tl, [0.0, 0.0]), (br, [1.0, 1.0]), (tr, [1.0, 0.0])] {
+        v.extend_from_slice(&[p[0], p[1], p[2], n[0], n[1], n[2], uv[0], uv[1]]);
+    }
+    v
+}
+
 fn make_mesh(gl: &G, prog: &WebGlProgram, data: &[f32]) -> Mesh {
     let vao = gl.create_vertex_array();
     gl.bind_vertex_array(vao.as_ref());
@@ -219,6 +264,13 @@ impl Client {
         gl.attach_shader(&prog, &shader(&gl, G::VERTEX_SHADER, VS));
         gl.attach_shader(&prog, &shader(&gl, G::FRAGMENT_SHADER, FS));
         gl.link_program(&prog);
+        let sky_prog = gl.create_program().unwrap();
+        gl.attach_shader(&sky_prog, &shader(&gl, G::VERTEX_SHADER, SKY_VS));
+        gl.attach_shader(&sky_prog, &shader(&gl, G::FRAGMENT_SHADER, SKY_FS));
+        gl.link_program(&sky_prog);
+        let sky_vao = gl.create_vertex_array();
+        let u_lt = gl.get_uniform_location(&prog, "lt");
+        let u_tint = gl.get_uniform_location(&prog, "tint");
         gl.use_program(Some(&prog));
         let cube_m = make_mesh(&gl, &prog, &cube());
         let sphere_m = make_mesh(&gl, &prog, &sphere_data());
@@ -229,8 +281,13 @@ impl Client {
         gl.enable(G::CULL_FACE);
         gl.enable(G::BLEND);
         gl.blend_func(G::SRC_ALPHA, G::ONE_MINUS_SRC_ALPHA);
+        let decal_faces: Vec<Mesh> = (0..6).map(|f| make_mesh(&gl, &prog, &decal_face_data(f))).collect();
         let u_tex_on = gl.get_uniform_location(&prog, "useTex");
         let st = Rc::new(RefCell::new(State {
+            sky_prog,
+            sky_vao,
+            u_lt,
+            u_tint,
             u_vp: gl.get_uniform_location(&prog, "vp"),
             u_m: gl.get_uniform_location(&prog, "m"),
             u_col: gl.get_uniform_location(&prog, "col"),
@@ -250,6 +307,7 @@ impl Client {
             cyl: cyl_m,
             cyl_y: cyl_y_m,
             wedge: wedge_m,
+            decal_faces,
             ctl: None,
             keys: HashSet::new(),
             last_t: 0.0,
@@ -372,7 +430,11 @@ impl Client {
         let _ = gl.tex_image_2d_with_u32_and_u32_and_image_bitmap(G::TEXTURE_2D, 0, G::RGBA as i32, G::RGBA, G::UNSIGNED_BYTE, img);
         let (w, h) = (img.width(), img.height());
         let pot = w.is_power_of_two() && h.is_power_of_two();
-        if pot {
+        if id.starts_with("c:") {
+            gl.tex_parameteri(G::TEXTURE_2D, G::TEXTURE_MIN_FILTER, G::LINEAR as i32);
+            gl.tex_parameteri(G::TEXTURE_2D, G::TEXTURE_WRAP_S, G::CLAMP_TO_EDGE as i32);
+            gl.tex_parameteri(G::TEXTURE_2D, G::TEXTURE_WRAP_T, G::CLAMP_TO_EDGE as i32);
+        } else if pot {
             gl.generate_mipmap(G::TEXTURE_2D);
             gl.tex_parameteri(G::TEXTURE_2D, G::TEXTURE_MIN_FILTER, G::LINEAR_MIPMAP_LINEAR as i32);
             gl.tex_parameteri(G::TEXTURE_2D, G::TEXTURE_WRAP_S, G::REPEAT as i32);
@@ -538,7 +600,58 @@ impl Client {
         let proj = mat::perspective(1.0, w as f32 / h as f32, 0.5, 20000.0);
         let view = mat::look_at(eye, st.target, [0.0, 1.0, 0.0]);
         let vp = mat::mul(&proj, &view);
+        let faces = st.world.sky_faces();
+        let mut sky_ready = true;
+        let mut wants_sky: Vec<(String, String)> = vec![];
+        for f in faces.iter() {
+            match st.textures.get(f) {
+                Some(Some(_)) => {}
+                Some(None) => {}
+                None => {
+                    sky_ready = false;
+                    wants_sky.push(("tex".into(), f.clone()));
+                }
+            }
+        }
+        for (k, id) in wants_sky {
+            let key = format!("{}:{}", k, id);
+            if st.requested.insert(key) {
+                st.queue.push((k, id));
+            }
+        }
+        if sky_ready {
+            let d = [target_minus(st.target, eye)];
+            let dirv = norm3(d[0]);
+            let up_ref = if dirv[1].abs() > 0.99 { [0.0, 0.0, 1.0] } else { [0.0, 1.0, 0.0] };
+            let rightv = norm3(cross3(dirv, up_ref));
+            let upv = cross3(rightv, dirv);
+            let tan_y = (0.5f32).tan();
+            gl.use_program(Some(&st.sky_prog));
+            gl.depth_mask(false);
+            gl.disable(G::DEPTH_TEST);
+            gl.disable(G::CULL_FACE);
+            for (i, f) in faces.iter().enumerate() {
+                gl.active_texture(G::TEXTURE1 + i as u32);
+                if let Some(Some(t)) = st.textures.get(f) {
+                    gl.bind_texture(G::TEXTURE_2D, Some(t));
+                }
+                gl.uniform1i(gl.get_uniform_location(&st.sky_prog, &format!("f{}", i)).as_ref(), 1 + i as i32);
+            }
+            gl.uniform3f(gl.get_uniform_location(&st.sky_prog, "dir").as_ref(), dirv[0], dirv[1], dirv[2]);
+            gl.uniform3f(gl.get_uniform_location(&st.sky_prog, "right").as_ref(), rightv[0], rightv[1], rightv[2]);
+            gl.uniform3f(gl.get_uniform_location(&st.sky_prog, "up").as_ref(), upv[0], upv[1], upv[2]);
+            gl.uniform2f(gl.get_uniform_location(&st.sky_prog, "tanv").as_ref(), tan_y * (w as f32 / h as f32), tan_y);
+            gl.bind_vertex_array(st.sky_vao.as_ref());
+            gl.draw_arrays(G::TRIANGLES, 0, 3);
+            gl.enable(G::DEPTH_TEST);
+            gl.enable(G::CULL_FACE);
+            gl.depth_mask(true);
+            gl.active_texture(G::TEXTURE0);
+        }
         gl.use_program(Some(&st.prog));
+        let lt = st.world.light();
+        gl.uniform4f(st.u_lt.as_ref(), lt.amb, lt.key, lt.fill, 0.0);
+        gl.uniform3f(st.u_tint.as_ref(), lt.tint[0], lt.tint[1], lt.tint[2]);
         gl.uniform_matrix4fv_with_f32_array(st.u_vp.as_ref(), false, &vp);
         let parts = st.world.parts();
         let mut solid: Vec<&swirl_net::world::Part> = parts.iter().filter(|p| p.alpha >= 0.99).collect();
@@ -608,6 +721,29 @@ impl Client {
             gl.bind_vertex_array(mesh.vao.as_ref());
             gl.draw_arrays(G::TRIANGLES, 0, mesh.count);
         }
+        gl.depth_mask(false);
+        gl.uniform4f(st.u_lt.as_ref(), 1.0, 0.0, 0.0, 0.0);
+        gl.uniform3f(st.u_tint.as_ref(), 1.0, 1.0, 1.0);
+        for p in parts.iter().filter(|p| !p.decals.is_empty()) {
+            let m = mat::from_cframe(&p.cf, p.size);
+            gl.uniform_matrix4fv_with_f32_array(st.u_m.as_ref(), false, &m);
+            for (face, tid, da) in &p.decals {
+                match st.textures.get(tid) {
+                    Some(Some(t)) => {
+                        gl.active_texture(G::TEXTURE0);
+                        gl.bind_texture(G::TEXTURE_2D, Some(t));
+                        gl.uniform1f(st.u_tex_on.as_ref(), 2.0);
+                        gl.uniform4f(st.u_col.as_ref(), 1.0, 1.0, 1.0, *da);
+                        let mesh = &st.decal_faces[(*face as usize).min(5)];
+                        gl.bind_vertex_array(mesh.vao.as_ref());
+                        gl.draw_arrays(G::TRIANGLES, 0, mesh.count);
+                    }
+                    Some(None) => {}
+                    None => wants.push(("tex".into(), tid.clone())),
+                }
+            }
+        }
+        gl.depth_mask(true);
         for (k, id) in wants {
             let key = format!("{}:{}", k, id);
             if st.requested.insert(key) {
@@ -615,6 +751,19 @@ impl Client {
             }
         }
     }
+}
+
+fn target_minus(t: [f32; 3], e: [f32; 3]) -> [f32; 3] {
+    [t[0] - e[0], t[1] - e[1], t[2] - e[2]]
+}
+
+fn norm3(v: [f32; 3]) -> [f32; 3] {
+    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-9);
+    [v[0] / l, v[1] / l, v[2] / l]
+}
+
+fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
 
 unsafe fn js_sys_f32(data: &[f32]) -> web_sys::js_sys::Float32Array {

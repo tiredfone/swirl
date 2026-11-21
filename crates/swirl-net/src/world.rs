@@ -19,6 +19,7 @@ pub struct Part {
     pub alpha: f32,
     pub shape: u8,
     pub mesh: Option<MeshRef>,
+    pub decals: Vec<(u8, String, f32)>,
 }
 
 #[derive(Clone, Debug)]
@@ -28,6 +29,14 @@ pub struct MeshRef {
     pub scale: [f32; 3],
     pub off: [f32; 3],
     pub fit: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Light {
+    pub amb: f32,
+    pub key: f32,
+    pub fill: f32,
+    pub tint: [f32; 3],
 }
 
 pub fn asset_id(s: &str) -> Option<String> {
@@ -546,7 +555,67 @@ impl World {
                     }
                 }
             }
-            out.push(Part { id, cf, size, color, alpha, shape, mesh });
+            let mut decals = vec![];
+            for &c in &i.children {
+                if let Some(ci) = self.insts.get(&c) {
+                    if ci.class == "Decal" || ci.class == "Texture" {
+                        if let Some(tid) = ci.props.get("Texture").and_then(|v| v.as_str()).and_then(asset_id) {
+                            let face = ci.props.get("Face").and_then(|v| v.as_i64()).unwrap_or(5) as u8;
+                            let da = 1.0 - ci.props.get("Transparency").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                            if da >= 0.05 {
+                                decals.push((face, tid, da));
+                            }
+                        }
+                    }
+                }
+            }
+            out.push(Part { id, cf, size, color, alpha, shape, mesh, decals });
+        }
+        out
+    }
+
+    pub fn lighting_inst(&self) -> Option<&Inst> {
+        self.insts.values().find(|i| i.class == "Lighting")
+    }
+
+    pub fn light(&self) -> Light {
+        let era2018 = self.era == 2018;
+        let props = self.lighting_inst().map(|i| &i.props);
+        let c3 = |k: &str, d: [f32; 3]| props.and_then(|p| arr(p.get(k), 3)).map(|v| [v[0], v[1], v[2]]).unwrap_or(d);
+        let mut amb = c3("Ambient", [0.5; 3]);
+        let top = c3("ColorShift_Top", [0.0; 3]);
+        let bot = c3("ColorShift_Bottom", [0.0; 3]);
+        let bright = props.and_then(|p| p.get("Brightness")).and_then(|v| v.as_f64()).map(|b| (b as f32).clamp(0.0, 5.0)).unwrap_or(1.0);
+        let out = c3("OutdoorAmbient", [0.5; 3]);
+        if era2018 && !props.map(|p| p.contains_key("Ambient")).unwrap_or(false) {
+            amb = [0.0; 3];
+        }
+        let mut a = [0.0f32; 3];
+        let mut k = [0.0f32; 3];
+        let mut f = [0.0f32; 3];
+        for i in 0..3 {
+            a[i] = if era2018 { (0.5 * (amb[i] + out[i] * 0.55) / 0.275).clamp(0.0, 1.2) } else { amb[i].clamp(0.0, 1.2) };
+            k[i] = 0.55 * bright * (1.0 + top[i] * 0.6 / 0.9);
+            f[i] = 0.12 * (0.28 + bot[i] * 0.6) / 0.28;
+        }
+        let avg = |v: [f32; 3]| (v[0] + v[1] + v[2]) / 3.0;
+        let (aa, kk) = (avg(a), avg(k));
+        let base = (aa + kk * 0.7).max(1e-3);
+        let mix = |i: usize| a[i] + k[i] * 0.7;
+        Light { amb: aa, key: kk, fill: avg(f), tint: [mix(0) / base, mix(1) / base, mix(2) / base] }
+    }
+
+    pub fn sky_faces(&self) -> [String; 6] {
+        let names = ["SkyboxRt", "SkyboxLf", "SkyboxUp", "SkyboxDn", "SkyboxBk", "SkyboxFt"];
+        let defs = ["rt", "lf", "up", "dn", "bk", "ft"];
+        let sky = self.lighting_inst().and_then(|l| l.children.iter().find_map(|c| self.insts.get(c).filter(|i| i.class == "Sky")));
+        let mut out: [String; 6] = Default::default();
+        for i in 0..6 {
+            let id = sky.and_then(|s| s.props.get(names[i])).and_then(|v| v.as_str()).and_then(asset_id);
+            out[i] = match id {
+                Some(id) => id,
+                None => format!("c:sky/null_plainsky512_{}.jpg", defs[i]),
+            };
         }
         out
     }

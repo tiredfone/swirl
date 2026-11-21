@@ -37,7 +37,7 @@ export async function start(opts = {}) {
     setStatus('Joining');
     client.connect(base + '?ticket=' + encodeURIComponent(t.ticket));
     setInterval(() => client.ping(), 5000);
-    const assetUrl = (id) => ((cfg.endpoints && cfg.endpoints.asset) || '/asset/?id={id}').replace('{id}', id);
+    const assetUrl = (id) => (id.startsWith('c:') ? (cfg.publicPath || '/chocolate') + '/content/' + id.slice(2) : ((cfg.endpoints && cfg.endpoints.asset) || '/asset/?id={id}').replace('{id}', id));
     let inflight = 0;
     const fetchAsset = async (r) => {
       inflight++;
