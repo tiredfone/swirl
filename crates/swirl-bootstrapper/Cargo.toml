@@ -1,0 +1,24 @@
+[package]
+name = "swirl-bootstrapper"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+name = "swirl_bootstrapper"
+
+[[bin]]
+name = "SolarPlayer2012Launcher"
+path = "src/bin/p2012.rs"
+
+[[bin]]
+name = "SolarPlayer2018Launcher"
+path = "src/bin/p2018.rs"
+
+[dependencies]
+minifb = { version = "0.27", default-features = false, features = ["x11"] }
+ab_glyph = "0.2"
+png = "0.17"
+sha2 = "0.10"
+serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["tls"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
