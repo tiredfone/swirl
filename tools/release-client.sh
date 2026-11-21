@@ -11,7 +11,7 @@ if php /var/www/html/tools/release.php list developer | grep -q " $version "; th
 else
     php /var/www/html/tools/release.php publish developer "$version" "$out" --entry=entry.js --notes="$notes"
 fi
-if ! node tools/browser-check.cjs "$place" "$version" "/tmp/swirl/release-$version.png" > "/tmp/swirl/release-$version.json" 2>&1; then
+if ! WALK=1 node tools/browser-check.cjs "$place" "$version" "/tmp/swirl/release-$version.png" > "/tmp/swirl/release-$version.json" 2>&1; then
     echo "browser check failed for $version, see /tmp/swirl/release-$version.json and .png; not made current"
     exit 1
 fi

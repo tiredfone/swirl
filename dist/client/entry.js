@@ -33,12 +33,13 @@ export async function start(opts = {}) {
     const base = /^wss?:\/\//.test(path) ? path : (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + path;
     const canvas = opts.canvas || byId('swirl-canvas');
     const client = new Client(canvas);
+    window.solarClient = client;
     setStatus('Joining');
     client.connect(base + '?ticket=' + encodeURIComponent(t.ticket));
     setInterval(() => client.ping(), 5000);
     let shown = false;
     const loop = () => {
-      client.frame();
+      client.frame(performance.now());
       if (client.ready() && !shown) {
         shown = true;
         if (typeof window.solarClientReady === 'function') window.solarClientReady();

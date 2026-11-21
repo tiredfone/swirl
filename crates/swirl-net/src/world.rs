@@ -27,6 +27,23 @@ pub struct World {
     pub place: u64,
     pub era: i32,
     pub ready: bool,
+    pub own: Option<Own>,
+    pub chars: HashMap<u32, CharRec>,
+    pub tp_seq: i64,
+    pub teleport: Option<[f32; 12]>,
+    pub pending_own: Option<(u32, [f32; 12], i64)>,
+}
+
+pub struct Own {
+    pub model: u32,
+    pub torso: u32,
+    pub offsets: Vec<(u32, [f32; 12])>,
+    pub start: [f32; 12],
+}
+
+pub struct CharRec {
+    pub torso: u32,
+    pub offsets: Vec<(u32, [f32; 12])>,
 }
 
 fn arr(v: Option<&J>, n: usize) -> Option<Vec<f32>> {
@@ -127,8 +144,67 @@ impl World {
                         self.apply_op(op);
                     }
                 }
+                if let Some(ph) = m["ph"].as_array() {
+                    for r in ph {
+                        if let Some(a) = r.as_array() {
+                            if a.len() >= 13 {
+                                let id = a[0].as_u64().unwrap_or(0) as u32;
+                                if self.is_own_part(id) {
+                                    continue;
+                                }
+                                let cf: Vec<J> = a[1..13].to_vec();
+                                if let Some(i) = self.insts.get_mut(&id) {
+                                    i.props.insert("CFrame".into(), J::Array(cf));
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(ch) = m["ch"].as_array() {
+                    for r in ch {
+                        if let Some(a) = r.as_array() {
+                            if a.len() >= 13 {
+                                let model = a[0].as_u64().unwrap_or(0) as u32;
+                                if self.own.as_ref().map(|o| o.model == model).unwrap_or(false) {
+                                    continue;
+                                }
+                                let mut cf = [0.0f32; 12];
+                                for k in 0..12 {
+                                    cf[k] = a[1 + k].as_f64().unwrap_or(0.0) as f32;
+                                }
+                                self.move_char(model, cf);
+                            }
+                        }
+                    }
+                }
+                if let Some(after) = m["after"].as_array() {
+                    for a in after {
+                        match a["t"].as_str() {
+                            Some("own") => {
+                                let model = a["id"].as_u64().unwrap_or(0) as u32;
+                                if let Some(c) = arr(Some(&a["c"]), 12) {
+                                    let mut cf = [0.0f32; 12];
+                                    cf.copy_from_slice(&c);
+                                    self.take_own(model, cf, a["s"].as_i64().unwrap_or(1));
+                                }
+                            }
+                            Some("tp") => {
+                                self.tp_seq = a["s"].as_i64().unwrap_or(self.tp_seq);
+                                if let Some(c) = arr(Some(&a["c"]), 12) {
+                                    let mut cf = [0.0f32; 12];
+                                    cf.copy_from_slice(&c);
+                                    self.teleport = Some(cf);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
             _ => {}
+        }
+        if let Some((model, cf, seq)) = self.pending_own {
+            self.take_own(model, cf, seq);
         }
         Some(t)
     }
@@ -184,6 +260,156 @@ impl World {
             }
             _ => {}
         }
+    }
+
+    pub fn is_own_part(&self, id: u32) -> bool {
+        match &self.own {
+            Some(o) => o.torso == id || o.offsets.iter().any(|(p, _)| *p == id),
+            None => false,
+        }
+    }
+
+    fn model_parts(&self, model: u32) -> Vec<u32> {
+        let mut out = vec![];
+        let mut stack = vec![model];
+        while let Some(id) = stack.pop() {
+            if let Some(i) = self.insts.get(&id) {
+                if id != model && classes::is_a(&i.class, "BasePart") {
+                    out.push(id);
+                }
+                for &c in &i.children {
+                    stack.push(c);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn cf_of(&self, id: u32) -> [f32; 12] {
+        let mut cf = crate::mat::CF_ID;
+        if let Some(v) = self.insts.get(&id).and_then(|i| arr(i.props.get("CFrame"), 12)) {
+            cf.copy_from_slice(&v);
+        }
+        cf
+    }
+
+    pub fn set_cf(&mut self, id: u32, cf: &[f32; 12]) {
+        if let Some(i) = self.insts.get_mut(&id) {
+            i.props.insert("CFrame".into(), J::Array(cf.iter().map(|v| J::from(*v as f64)).collect()));
+        }
+    }
+
+    fn torso_of(&self, model: u32) -> Option<u32> {
+        let parts = self.model_parts(model);
+        for n in ["Torso", "HumanoidRootPart", "UpperTorso"] {
+            if let Some(p) = parts.iter().find(|p| self.insts.get(p).map(|i| i.props.get("Name").and_then(|v| v.as_str()) == Some(n)).unwrap_or(false)) {
+                return Some(*p);
+            }
+        }
+        parts.first().copied()
+    }
+
+    fn offsets_for(&self, model: u32, torso: u32) -> Vec<(u32, [f32; 12])> {
+        let inv = crate::mat::cf_inv(&self.cf_of(torso));
+        self.model_parts(model).into_iter().filter(|p| *p != torso).map(|p| (p, crate::mat::cf_mul(&inv, &self.cf_of(p)))).collect()
+    }
+
+    fn move_char(&mut self, model: u32, cf: [f32; 12]) {
+        if !self.chars.contains_key(&model) {
+            let torso = match self.torso_of(model) {
+                Some(t) => t,
+                None => return,
+            };
+            let offsets = self.offsets_for(model, torso);
+            self.chars.insert(model, CharRec { torso, offsets });
+        }
+        let (torso, offs) = {
+            let c = &self.chars[&model];
+            (c.torso, c.offsets.clone())
+        };
+        self.set_cf(torso, &cf);
+        for (p, o) in offs {
+            let w = crate::mat::cf_mul(&cf, &o);
+            self.set_cf(p, &w);
+        }
+    }
+
+    pub fn take_own(&mut self, model: u32, cf: [f32; 12], seq: i64) {
+        let torso = match self.insts.contains_key(&model).then(|| self.torso_of(model)).flatten() {
+            Some(t) => t,
+            None => {
+                self.pending_own = Some((model, cf, seq));
+                return;
+            }
+        };
+        self.pending_own = None;
+        let offsets = self.offsets_for(model, torso);
+        self.tp_seq = seq;
+        self.own = Some(Own { model, torso, offsets, start: cf });
+        self.teleport = Some(cf);
+    }
+
+    pub fn move_own(&mut self, cf: [f32; 12]) {
+        let (torso, offs) = match &self.own {
+            Some(o) => (o.torso, o.offsets.clone()),
+            None => return,
+        };
+        self.set_cf(torso, &cf);
+        for (p, o) in offs {
+            let w = crate::mat::cf_mul(&cf, &o);
+            self.set_cf(p, &w);
+        }
+    }
+
+    pub fn colliders(&self) -> Vec<crate::controller::Obb> {
+        let mut out = vec![];
+        let ws = match self.workspace() {
+            Some(w) => w,
+            None => return out,
+        };
+        let mut stack: Vec<(u32, bool)> = vec![(ws, false)];
+        while let Some((id, in_char)) = stack.pop() {
+            let i = match self.insts.get(&id) {
+                Some(i) => i,
+                None => continue,
+            };
+            let has_hum = i.class == "Model" && i.children.iter().any(|c| self.insts.get(c).map(|x| x.class == "Humanoid").unwrap_or(false));
+            let ic = in_char || has_hum;
+            for &c in &i.children {
+                stack.push((c, ic));
+            }
+            if ic || id == ws || !classes::is_a(&i.class, "BasePart") || i.class == "Terrain" {
+                continue;
+            }
+            if i.props.get("CanCollide").and_then(|v| v.as_bool()) == Some(false) {
+                continue;
+            }
+            let cf = self.cf_of(id);
+            let size = arr(i.props.get("Size"), 3).map(|v| [v[0], v[1], v[2]]).unwrap_or([4.0, 1.2, 2.0]);
+            out.push(crate::controller::Obb {
+                c: [cf[0], cf[1], cf[2]],
+                r: [cf[3], cf[4], cf[5], cf[6], cf[7], cf[8], cf[9], cf[10], cf[11]],
+                half: [size[0] / 2.0, size[1] / 2.0, size[2] / 2.0],
+            });
+        }
+        out
+    }
+
+    pub fn humanoid_of(&self, model: u32) -> (f32, f32) {
+        let mut ws = 16.0;
+        let mut jp = 50.0;
+        if let Some(m) = self.insts.get(&model) {
+            for c in &m.children {
+                if let Some(h) = self.insts.get(c) {
+                    if h.class == "Humanoid" {
+                        ws = h.props.get("WalkSpeed").and_then(|v| v.as_f64()).unwrap_or(16.0) as f32;
+                        jp = h.props.get("JumpPower").and_then(|v| v.as_f64()).unwrap_or(50.0) as f32;
+                    }
+                }
+            }
+        }
+        (ws, jp)
     }
 
     pub fn is_a(&self, id: u32, base: &str) -> bool {

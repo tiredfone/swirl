@@ -35,6 +35,21 @@ const pass = acct.password || acct.Password;
     config: !!window.solarClientConfig,
   }));
   if (shot) await pg.screenshot({ path: shot });
+  let walk = null;
+  if (process.env.WALK) {
+    const pos = () => pg.evaluate(() => (window.solarClient ? JSON.parse(window.solarClient.own_pos()) : null));
+    await pg.focus('#swirl-canvas').catch(() => {});
+    const a = await pos();
+    await pg.keyboard.down('w');
+    await new Promise((r) => setTimeout(r, 300));
+    await pg.keyboard.up('w');
+    const b2 = await pos();
+    await pg.keyboard.down(' ');
+    await new Promise((r) => setTimeout(r, 150));
+    await pg.keyboard.up(' ');
+    const c2 = await pos();
+    walk = { start: a, afterW: b2, afterJump: c2, moved: a && b2 ? Math.hypot(b2[0] - a[0], b2[2] - a[2]) : 0, jumped: a && c2 ? c2[1] - b2[1] : 0 };
+  }
   const b64 = (await pg.screenshot({ encoding: 'base64' }));
   const drawn = await pg.evaluate(async (data) => {
     const img = new Image();
@@ -49,7 +64,8 @@ const pass = acct.password || acct.Password;
     for (let i = 0; i < d.length; i += 4) set.add((d[i] >> 4) + ',' + (d[i + 1] >> 4) + ',' + (d[i + 2] >> 4));
     return set.size;
   }, b64);
-  console.log(JSON.stringify({ login: ok, url: url.replace(/\?.*/, '?swirl=' + version), state, distinctColors: drawn, ...log }, null, 1));
+  console.log(JSON.stringify({ walk, login: ok, url: url.replace(/\?.*/, '?swirl=' + version), state, distinctColors: drawn, ...log }, null, 1));
   await b.close();
-  process.exit(state.hasSwirlPage && state.statusHidden === true && state.fatalHidden === true && drawn > 3 ? 0 : 1);
+  const walkOk = !process.env.WALK || (walk && walk.moved > 3 && walk.afterW[1] > -5 && walk.jumped > 1);
+  process.exit(state.hasSwirlPage && state.statusHidden === true && state.fatalHidden === true && drawn > 3 && walkOk ? 0 : 1);
 })();

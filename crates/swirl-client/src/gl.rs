@@ -1,5 +1,7 @@
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
+use swirl_net::controller::{Controller, Input};
 use swirl_net::mat;
 use swirl_net::world::World;
 use wasm_bindgen::prelude::*;
@@ -32,6 +34,20 @@ struct State {
     fitted: bool,
     drag: Option<(f32, f32)>,
     status: String,
+    cube: Mesh,
+    sphere: Mesh,
+    cyl: Mesh,
+    ctl: Option<Controller>,
+    keys: HashSet<String>,
+    last_t: f64,
+    send_acc: f64,
+    ws: Option<WebSocket>,
+    follow: bool,
+}
+
+struct Mesh {
+    vao: Option<web_sys::WebGlVertexArrayObject>,
+    count: i32,
 }
 
 #[wasm_bindgen]
@@ -67,6 +83,71 @@ fn cube() -> Vec<f32> {
     v
 }
 
+fn sphere_data() -> Vec<f32> {
+    let (lon, lat) = (24usize, 16usize);
+    let pt = |i: usize, j: usize| -> [f32; 3] {
+        let th = i as f32 / lon as f32 * std::f32::consts::TAU;
+        let ph = j as f32 / lat as f32 * std::f32::consts::PI;
+        [ph.sin() * th.cos(), ph.cos(), ph.sin() * th.sin()]
+    };
+    let mut v = vec![];
+    for i in 0..lon {
+        for j in 0..lat {
+            let (a, b, c, d) = (pt(i, j), pt(i + 1, j), pt(i + 1, j + 1), pt(i, j + 1));
+            for q in [a, c, b, a, d, c] {
+                v.extend_from_slice(&[q[0] * 0.5, q[1] * 0.5, q[2] * 0.5, q[0], q[1], q[2]]);
+            }
+        }
+    }
+    v
+}
+
+fn cylinder_data() -> Vec<f32> {
+    let n = 24usize;
+    let mut v = vec![];
+    for i in 0..n {
+        let a0 = i as f32 / n as f32 * std::f32::consts::TAU;
+        let a1 = (i + 1) as f32 / n as f32 * std::f32::consts::TAU;
+        let (y0, z0, y1, z1) = (a0.cos(), a0.sin(), a1.cos(), a1.sin());
+        let p = |x: f32, y: f32, z: f32, n: [f32; 3]| [x, y * 0.5, z * 0.5, n[0], n[1], n[2]];
+        let quad = [p(-0.5, y0, z0, [0.0, y0, z0]), p(0.5, y0, z0, [0.0, y0, z0]), p(0.5, y1, z1, [0.0, y1, z1]), p(-0.5, y1, z1, [0.0, y1, z1])];
+        for k in [0usize, 2, 1, 0, 3, 2] {
+            v.extend_from_slice(&quad[k]);
+        }
+        for (x, nx) in [(0.5f32, 1.0f32), (-0.5, -1.0)] {
+            let c = [x, 0.0, 0.0, nx, 0.0, 0.0];
+            let (a, b) = (p(x, y0, z0, [nx, 0.0, 0.0]), p(x, y1, z1, [nx, 0.0, 0.0]));
+            if nx > 0.0 {
+                v.extend_from_slice(&c);
+                v.extend_from_slice(&b);
+                v.extend_from_slice(&a);
+            } else {
+                v.extend_from_slice(&c);
+                v.extend_from_slice(&a);
+                v.extend_from_slice(&b);
+            }
+        }
+    }
+    v
+}
+
+fn make_mesh(gl: &G, prog: &WebGlProgram, data: &[f32]) -> Mesh {
+    let vao = gl.create_vertex_array();
+    gl.bind_vertex_array(vao.as_ref());
+    let buf = gl.create_buffer();
+    gl.bind_buffer(G::ARRAY_BUFFER, buf.as_ref());
+    unsafe {
+        let view = js_sys_f32(data);
+        gl.buffer_data_with_array_buffer_view(G::ARRAY_BUFFER, &view, G::STATIC_DRAW);
+    }
+    let (lp, ln) = (gl.get_attrib_location(prog, "p") as u32, gl.get_attrib_location(prog, "n") as u32);
+    gl.enable_vertex_attrib_array(lp);
+    gl.vertex_attrib_pointer_with_i32(lp, 3, G::FLOAT, false, 24, 0);
+    gl.enable_vertex_attrib_array(ln);
+    gl.vertex_attrib_pointer_with_i32(ln, 3, G::FLOAT, false, 24, 12);
+    Mesh { vao, count: (data.len() / 6) as i32 }
+}
+
 #[wasm_bindgen]
 impl Client {
     #[wasm_bindgen(constructor)]
@@ -77,20 +158,9 @@ impl Client {
         gl.attach_shader(&prog, &shader(&gl, G::FRAGMENT_SHADER, FS));
         gl.link_program(&prog);
         gl.use_program(Some(&prog));
-        let vao = gl.create_vertex_array();
-        gl.bind_vertex_array(vao.as_ref());
-        let buf = gl.create_buffer();
-        gl.bind_buffer(G::ARRAY_BUFFER, buf.as_ref());
-        let data = cube();
-        unsafe {
-            let view = js_sys_f32(&data);
-            gl.buffer_data_with_array_buffer_view(G::ARRAY_BUFFER, &view, G::STATIC_DRAW);
-        }
-        let (lp, ln) = (gl.get_attrib_location(&prog, "p") as u32, gl.get_attrib_location(&prog, "n") as u32);
-        gl.enable_vertex_attrib_array(lp);
-        gl.vertex_attrib_pointer_with_i32(lp, 3, G::FLOAT, false, 24, 0);
-        gl.enable_vertex_attrib_array(ln);
-        gl.vertex_attrib_pointer_with_i32(ln, 3, G::FLOAT, false, 24, 12);
+        let cube_m = make_mesh(&gl, &prog, &cube());
+        let sphere_m = make_mesh(&gl, &prog, &sphere_data());
+        let cyl_m = make_mesh(&gl, &prog, &cylinder_data());
         gl.enable(G::DEPTH_TEST);
         gl.enable(G::CULL_FACE);
         gl.enable(G::BLEND);
@@ -110,6 +180,15 @@ impl Client {
             fitted: false,
             drag: None,
             status: "Starting".into(),
+            cube: cube_m,
+            sphere: sphere_m,
+            cyl: cyl_m,
+            ctl: None,
+            keys: HashSet::new(),
+            last_t: 0.0,
+            send_acc: 0.0,
+            ws: None,
+            follow: false,
         }));
         let s2 = st.clone();
         let down = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |e: web_sys::MouseEvent| {
@@ -143,6 +222,23 @@ impl Client {
         });
         canvas.add_event_listener_with_callback("wheel", wheel.as_ref().unchecked_ref())?;
         wheel.forget();
+        let win = web_sys::window().ok_or("no window")?;
+        let sk = st.clone();
+        let kd = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
+            let k = e.key().to_lowercase();
+            if k == " " || k.starts_with("arrow") {
+                e.prevent_default();
+            }
+            sk.borrow_mut().keys.insert(k);
+        });
+        win.add_event_listener_with_callback("keydown", kd.as_ref().unchecked_ref())?;
+        kd.forget();
+        let sk2 = st.clone();
+        let ku = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
+            sk2.borrow_mut().keys.remove(&e.key().to_lowercase());
+        });
+        win.add_event_listener_with_callback("keyup", ku.as_ref().unchecked_ref())?;
+        ku.forget();
         Ok(Client { st, _ws: None })
     }
 
@@ -169,8 +265,16 @@ impl Client {
         ws.set_onclose(Some(cl.as_ref().unchecked_ref()));
         cl.forget();
         self.st.borrow_mut().status = "Connecting".into();
+        self.st.borrow_mut().ws = Some(ws.clone());
         self._ws = Some(ws);
         Ok(())
+    }
+
+    pub fn own_pos(&self) -> String {
+        match self.st.borrow().ctl.as_ref() {
+            Some(c) => format!("[{:.2},{:.2},{:.2}]", c.pos[0], c.pos[1], c.pos[2]),
+            None => "null".into(),
+        }
     }
 
     pub fn ping(&self) {
@@ -193,7 +297,7 @@ impl Client {
         self.st.borrow().world.parts().len()
     }
 
-    pub fn frame(&self) {
+    pub fn frame(&self, now: f64) {
         let mut st = self.st.borrow_mut();
         let w = st.canvas.client_width().max(1) as u32;
         let h = st.canvas.client_height().max(1) as u32;
@@ -207,6 +311,64 @@ impl Client {
         gl.clear(G::COLOR_BUFFER_BIT | G::DEPTH_BUFFER_BIT);
         if !st.world.ready {
             return;
+        }
+        let dt = if st.last_t > 0.0 { ((now - st.last_t) / 1000.0).clamp(0.0, 0.1) as f32 } else { 0.0 };
+        st.last_t = now;
+        if st.world.own.is_some() {
+            if let Some(cf) = st.world.teleport.take() {
+                let (ws, jp) = st.world.humanoid_of(st.world.own.as_ref().unwrap().model);
+                let mut c = Controller::new([cf[0], cf[1], cf[2]]);
+                c.walk_speed = ws;
+                c.jump_power = jp;
+                st.ctl = Some(c);
+                if !st.follow {
+                    st.follow = true;
+                    st.dist = 14.0;
+                    st.fitted = true;
+                    st.pitch = 0.35;
+                }
+            }
+            let boxes = st.world.colliders();
+            let k = |s: &str| st.keys.contains(s);
+            let input = Input {
+                forward: (k("w") || k("arrowup")) as i32 as f32 - (k("s") || k("arrowdown")) as i32 as f32,
+                right: (k("d") || k("arrowright")) as i32 as f32 - (k("a") || k("arrowleft")) as i32 as f32,
+                jump: k(" "),
+            };
+            let yaw = st.yaw;
+            let mut sent: Option<(String, f64)> = None;
+            if let Some(c) = st.ctl.as_mut() {
+                c.step(dt, &input, yaw, &boxes);
+                if c.pos[1] < -400.0 {
+                    c.teleport([0.0, 10.0, 0.0]);
+                }
+            }
+            if let Some(c) = st.ctl.as_ref() {
+                let cf = mat::cf_yaw(c.pos, c.yaw);
+                let (pos, vel, state) = (c.pos, c.vel, c.state);
+                st.world.move_own(cf);
+                st.target = [pos[0], pos[1] + 1.5, pos[2]];
+                st.send_acc += dt as f64;
+                if st.send_acc >= 1.0 / 30.0 {
+                    st.send_acc = 0.0;
+                    let r = |v: f32| (v * 10000.0).round() / 10000.0;
+                    let msg = format!(
+                        "{{\"t\":\"char\",\"s\":{},\"c\":[{}],\"v\":[{},{},{}],\"st\":{}}}",
+                        st.world.tp_seq,
+                        cf.iter().map(|x| r(*x).to_string()).collect::<Vec<_>>().join(","),
+                        (vel[0] * 100.0).round() / 100.0,
+                        (vel[1] * 100.0).round() / 100.0,
+                        (vel[2] * 100.0).round() / 100.0,
+                        state
+                    );
+                    sent = Some((msg, 0.0));
+                }
+            }
+            if let (Some((msg, _)), Some(ws)) = (sent, st.ws.as_ref()) {
+                if ws.ready_state() == 1 {
+                    let _ = ws.send_with_str(&msg);
+                }
+            }
         }
         if !st.fitted {
             let (c, r) = st.world.bounds();
@@ -237,7 +399,13 @@ impl Client {
             let m = mat::from_cframe(&p.cf, p.size);
             gl.uniform_matrix4fv_with_f32_array(st.u_m.as_ref(), false, &m);
             gl.uniform4f(st.u_col.as_ref(), p.color[0], p.color[1], p.color[2], p.alpha);
-            gl.draw_arrays(G::TRIANGLES, 0, 36);
+            let mesh = match p.shape {
+                0 => &st.sphere,
+                2 => &st.cyl,
+                _ => &st.cube,
+            };
+            gl.bind_vertex_array(mesh.vao.as_ref());
+            gl.draw_arrays(G::TRIANGLES, 0, mesh.count);
         }
     }
 }
