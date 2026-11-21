@@ -42,7 +42,7 @@ Solar runs `/var/www/swirl/bin/swirl`, never the build dir. `tools/install.sh` b
 
 ## Client builds
 
-The wasm client (`swirl-client`, glue over `swirl-net`) is built with `tools/build-client.sh` and released with `tools/release-client.sh` to Solar's developer channel (versions 1.0, 1.1, ...). Timings: clean 27 s, incremental 1 to 2 s. See the `build-client` skill. `wasm-bindgen` 0.2.100 is installed in `~/.cargo/bin` and the crate is pinned to the same version.
+The wasm client (`swirl-client`, glue over `swirl-net`) is built with `tools/build-client.sh` and released with `tools/release-client.sh` to Solar's developer channel (versions 1.0, 1.1, ...). Timings: clean 27 s, incremental 1 to 3 s. Since 1.15 `crates/swirl-client/lua.js` is copied beside `entry.js` and runs Chocolate's own client engine (Lua host, CoreScripts, GUI) from `/chocolate/client` and `/chocolate/shared`; see PLAN.md, Client Lua and GUI. See the `build-client` skill. `wasm-bindgen` 0.2.100 is installed in `~/.cargo/bin` and the crate is pinned to the same version.
 
 ## Desktop app
 

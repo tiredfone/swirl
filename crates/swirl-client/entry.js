@@ -51,6 +51,7 @@ export async function start(opts = {}) {
         if (r.k === 'mesh') client.provide_mesh(r.id, buf);
         else client.provide_texture(r.id, await createImageBitmap(new Blob([buf]), { premultiplyAlpha: 'none', colorSpaceConversion: 'none' }));
       } catch (e) {
+        (window.solarAssetFailures || (window.solarAssetFailures = [])).push(r.k + ':' + r.id + ':' + (e && e.message));
         client.provide_failed(r.k, r.id);
       } finally {
         inflight--;

@@ -41,6 +41,16 @@ const pass = acct.password || acct.Password;
     hasSwirlPage: !!document.getElementById('swirl-canvas'),
     config: !!window.solarClientConfig,
   }));
+  await pg.waitForFunction('window.solarLua && window.solarLua.ready()', { timeout: 40000 }).catch(() => {});
+  await new Promise((r) => setTimeout(r, 4000));
+  const lua = await pg.evaluate(() => {
+    const L = window.solarLua;
+    if (!L) return { present: false, failed: window.solarLuaFailed || null };
+    const names = L.world.robloxGui.children.map((c) => c.props.get('Name'));
+    const pl = L.world.player;
+    const pgui = pl && pl.findChildOfClass('PlayerGui');
+    return { present: true, ready: L.ready(), era: L.world.era, playerList: names.includes('PlayerListScreen') || names.includes('PlayerListContainer'), hotbarOrTopbar: names.includes('CurrentLoadout') || names.includes('TopBarContainer'), coreChildren: names.length, playerGui: pgui ? pgui.children.length : -1, errors: L.errors.slice(0, 10) };
+  });
   let focus = null;
   if (process.env.FOCUS) {
     const [x, y, z, d] = process.env.FOCUS.split(',').map(Number);
@@ -84,9 +94,11 @@ const pass = acct.password || acct.Password;
     for (let i = 0; i < d.length; i += 4) set.add((d[i] >> 4) + ',' + (d[i + 1] >> 4) + ',' + (d[i + 2] >> 4));
     return set.size;
   }, b64);
-  console.log(JSON.stringify({ focus, walk, login: ok, url: url.replace(/\?.*/, '?swirl=' + version), state, distinctColors: drawn, ...log }, null, 1));
+  console.log(JSON.stringify({ lua, focus, walk, login: ok, url: url.replace(/\?.*/, '?swirl=' + version), state, distinctColors: drawn, ...log }, null, 1));
   await b.close();
   const meshOk = !process.env.MIN_MESHES || (focus && focus.meshes >= Number(process.env.MIN_MESHES) && focus.textures >= 1);
   const walkOk = !process.env.WALK || (walk && walk.moved > 1.5 && walk.afterW[1] > -5 && walk.jumped > 1);
-  process.exit(state.hasSwirlPage && state.statusHidden === true && state.fatalHidden === true && drawn > 3 && walkOk && meshOk ? 0 : 1);
+  const luaOk = !!(lua && lua.present && lua.ready && lua.playerList && lua.hotbarOrTopbar && lua.errors.length === 0);
+  if (!luaOk) console.log('lua gate failed');
+  process.exit(luaOk && state.hasSwirlPage && state.statusHidden === true && state.fatalHidden === true && drawn > 3 && walkOk && meshOk ? 0 : 1);
 })();

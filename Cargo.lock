@@ -2064,7 +2064,7 @@ dependencies = [
 
 [[package]]
 name = "swirl-client"
-version = "1.13.0"
+version = "1.14.0"
 dependencies = [
  "serde_json",
  "swirl-net",

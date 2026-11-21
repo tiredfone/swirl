@@ -55,6 +55,7 @@ export async function startLua(opts) {
   document.body.appendChild(root);
 
   const errors = [];
+  const gameErrors = [];
   const logs = [];
   const send = (o) => client.send(JSON.stringify(o));
   const net = { send, bytesIn: 0, bytesOut: 0, close() {} };
@@ -293,7 +294,8 @@ export async function startLua(opts) {
       logs.push(k + ': ' + line);
       if (logs.length > 400) logs.shift();
       if (k === 'error') {
-        errors.push(line);
+        if (/CoreGui|ScriptContext|RobloxGui|CoreScripts|PlayerScripts/.test(where || '')) errors.push(line);
+        else gameErrors.push(line);
         console.error(line);
       } else if (k !== 'print') console.log(line);
     },
@@ -349,6 +351,9 @@ export async function startLua(opts) {
       }
       case 'msg':
         if (state.gui) state.gui.setHint(m.m);
+        break;
+      case 'kick':
+        if (typeof window.solarClientFailed === 'function') window.solarClientFailed(m.m || 'You were disconnected');
         break;
       default:
         break;
@@ -539,7 +544,7 @@ export async function startLua(opts) {
     }
   };
 
-  const api = { world, state, errors, logs, frame, root, ready: () => state.ready };
+  const api = { world, state, errors, gameErrors, logs, frame, root, ready: () => state.ready };
   window.solarLua = api;
   return api;
 }

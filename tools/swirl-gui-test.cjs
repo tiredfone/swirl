@@ -72,11 +72,24 @@ const srv = http.createServer((req, res) => {
     await wait(1500);
     await pg.screenshot({ path: out + '-chat.png' });
   }
+  if (process.env.CLICKSLOT) {
+    const [x, y] = process.env.CLICKSLOT.split(',').map(Number);
+    await pg.mouse.click(x, y);
+    await wait(1200);
+    await pg.screenshot({ path: out + '-click.png' });
+    console.log('equipped', await pg.evaluate(() => { const w = window.solarLua.world; return w.equippedTool ? w.equippedTool.props.get('Name') : null; }));
+    await pg.mouse.move(300, 450);
+    await wait(500);
+    await pg.mouse.move(310, 455);
+    await wait(500);
+    console.log('mouse', await pg.evaluate(() => { const m = window.solarLua.world.mouse; const t = m.props.get('Target'); return JSON.stringify({ target: t ? t.props.get('Name') : null, hit: m.props.get('Hit').slice(0, 3), x: m.props.get('X'), y: m.props.get('Y') }); }));
+  }
   if (process.env.EQUIP) {
     await pg.keyboard.press(process.env.EQUIP);
     await wait(1200);
     await pg.screenshot({ path: out + '-equip.png' });
   }
+  console.log('assetfail', JSON.stringify(await pg.evaluate(() => window.solarAssetFailures || [])));
   console.log('sent', JSON.stringify(await pg.evaluate(() => window.__sent)));
   console.log(JSON.stringify(await info(), null, 1).slice(0, 1500));
   await b.close();
