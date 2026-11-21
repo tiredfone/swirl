@@ -100,3 +100,8 @@ Residuals: textures with sides that are not powers of two (PHP uses GD `imagesca
 Walking works against the live Chocolate server: `swirl-net::controller` (capsule of three spheres against oriented boxes, gravity 196.2, WalkSpeed and JumpPower from the Humanoid, jump only when grounded, yaw faces the move direction), WASD or arrows, space, a follow camera (drag to rotate, wheel to zoom), `char` messages at 30 Hz, and the server side messages `after.own` and `after.tp`, `ph` and `ch` applied to the world. Characters move as rigid models (no limb animation yet). Spheres and cylinders are drawn. The release gate now also walks and jumps (`WALK=1 tools/browser-check.cjs`, moved at least 3 studs and rose at least 1).
 
 Still missing in the client: meshes, textures and decals, sky and lighting, limb animation and Humanoid states, tools and mouse, chat and GUI (CoreScripts need the Lua host), terrain, 2018 rigs. Still missing in the server: Lua host, rep flushing, character loading, physics.
+
+## Client 1.4
+
+File meshes (SpecialMesh FileMesh and MeshPart) and their textures are fetched by `entry.js` from the asset endpoint on request (`take_requests`, `provide_mesh`, `provide_texture`, `provide_failed`), parsed by `swirl-core::meshfile` (shared with the renderer) and `swirl-net::meshdata`, and drawn with a textured shader. Wedge parts, SpecialMesh wedge, sphere and cylinder types, and mesh Scale on primitives are drawn. Still missing: Decal and Texture instances, head meshes (content files), Sky and Lighting properties, shirts and pants on characters, limb animation.
+Note: the live server kicks the test account if it reconnects too quickly ("started too many ..."); the release gate may need a minute between runs.
