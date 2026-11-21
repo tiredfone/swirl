@@ -4,6 +4,7 @@ use std::rc::Rc;
 use std::collections::HashMap;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use swirl_server::game::Game;
+use swirl_server::redeem::Redeemer;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -21,6 +22,13 @@ async fn main() {
     }
     let era: i32 = arg("era").and_then(|s| s.parse().ok()).unwrap_or(2012);
     let assets = arg("assets").unwrap_or("/var/www/assets".into());
+    let redeemer: Option<Rc<Redeemer>> = match (arg("redeem-url"), arg("redeem-key-file")) {
+        (Some(u), Some(f)) => {
+            let key = std::fs::read_to_string(&f).expect("redeem key file").trim().to_string();
+            Some(Rc::new(Redeemer::parse(&u, key).expect("redeem url must be http on loopback")))
+        }
+        _ => None,
+    };
     let bytes = std::fs::read(format!("{}/assets/{}", assets, place)).expect("place file");
     let game = Rc::new(RefCell::new(Game::load(place, &bytes, era).unwrap_or_else(|e| panic!("{}", e))));
     let clients: Rc<RefCell<HashMap<u32, (u32, UnboundedSender<String>)>>> = Rc::new(RefCell::new(HashMap::new()));
@@ -58,19 +66,44 @@ async fn main() {
         let game = game.clone();
         let n = cid;
         let clients = clients.clone();
+        let redeemer = redeemer.clone();
         tokio::task::spawn_local(async move {
-            let ws = match tokio_tungstenite::accept_async(stream).await {
+            let uri = Rc::new(RefCell::new(String::new()));
+            let u2 = uri.clone();
+            let ws = match tokio_tungstenite::accept_hdr_async(stream, move |req: &tokio_tungstenite::tungstenite::handshake::server::Request, resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                *u2.borrow_mut() = req.uri().to_string();
+                Ok(resp)
+            })
+            .await
+            {
                 Ok(w) => w,
                 Err(_) => return,
             };
+            let ticket = uri.borrow().split("ticket=").nth(1).map(|s| s.split('&').next().unwrap_or("").to_string()).unwrap_or_default();
+            let mut user_name = format!("Player{}", n);
+            if let Some(r) = &redeemer {
+                match r.redeem(&ticket).await {
+                    Some(j) if j["mode"] == "play" && j["placeId"].as_u64() == Some(place) => {
+                        if let Some(nm) = j["username"].as_str() {
+                            user_name = nm.to_string();
+                        }
+                    }
+                    _ => {
+                        let (mut tx, _rx) = ws.split();
+                        let _ = tx.send(Message::Text(serde_json::json!({"t": "kick", "m": "Your join ticket is invalid or has expired. Reload the page to try again."}).to_string())).await;
+                        let _ = tx.close().await;
+                        return;
+                    }
+                }
+            }
             let (mut tx, mut rx) = ws.split();
-            let (init, player) = game.borrow_mut().join(&format!("Player{}", n));
+            let (init, player) = game.borrow_mut().join(&user_name);
             let (otx, mut orx) = unbounded_channel::<String>();
             clients.borrow_mut().insert(n, (player, otx));
             if tx.send(Message::Text(init.to_string())).await.is_err() {
                 return;
             }
-            let _ = tx.send(Message::Text(serde_json::json!({"t": "sys", "m": format!("Player{} has joined the game.", n)}).to_string())).await;
+            let _ = tx.send(Message::Text(serde_json::json!({"t": "sys", "m": format!("{} has joined the game.", user_name)}).to_string())).await;
             loop {
                 tokio::select! {
                     m = rx.next() => {
