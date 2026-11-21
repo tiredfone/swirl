@@ -1,5 +1,6 @@
 pub mod assets;
 pub mod body;
+pub mod fast;
 pub mod img;
 pub mod items;
 pub mod look;

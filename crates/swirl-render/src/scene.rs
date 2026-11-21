@@ -216,7 +216,7 @@ fn scale_translate(s: f64, tx: f64, ty: f64) -> M4 {
     [s, 0.0, 0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, tx, ty, 0.0, 1.0]
 }
 
-pub fn draw(base: &Base, tex: &crate::body::BodyTex, r15: Option<&R15Draw>, look: &Look, cfs: &Cfs, w: usize, h: usize, ss: usize, view: &str) -> Vec<u8> {
+pub fn draw(base: &Base, tex: &crate::body::BodyTex, r15: Option<&R15Draw>, look: &Look, cfs: &Cfs, w: usize, h: usize, ss: usize, view: &str, exact: bool) -> Vec<u8> {
     let head_view = view == "head";
     let items: Vec<&Item> = look.items.iter().collect();
     let n_hats = look.n_hats.min(items.len());
@@ -399,7 +399,8 @@ pub fn draw(base: &Base, tex: &crate::body::BodyTex, r15: Option<&R15Draw>, look
     glass.sort_by(|a, b| b.depth.partial_cmp(&a.depth).unwrap_or(std::cmp::Ordering::Equal));
     let mut tris = solid;
     tris.append(&mut glass);
-    let rgba = rasterise(&tris, w, h, ss, &base.stud, face_box);
+    let use_ref = exact || tris.iter().any(|t| t.blend);
+    let rgba = if use_ref { rasterise(&tris, w, h, ss, &base.stud, face_box) } else { crate::fast::rasterise_fast(&tris, w, h, ss, &base.stud, face_box) };
     encode_png(w, h, &rgba)
 }
 

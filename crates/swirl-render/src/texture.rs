@@ -5,7 +5,7 @@ pub struct Texture {
     levels: RefCell<Vec<Option<(usize, usize, Vec<u32>)>>>,
     pub repeat: bool,
     pub mip: bool,
-    pub lod: bool,
+    pub lod: std::cell::Cell<bool>,
     pub max_level: usize,
     pub cut: bool,
     pub has_alpha: bool,
@@ -44,7 +44,7 @@ impl Texture {
         }
         let mut levels = vec![None; m + 1];
         levels[0] = Some((w, h, im.px));
-        Texture { levels: RefCell::new(levels), repeat: pot, mip: pot, lod: false, max_level: m, cut: true, has_alpha, w0: w, h0: h }
+        Texture { levels: RefCell::new(levels), repeat: pot, mip: pot, lod: std::cell::Cell::new(false), max_level: m, cut: true, has_alpha, w0: w, h0: h }
     }
 
 
@@ -83,7 +83,7 @@ impl Texture {
     }
 
     pub fn sample(&self, u: f64, v: f64, dudx: f64, dvdx: f64, dudy: f64, dvdy: f64) -> [f64; 4] {
-        if !self.mip && !self.lod {
+        if !self.mip && !self.lod.get() {
             return self.bilinear(0, u, v);
         }
         let w = self.w0 as f64;

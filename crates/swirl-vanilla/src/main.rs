@@ -137,6 +137,6 @@ fn main() {
     for n in &look.notes {
         eprintln!("note: {}", n);
     }
-    let png = draw(&base, &btex, out_b.r15.as_ref(), &look, &cfs, w, h, 4, &view);
+    let png = draw(&base, &btex, out_b.r15.as_ref(), &look, &cfs, w, h, 4, &view, a.contains_key("exact"));
     std::fs::write(out, png).unwrap();
 }
