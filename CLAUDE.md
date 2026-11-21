@@ -54,6 +54,10 @@ The launchers and the native client are built with `tools/release-desktop.sh` (p
 2. swirl-core readers.
 3. Lua host, physics, server, client.
 
+## Server and client tests
+
+- `swirl-server --place=ID --port=N [--era=2018] [--assets=DIR] [--site=http://127.0.0.1] [--redeem-url=... --redeem-key-file=FILE]`. Stop test servers with `pkill -x swirl-server` (not `pkill -f`, which can match its own shell). Node tests: `tools/swirl-tool-test.mjs`, `swirl-remote-test.mjs`, `swirl-touch-test.mjs`, `swirl-char-test.mjs`; browser test against a local server: `tools/swirl-local-test.cjs` (see PLAN.md, tools and appearance section). Place 1669 (read from `/var/www/assets`) has the classic tools in StarterPack.
+
 ## Skills
 
 - `port-module`: port a Chocolate or vanilla file to Rust and check parity.

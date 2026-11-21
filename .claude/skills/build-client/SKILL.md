@@ -12,3 +12,5 @@ description: Build, time and release the Swirl wasm client. Use when asked to bu
 - Keep the client crate small: protocol and world logic live in `swirl-net` (native tests), GL glue in `swirl-client`. Debug builds: workspace `dev` profile is opt-level 1 with dependencies at opt-level 2; rust's own lld linker is the default on this toolchain.
 
 Measured on this box (4 cores): clean wasm build 27 s (client profile), 34 s for `client-size`; one-line edit in swirl-client or swirl-net 0.9 s, in swirl-core 1.8 s, no-op 0.3 s (cargo plus wasm-bindgen).
+
+- Local checks without Solar or the live server: build to a scratch dir (`tools/build-client.sh /tmp/swirl/dist113`), start `swirl-server --place=1669 --port=N` (add `--site=http://127.0.0.1` for avatars with clothes and hats), then `DIST=/tmp/swirl/dist113 node tools/swirl-local-test.cjs N /tmp/swirl/prefix` (two headless pages: hotbar equip, a click, chat; `SCENARIO=look` for a character screenshot). Release 1.13 added tools, chat, clothing and the head mesh to the client; the release gate still only walks and loads meshes on the live server.
