@@ -129,3 +129,100 @@ pub fn snapshot_for(dm: &DataModel, roots: &[InstId], player: InstId) -> Vec<J> 
     }
     out
 }
+
+pub fn replicated(dm: &DataModel, roots: &[InstId], id: InstId) -> bool {
+    let mut cur = Some(id);
+    let mut guard = 0;
+    while let Some(c) = cur {
+        let i = match dm.get(c) {
+            Some(i) => i,
+            None => return false,
+        };
+        if i.destroyed {
+            return false;
+        }
+        if i.parent == Some(dm.root) {
+            return roots.contains(&c);
+        }
+        if SCOPED.contains(&i.class.as_str()) {
+            if let Some(p) = i.parent {
+                if dm.get(p).map(|x| x.class == "Player").unwrap_or(false) {
+                    return false;
+                }
+            }
+        }
+        cur = i.parent;
+        guard += 1;
+        if guard > 10000 {
+            return false;
+        }
+    }
+    false
+}
+
+pub fn subtree(dm: &DataModel, id: InstId, out: &mut Vec<J>) {
+    out.push(encode_inst(dm, id));
+    if let Some(i) = dm.get(id) {
+        for &c in &i.children {
+            subtree(dm, c, out);
+        }
+    }
+}
+
+pub fn ops_for(dm: &DataModel, roots: &[InstId], journal: &[swirl_core::instance::Change]) -> Vec<J> {
+    use swirl_core::instance::Change;
+    let mut ops: Vec<J> = vec![];
+    let mut sent_new: std::collections::HashSet<InstId> = std::collections::HashSet::new();
+    let mut new_roots: Vec<InstId> = vec![];
+    for ch in journal {
+        if let Change::Parent { id, old, .. } = ch {
+            let was = old.map(|o| replicated(dm, roots, o)).unwrap_or(false);
+            if !was && replicated(dm, roots, *id) {
+                new_roots.push(*id);
+            }
+        }
+    }
+    for ch in journal {
+        match ch {
+            Change::Prop(id, name) => {
+                if !replicated(dm, roots, *id) || hidden_prop(dm, *id, name) || new_roots.iter().any(|r| r == id || dm.is_descendant_of(*id, *r)) {
+                    continue;
+                }
+                let inst = match dm.get(*id) {
+                    Some(i) => i,
+                    None => continue,
+                };
+                if let Some(p) = classes::prop_info(&inst.class, name) {
+                    if let (Some(v), true) = (inst.props.get(name), p.ty != "any") {
+                        if let Some(e) = encode_value(dm, &p.ty, v) {
+                            ops.push(json!(["p", id, name, e]));
+                        }
+                    }
+                }
+            }
+            Change::Parent { id, old, new } => {
+                let now = replicated(dm, roots, *id);
+                let was = old.map(|o| replicated(dm, roots, o)).unwrap_or(false);
+                if was && now {
+                    ops.push(json!(["m", id, new]));
+                } else if !was && now {
+                    if sent_new.iter().any(|s| dm.is_descendant_of(*id, *s)) {
+                        continue;
+                    }
+                    let mut recs = vec![];
+                    subtree(dm, *id, &mut recs);
+                    sent_new.insert(*id);
+                    ops.push(json!(["n", recs]));
+                } else if was && !now {
+                    ops.push(json!(["d", id]));
+                }
+            }
+            Change::Destroy { id, old } => {
+                if old.map(|o| replicated(dm, roots, o)).unwrap_or(false) {
+                    ops.push(json!(["d", id]));
+                }
+            }
+        }
+    }
+    ops
+}

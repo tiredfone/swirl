@@ -41,7 +41,15 @@ pub struct Instance {
     pub destroyed: bool,
 }
 
+#[derive(Clone, Debug)]
+pub enum Change {
+    Prop(InstId, String),
+    Parent { id: InstId, old: Option<InstId>, new: Option<InstId> },
+    Destroy { id: InstId, old: Option<InstId> },
+}
+
 pub struct DataModel {
+    pub journal: Vec<Change>,
     pub side: String,
     pub era: i32,
     insts: Vec<Option<Instance>>,
@@ -51,7 +59,7 @@ pub struct DataModel {
 
 impl DataModel {
     pub fn new(side: &str) -> DataModel {
-        let mut dm = DataModel { side: side.to_string(), era: 2012, insts: vec![], root: 0, services: HashMap::new() };
+        let mut dm = DataModel { journal: vec![], side: side.to_string(), era: 2012, insts: vec![], root: 0, services: HashMap::new() };
         let id = dm.alloc("DataModel", "Game");
         dm.root = id;
         dm
@@ -151,6 +159,9 @@ impl DataModel {
             self.get_mut(p).unwrap().children.push(id);
         }
         self.get_mut(id).unwrap().parent = parent;
+        if old != parent {
+            self.journal.push(Change::Parent { id, old, new: parent });
+        }
         Ok(())
     }
 
@@ -166,6 +177,7 @@ impl DataModel {
                 self.get_mut(id).unwrap().name = s.clone();
             }
         }
+        self.journal.push(Change::Prop(id, canon.clone()));
         self.get_mut(id).unwrap().props.insert(canon, value);
         Ok(())
     }
@@ -229,7 +241,10 @@ impl DataModel {
         for k in kids {
             self.destroy(k);
         }
+        let old = self.get(id).and_then(|i| i.parent);
         let _ = self.set_parent(id, None);
+        self.journal.retain(|c| !matches!(c, Change::Parent { id: i, new: None, .. } if *i == id));
+        self.journal.push(Change::Destroy { id, old });
         if let Some(i) = self.get_mut(id) {
             i.destroyed = true;
         }

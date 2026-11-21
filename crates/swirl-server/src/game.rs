@@ -1,14 +1,19 @@
 use crate::codec;
 use serde_json::{json, Value as J};
+use std::cell::RefCell;
+use std::rc::Rc;
 use swirl_core::classes;
-use swirl_core::instance::{DataModel, InstId, Val};
+use swirl_core::instance::{Change, DataModel, InstId, Val};
+use swirl_lua::{Host, LogLine};
 
 pub struct Game {
     pub place_id: u64,
     pub era: i32,
-    pub dm: DataModel,
+    pub dm: Rc<RefCell<DataModel>>,
     pub roots: Vec<InstId>,
+    pub host: Host,
     next_user: i64,
+    pub t: f64,
 }
 
 impl Game {
@@ -53,28 +58,39 @@ impl Game {
             }
         }
         dm.service("NetworkServer").ok();
-        Ok(Game { place_id, era, dm, roots, next_user: 1 })
+        dm.journal.clear();
+        let dm = Rc::new(RefCell::new(dm));
+        let mut host = Host::new(dm.clone()).map_err(|e| e.to_string())?;
+        host.scan_scripts();
+        Ok(Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0 })
     }
 
     pub fn join(&mut self, name: &str) -> (J, InstId) {
         let uid = self.next_user;
         self.next_user += 1;
-        let players = self.dm.service("Players").unwrap();
-        let player = self.dm.create_any("Player", None).unwrap();
-        let _ = self.dm.set_prop(player, "Name", Val::Str(name.to_string()));
-        let _ = self.dm.set_prop(player, "userId", Val::Num(uid as f64));
-        let _ = self.dm.set_prop(player, "UserId", Val::Num(uid as f64));
-        let _ = self.dm.set_prop(player, "CharacterAppearance", Val::Str(format!("/api/charapp/{}", uid)));
-        let _ = self.dm.set_prop(player, "AccountAge", Val::Num(100.0));
-        let _ = self.dm.set_prop(player, "DataReady", Val::Bool(false));
-        let _ = self.dm.set_prop(player, "DataComplexityLimit", Val::Num(45000.0));
-        for (cls, nm) in [("Backpack", "Backpack"), ("PlayerGui", "PlayerGui")] {
-            if let Ok(c) = self.dm.create_any(cls, Some(player)) {
-                let _ = self.dm.set_prop(c, "Name", Val::Str(nm.to_string()));
+        let (player, snap) = {
+            let mut dm = self.dm.borrow_mut();
+            let players = dm.service("Players").unwrap();
+            let player = dm.create_any("Player", None).unwrap();
+            let _ = dm.set_prop(player, "Name", Val::Str(name.to_string()));
+            let _ = dm.set_prop(player, "userId", Val::Num(uid as f64));
+            let _ = dm.set_prop(player, "UserId", Val::Num(uid as f64));
+            let _ = dm.set_prop(player, "CharacterAppearance", Val::Str(format!("/api/charapp/{}", uid)));
+            let _ = dm.set_prop(player, "AccountAge", Val::Num(100.0));
+            let _ = dm.set_prop(player, "DataReady", Val::Bool(false));
+            let _ = dm.set_prop(player, "DataComplexityLimit", Val::Num(45000.0));
+            for (cls, nm) in [("Backpack", "Backpack"), ("PlayerGui", "PlayerGui")] {
+                if let Ok(c) = dm.create_any(cls, Some(player)) {
+                    let _ = dm.set_prop(c, "Name", Val::Str(nm.to_string()));
+                }
             }
-        }
-        self.dm.set_parent(player, Some(players)).unwrap();
-        let snap = codec::snapshot_for(&self.dm, &self.roots, player);
+            dm.set_parent(player, Some(players)).unwrap();
+            let snap = codec::snapshot_for(&dm, &self.roots, player);
+            dm.journal.clear();
+            (player, snap)
+        };
+        let players = self.dm.borrow().services["Players"];
+        self.host.fire(players, "PlayerAdded", vec![swirl_lua::host::Wire::I(player)]);
         let msg = json!({
             "t": "init", "place": self.place_id, "era": self.era, "you": player,
             "user": { "id": uid, "name": name }, "snap": snap, "asm": [], "anims": [], "terrain": J::Null
@@ -83,6 +99,28 @@ impl Game {
     }
 
     pub fn leave(&mut self, player: InstId) {
-        self.dm.destroy(player);
+        self.dm.borrow_mut().destroy(player);
+    }
+
+    pub fn tick(&mut self, dt: f64) -> Vec<LogLine> {
+        self.t += dt;
+        self.host.tick(self.t);
+        self.host.take_logs()
+    }
+
+    pub fn flush(&mut self) -> Option<String> {
+        let mut dm = self.dm.borrow_mut();
+        if dm.journal.is_empty() {
+            return None;
+        }
+        let journal = std::mem::take(&mut dm.journal);
+        let ops = codec::ops_for(&dm, &self.roots, &journal);
+        if ops.is_empty() {
+            return None;
+        }
+        Some(json!({ "t": "rep", "o": ops }).to_string())
     }
 }
+
+#[allow(dead_code)]
+fn unused(_: Change) {}
