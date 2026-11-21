@@ -105,8 +105,10 @@ fn main() {
     let ctx = Ctx::new(&src, &data);
     let base = Base::load(&data).unwrap_or_else(|e| panic!("{}", e));
     let mut look = Look::empty();
+    if !a.contains_key("item") {
     for (k, c) in [HEAD, TORSO, LARM, RARM, LLEG, RLEG].iter().zip([[245, 205, 48], [13, 105, 172], [245, 205, 48], [245, 205, 48], [164, 189, 71], [164, 189, 71]]) {
         look.colors[*k] = [c[0] as f64 / 255.0, c[1] as f64 / 255.0, c[2] as f64 / 255.0];
+    }
     }
     if let Some(c) = a.get("colors") {
         let v: Vec<i64> = c.split(',').map(|s| s.trim().parse().unwrap()).collect();
@@ -116,7 +118,21 @@ fn main() {
             look.colors[*k] = parse_color_int(v[j]);
         }
     }
+    let item_mode = a.contains_key("item");
+    let mut is_pkg = false;
     let mut ids: Vec<String> = vec![];
+    if let Some(i) = a.get("item") {
+        let body = src_fetch_item(&ctx, i);
+        ids = body.0;
+        is_pkg = body.1;
+    }
+    if let Some(i) = a.get("with") {
+        for s in i.split(',').filter(|s| !s.is_empty()) {
+            if !ids.contains(&s.to_string()) {
+                ids.push(s.to_string());
+            }
+        }
+    }
     if let Some(i) = a.get("ids") {
         for s in i.split(',').filter(|s| !s.is_empty()) {
             if !ids.contains(&s.to_string()) {
@@ -131,12 +147,33 @@ fn main() {
         rig: rig.as_ref(),
         scale: a.get("scale").map(|s| swirl_render::r15::parse_scale(s)).unwrap_or([1.0; 4]),
         pose: a.get("pose").cloned(),
+        item: item_mode,
+        keep_pkg_colors: is_pkg,
     };
-    let out_b = swirl_render::items::build_look(&ctx, &base, &mut look, &ids, &opts);
+    let out_b = swirl_render::items::build_look(&ctx, &base, &mut look, &ids, &opts).unwrap_or_else(|e| {
+        eprintln!("error: {}", e);
+        std::process::exit(3)
+    });
     let (cfs, base, btex) = (out_b.cfs, out_b.base, out_b.tex);
     for n in &look.notes {
         eprintln!("note: {}", n);
     }
     let png = draw(&base, &btex, out_b.r15.as_ref(), &look, &cfs, w, h, 4, &view, a.contains_key("exact"));
     std::fs::write(out, png).unwrap();
+}
+
+fn src_fetch_item(ctx: &Ctx, id: &str) -> (Vec<String>, bool) {
+    let body = match ctx.fetch(id) {
+        Some(b) => b,
+        None => {
+            eprintln!("error: item could not be fetched");
+            std::process::exit(3)
+        }
+    };
+    let pkg = swirl_render::items::package_ids(&body);
+    if pkg.is_empty() {
+        (vec![id.to_string()], false)
+    } else {
+        (pkg, true)
+    }
 }

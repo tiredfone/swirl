@@ -15,6 +15,7 @@ pub const HEAD_DIST: f64 = 3.405;
 pub const HEAD_AIM: f64 = 0.0;
 pub const HEAD_MAXOUT: f64 = 1.6;
 pub const HEAD_NEAR: f64 = 2.6;
+pub const ITEM_THUMB_FOV: f64 = 20.0;
 pub const TPL_WI: usize = 585;
 pub const TPL_HI: usize = 559;
 
@@ -62,7 +63,16 @@ impl Base {
 }
 
 #[derive(Clone)]
+pub struct ThumbCam {
+    pub eye: V3,
+    pub up: V3,
+    pub focus: V3,
+    pub fov: f64,
+}
+
+#[derive(Clone)]
 pub struct Item {
+    pub thumb_cam: Option<ThumbCam>,
     pub geom: Mesh,
     pub cf: CF,
     pub size: V3,
@@ -78,6 +88,9 @@ pub struct R15Draw {
 }
 
 pub struct Look {
+    pub only: String,
+    pub pkgview: bool,
+    pub pkg_colors: Option<[[f64; 3]; 6]>,
     pub r15_parts: Vec<(String, swirl_core::rbx::Inst)>,
     pub body_meshes: [Option<swirl_core::rbx::Inst>; 6],
     pub head_mesh: Option<swirl_core::rbx::Inst>,
@@ -107,7 +120,7 @@ pub fn brick(n: i64) -> [f64; 3] {
 
 impl Look {
     pub fn empty() -> Look {
-        Look { r15_parts: vec![], body_meshes: Default::default(), head_mesh: None, face_set: false, colors: [brick(194); 6], shirt: None, pants: None, tshirt: None, face: None, items: vec![], n_hats: 0, tool: false, notes: vec![] }
+        Look { only: String::new(), pkgview: false, pkg_colors: None, r15_parts: vec![], body_meshes: Default::default(), head_mesh: None, face_set: false, colors: [brick(194); 6], shirt: None, pants: None, tshirt: None, face: None, items: vec![], n_hats: 0, tool: false, notes: vec![] }
     }
 }
 
@@ -255,6 +268,7 @@ pub fn draw(base: &Base, tex: &crate::body::BodyTex, r15: Option<&R15Draw>, look
         }
         vp = v;
     } else {
+        let only = look.only.as_str();
         let mut lo = [1e9; 3];
         let mut hi = [-1e9; 3];
         let mut add_box = |cf: &CF, size: V3| {
@@ -270,21 +284,66 @@ pub fn draw(base: &Base, tex: &crate::body::BodyTex, r15: Option<&R15Draw>, look
                 }
             }
         };
-        add_box(&cfs.torso, [2.0, 2.0, 1.0]);
-        add_box(&cfs.head, [2.0, 1.0, 1.0]);
-        for cf in [&cfs.larm, &cfs.rarm, &cfs.lleg, &cfs.rleg] {
-            add_box(cf, [1.0, 2.0, 1.0]);
+        if only.is_empty() {
+            add_box(&cfs.torso, [2.0, 2.0, 1.0]);
+        }
+        if only != "items" {
+            add_box(&cfs.head, [2.0, 1.0, 1.0]);
+        }
+        if only.is_empty() {
+            for cf in [&cfs.larm, &cfs.rarm, &cfs.lleg, &cfs.rleg] {
+                add_box(cf, [1.0, 2.0, 1.0]);
+            }
         }
         for it in &items {
             add_box(&it.cf, it.size);
         }
-        center = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+        let mut center = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
         let radius = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt() / 2.0;
-        let fov = CAM_FOV * std::f64::consts::PI / 180.0;
-        let dist = radius / (fov / 2.0).tan();
+        let mut fov = (if only == "items" { CAM_FOV.min(ITEM_THUMB_FOV) } else { CAM_FOV }) * std::f64::consts::PI / 180.0;
+        let mut dist = radius / (fov / 2.0).tan();
         let cd = norm(CAM_DIR);
-        eye = [center[0] + cd[0] * dist, center[1] + cd[1] * dist, center[2] + cd[2] * dist];
-        let v = mul4(&perspective(fov, w as f64 / h as f64, 0.1, 200.0), &look_at(eye, center, [0.0, 1.0, 0.0]));
+        let mut eye_ = [center[0] + cd[0] * dist, center[1] + cd[1] * dist, center[2] + cd[2] * dist];
+        let mut cam_up = [0.0, 1.0, 0.0];
+        if only == "items" && items.len() == 1 {
+            if let Some(tc) = &items[0].thumb_cam {
+                let it = items[0];
+                let fp = it.cf.apply(tc.focus);
+                let ep = it.cf.apply(tc.eye);
+                let mut dir = norm(sub(ep, fp));
+                let mut up = rmul(&it.cf.r, tc.up);
+                let max_y = (35.0f64 * std::f64::consts::PI / 180.0).sin();
+                if dir[1].abs() > max_y {
+                    let flat = (dir[0] * dir[0] + dir[2] * dir[2]).max(1e-9).sqrt();
+                    let k = (1.0 - max_y * max_y).sqrt() / flat;
+                    dir = [dir[0] * k, if dir[1] < 0.0 { -max_y } else { max_y }, dir[2] * k];
+                    up = [0.0, 1.0, 0.0];
+                }
+                if dot(dir, norm(up)).abs() < 0.98 {
+                    fov = tc.fov.min(ITEM_THUMB_FOV) * std::f64::consts::PI / 180.0;
+                    center = fp;
+                    let mut ic = [0.0; 3];
+                    let mut n = 0.0;
+                    for gp in &it.geom.pos {
+                        let q = it.cf.apply(*gp);
+                        for k in 0..3 {
+                            ic[k] += q[k];
+                        }
+                        n += 1.0;
+                    }
+                    let ib = if n > 0.0 { [ic[0] / n, ic[1] / n, ic[2] / n] } else { it.cf.p };
+                    let off = sub(fp, ib);
+                    if dot(off, off) > (1.5 * radius.max(0.5)).powi(2) {
+                        center = ib;
+                    }
+                    dist = radius.max(0.5) / (fov / 2.0).tan();
+                    eye_ = [center[0] + dir[0] * dist, center[1] + dir[1] * dist, center[2] + dir[2] * dist];
+                    cam_up = norm(up);
+                }
+            }
+        }
+        eye = eye_;
+        let v = mul4(&perspective(fov, w as f64 / h as f64, 0.1, 200.0), &look_at(eye, center, cam_up));
         let (mut nx0, mut nx1, mut ny0, mut ny1) = (1e9f64, -1e9f64, 1e9f64, -1e9f64);
         let mut ndc = |p: V3| {
             let x = v[0] * p[0] + v[4] * p[1] + v[8] * p[2] + v[12];
@@ -308,12 +367,16 @@ pub fn draw(base: &Base, tex: &crate::body::BodyTex, r15: Option<&R15Draw>, look
                 }
             }
         };
-        box_pts(&cfs.torso, [2.0, 2.0, 1.0]);
-        for cf in [&cfs.larm, &cfs.rarm, &cfs.lleg, &cfs.rleg] {
-            box_pts(cf, [1.0, 2.0, 1.0]);
+        if only.is_empty() {
+            box_pts(&cfs.torso, [2.0, 2.0, 1.0]);
+            for cf in [&cfs.larm, &cfs.rarm, &cfs.lleg, &cfs.rleg] {
+                box_pts(cf, [1.0, 2.0, 1.0]);
+            }
         }
-        for p in &base.head.pos {
-            ndc(cfs.head.apply(*p));
+        if only != "items" {
+            for p in &base.head.pos {
+                ndc(cfs.head.apply(*p));
+            }
         }
         for it in &items {
             for p in &it.geom.pos {
@@ -323,7 +386,9 @@ pub fn draw(base: &Base, tex: &crate::body::BodyTex, r15: Option<&R15Draw>, look
         let mut vp_ = v;
         if nx1 > nx0 {
             let mut s = 0.94 / ((nx1 - nx0) / 2.0).max((ny1 - ny0) / 2.0);
-            s = s.min(1.0);
+            if only.is_empty() {
+                s = s.min(1.0);
+            }
             let tx = -s * (nx0 + nx1) / 2.0;
             let ty = -s * (ny0 + ny1) / 2.0;
             vp_ = mul4(&scale_translate(s, tx, ty), &v);
@@ -351,13 +416,24 @@ pub fn draw(base: &Base, tex: &crate::body::BodyTex, r15: Option<&R15Draw>, look
     ];
     let slots = [(0usize, 0usize), (1, 1), (2, 2), (3, 3), (4, 4)];
     for (ci, pi) in slots {
-        if let Some(t) = &tex.parts[pi] {
-            let c = &mut calls[ci];
-            c.mode = 3;
-            c.color = None;
-            c.tex = Some(t.clone());
-            c.studs = false;
-            c.half = None;
+        match &tex.parts[pi] {
+            crate::body::PartTex::Tex(t) => {
+                let c = &mut calls[ci];
+                c.mode = 3;
+                c.color = None;
+                c.tex = Some(t.clone());
+                c.studs = false;
+                c.half = None;
+            }
+            crate::body::PartTex::Flat => {
+                let c = &mut calls[ci];
+                c.mode = 0;
+                c.color = Some(look.colors[[TORSO, RARM, LARM, RLEG, LLEG][pi]]);
+                c.tex = None;
+                c.studs = false;
+                c.half = None;
+            }
+            crate::body::PartTex::Default => {}
         }
     }
     if let Some(t) = &tex.head {
@@ -371,6 +447,14 @@ pub fn draw(base: &Base, tex: &crate::body::BodyTex, r15: Option<&R15Draw>, look
         head.geom = &r.head;
         calls = r.calls.iter().map(|(m, cf, t)| Call { geom: m, cf: *cf, mode: 3, color: None, tex: Some(t.clone()), studs: false, half: None, tint: [1.0; 3], alpha: 1.0, blend: false }).collect();
         calls.push(head);
+    }
+    match look.only.as_str() {
+        "items" => calls.clear(),
+        "head" => {
+            let hd = calls.pop().unwrap();
+            calls = vec![hd];
+        }
+        _ => {}
     }
     for it in &items {
         let blend = it.alpha < 0.999;

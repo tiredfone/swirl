@@ -8,8 +8,15 @@ use std::rc::Rc;
 use swirl_core::math::*;
 use swirl_core::rbx::{Inst, Value};
 
+#[derive(Clone)]
+pub enum PartTex {
+    Default,
+    Tex(Rc<Texture>),
+    Flat,
+}
+
 pub struct BodyTex {
-    pub parts: [Option<Rc<Texture>>; 5],
+    pub parts: [PartTex; 5],
     pub head: Option<Rc<Texture>>,
 }
 
@@ -216,7 +223,9 @@ fn flat_with(color: [f64; 3], w: usize, h: usize) -> Img {
 
 pub fn character_base_2012(ctx: &Ctx, base: &Base, look: &mut Look) -> (Base, BodyTex) {
     let mut base = base.clone();
-    let mut tex = BodyTex { parts: Default::default(), head: None };
+    let mut tex = BodyTex { parts: [PartTex::Default, PartTex::Default, PartTex::Default, PartTex::Default, PartTex::Default], head: None };
+    let pkg = look.pkgview;
+    let tpl = if pkg { package_template_image(ctx) } else { None };
     let names = [TORSO, RARM, LARM, RLEG, LLEG];
     let dims = [[1.0, 1.0, 0.5], [0.5, 1.0, 0.5], [0.5, 1.0, 0.5], [0.5, 1.0, 0.5], [0.5, 1.0, 0.5]];
     let regions = [torso_region(), right_region(), left_region(), right_region(), left_region()];
@@ -224,7 +233,35 @@ pub fn character_base_2012(ctx: &Ctx, base: &Base, look: &mut Look) -> (Base, Bo
     for (pi, &slot) in names.iter().enumerate() {
         let cm = match &look.body_meshes[slot] {
             Some(c) => c.clone(),
-            None => continue,
+            None => {
+                if pkg {
+                    if let (Some(tp), None) = (&tpl, &look.pkg_colors) {
+                        look.colors[slot] = brick(24);
+                        let src = match pi {
+                            0 => &base.torso,
+                            1 => &base.right_arm,
+                            2 => &base.left_arm,
+                            3 => &base.right_leg,
+                            _ => &base.left_leg,
+                        };
+                        let (m, tile) = checker_mesh(src, tp);
+                        match pi {
+                            0 => base.torso = m,
+                            1 => base.right_arm = m,
+                            2 => base.left_arm = m,
+                            3 => base.right_leg = m,
+                            _ => base.left_leg = m,
+                        }
+                        tex.parts[pi] = PartTex::Tex(Rc::new(Texture::new(tile, false)));
+                    } else {
+                        if look.pkg_colors.is_none() {
+                            look.colors[slot] = brick(1);
+                        }
+                        tex.parts[pi] = PartTex::Flat;
+                    }
+                }
+                continue;
+            }
         };
         let name = ["Head", "Torso", "LeftArm", "RightArm", "LeftLeg", "RightLeg"][slot];
         let mesh = match mesh_from(ctx, cm.props.get("MeshId")) {
@@ -242,20 +279,34 @@ pub fn character_base_2012(ctx: &Ctx, base: &Base, look: &mut Look) -> (Base, Bo
             _ => &mut base.left_leg,
         };
         *target = mesh.clone();
-        match part_image(ctx, &cm.props, look.colors[slot], atlas.as_ref()) {
+        if pkg && look.pkg_colors.is_none() {
+            look.colors[slot] = brick(24);
+        }
+        let tpl_atlas = if pkg { package_template_atlas(ctx, tpl.as_ref()) } else { None };
+        let atl = if pkg { tpl_atlas.as_ref() } else { atlas.as_ref() };
+        match part_image(ctx, &cm.props, look.colors[slot], atl) {
             Some(img) => {
                 let mut t = Texture::new(img, false);
                 t.repeat = false;
-                tex.parts[pi] = Some(Rc::new(t));
+                tex.parts[pi] = PartTex::Tex(Rc::new(t));
             }
             None => {
-                let d = dims[pi];
-                *target = template_mesh(&mesh, d[0], d[1], d[2], &regions[pi]);
+                if let (true, Some(tp)) = (pkg, &tpl) {
+                    let (m, tile) = checker_mesh(&mesh, tp);
+                    *target = m;
+                    tex.parts[pi] = PartTex::Tex(Rc::new(Texture::new(tile, false)));
+                } else {
+                    let d = dims[pi];
+                    *target = template_mesh(&mesh, d[0], d[1], d[2], &regions[pi]);
+                }
             }
         }
     }
     let shape = look.head_mesh.clone();
     let cm = look.body_meshes[HEAD].clone();
+    if pkg && shape.is_none() && cm.is_none() && look.pkg_colors.is_none() {
+        look.colors[HEAD] = brick(1);
+    }
     if shape.is_some() || cm.is_some() {
         let props = match (&shape, &cm) {
             (Some(s), _) => s.props.clone(),
@@ -346,4 +397,56 @@ pub fn layer_over(base: &Img, top: &Img) -> Option<Texture> {
     let mut tex = Texture::new(Img { w, h, px }, false);
     tex.repeat = false;
     Some(tex)
+}
+
+pub fn package_template_image(ctx: &Ctx) -> Option<Img> {
+    let b = std::fs::read(format!("{}/package-template.png", ctx.data)).ok()?;
+    let mut tpl = Img::decode(&b, 2048)?;
+    for p in tpl.px.iter_mut() {
+        if *p & 0xFFFFFF == 0x808080 {
+            *p = 0;
+        }
+    }
+    Some(tpl)
+}
+
+fn package_template_atlas(ctx: &Ctx, tpl: Option<&Img>) -> Option<Img> {
+    let tpl = tpl?;
+    let mut atlas = Img::new(1024, 512);
+    composite_layer(ctx, &mut atlas, "CompositPantsTemplate", tpl, [1.0; 3]);
+    composite_layer(ctx, &mut atlas, "CompositShirtTemplate", tpl, [1.0; 3]);
+    Some(atlas)
+}
+
+pub fn checker_mesh(m: &Mesh, tpl: &Img) -> (Mesh, Img) {
+    let c1 = tpl.px[12 * tpl.w + 235];
+    let c2 = tpl.px[12 * tpl.w + 243];
+    let mut px = Vec::with_capacity(256);
+    for y in 0..16usize {
+        for x in 0..16usize {
+            px.push(if ((x >> 3) ^ (y >> 3)) & 1 != 0 { c2 } else { c1 });
+        }
+    }
+    let mut uv = vec![];
+    let n = m.pos.len();
+    let mut i = 0;
+    while i + 2 < n {
+        let (a, b, c) = (m.pos[i], m.pos[i + 1], m.pos[i + 2]);
+        let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let nx = (e1[1] * e2[2] - e1[2] * e2[1]).abs();
+        let ny = (e1[2] * e2[0] - e1[0] * e2[2]).abs();
+        let nz = (e1[0] * e2[1] - e1[1] * e2[0]).abs();
+        for p in [a, b, c] {
+            if nz >= nx && nz >= ny {
+                uv.push([p[0] * 4.0, p[1] * 4.0]);
+            } else if nx >= ny {
+                uv.push([p[2] * 4.0, p[1] * 4.0]);
+            } else {
+                uv.push([p[0] * 4.0, p[2] * 4.0]);
+            }
+        }
+        i += 3;
+    }
+    (Mesh { pos: m.pos.clone(), nrm: m.nrm.clone(), uv }, Img { w: 16, h: 16, px })
 }

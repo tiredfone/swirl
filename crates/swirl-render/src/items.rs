@@ -361,7 +361,7 @@ pub fn build_handle(ctx: &Ctx, base: &Base, h: &Inst, cf: CF, notes: &mut Vec<St
         tx.cut = cut;
         item_tex = Some(Rc::new(tx));
     }
-    Some(Item { geom: Mesh { pos, nrm, uv }, cf, size, tex: item_tex, color, tint, alpha })
+    Some(Item { thumb_cam: None, geom: Mesh { pos, nrm, uv }, cf, size, tex: item_tex, color, tint, alpha })
 }
 
 pub fn build_decals(ctx: &Ctx, h: &Inst, cf: CF) -> Vec<Item> {
@@ -421,7 +421,7 @@ pub fn build_decals(ctx: &Ctx, h: &Inst, cf: CF) -> Vec<Item> {
         let cut = alpha_cuts_out(&img, &geom.uv);
         let mut tx = Texture::new(img, true);
         tx.cut = cut;
-        out.push(Item { geom, cf, size, tex: Some(Rc::new(tx)), color: [1.0; 3], tint: [1.0; 3], alpha });
+        out.push(Item { thumb_cam: None, geom, cf, size, tex: Some(Rc::new(tx)), color: [1.0; 3], tint: [1.0; 3], alpha });
     }
     out
 }
@@ -439,9 +439,11 @@ pub struct BuildOpts<'a> {
     pub rig: Option<&'a crate::r15::Rig>,
     pub scale: [f64; 4],
     pub pose: Option<String>,
+    pub item: bool,
+    pub keep_pkg_colors: bool,
 }
 
-pub fn build_look(ctx: &Ctx, base: &Base, look: &mut Look, ids: &[String], o: &BuildOpts) -> BuildOut {
+pub fn build_look(ctx: &Ctx, base: &Base, look: &mut Look, ids: &[String], o: &BuildOpts) -> Result<BuildOut, String> {
     let (view, stance) = (o.view, o.stance);
     let mut face_set = false;
     let mut accs: Vec<Inst> = vec![];
@@ -451,6 +453,31 @@ pub fn build_look(ctx: &Ctx, base: &Base, look: &mut Look, ids: &[String], o: &B
     }
     look.face_set = face_set;
     accs.truncate(8);
+    if o.item {
+        if let Some(c) = look.pkg_colors {
+            look.colors = c;
+        }
+        let body = look.body_meshes.iter().any(|b| b.is_some()) || look.head_mesh.is_some();
+        let clothes = look.shirt.is_some() || look.pants.is_some() || look.tshirt.is_some();
+        let worn = !accs.is_empty() || tool.is_some();
+        if worn && !body && !clothes && !face_set {
+            look.only = "items".into();
+        } else if !worn && !clothes && (look.head_mesh.is_some() || face_set) && !look.body_meshes.iter().any(|b| b.is_some()) {
+            look.only = "head".into();
+        } else if clothes && !body && !worn && !face_set {
+            for k in 0..6 {
+                look.colors[k] = brick(1);
+            }
+        } else if !worn && !clothes && !body && !face_set {
+            return Err(format!("item is not a hat, gear, face, head, shirt, pants, t-shirt or package{}", look.notes.first().map(|n| format!(" ({})", n)).unwrap_or_default()));
+        }
+        if look.only.is_empty() && body && !clothes {
+            look.pkgview = true;
+        }
+        if !o.keep_pkg_colors {
+            look.pkg_colors = None;
+        }
+    }
     if view == "head" {
         tool = None;
     }
@@ -476,6 +503,7 @@ pub fn build_look(ctx: &Ctx, base: &Base, look: &mut Look, ids: &[String], o: &B
             Some(h) => {
                 let cf = r15.as_ref().and_then(|r| r.accessory_frame(h)).unwrap_or_else(|| accessory_cf(acc, h, &cfs));
                 if let Some(mut it) = build_handle(ctx, base, h, cf, &mut notes) {
+                    it.thumb_cam = thumb_cam_of(acc, h);
                     let k = r15.as_ref().map(|r| r.accessory_scale(h));
                     if let (Some(r), Some(k)) = (r15.as_ref(), k) {
                         r.scale_item(&mut it, k);
@@ -518,7 +546,10 @@ pub fn build_look(ctx: &Ctx, base: &Base, look: &mut Look, ids: &[String], o: &B
     look.notes = notes;
     let (nb, bt) = crate::body::character_base_2012(ctx, base, look);
     let r15d = r15.as_ref().map(|r| R15Draw { calls: r.body_calls(ctx, look), head: r.mesh_scaled("Head", &nb.head) });
-    BuildOut { cfs, base: nb, tex: bt, r15: r15d }
+    if look.only == "items" && look.items.is_empty() {
+        return Err(format!("the item could not be drawn{}", look.notes.first().map(|n| format!(" ({})", n)).unwrap_or_default()));
+    }
+    Ok(BuildOut { cfs, base: nb, tex: bt, r15: r15d })
 }
 
 pub fn stance_r6(cfs: &mut Cfs, tool: bool, stance: &str) {
@@ -547,4 +578,42 @@ pub fn stance_r6(cfs: &mut Cfs, tool: bool, stance: &str) {
 
 pub fn mesh_bytes_pub(ctx: &Ctx, r: &str) -> Option<Vec<u8>> {
     mesh_bytes(ctx, r)
+}
+
+pub fn thumb_cam_of(acc: &Inst, h: &Inst) -> Option<ThumbCam> {
+    h.props.get("CFrame")?;
+    for c in &acc.children {
+        if c.cls != "Camera" || !c.props.contains_key("CFrame") {
+            continue;
+        }
+        let inv = cf_from(h.props.get("CFrame")).inv();
+        let cam = inv.mul(&cf_from(c.props.get("CFrame")));
+        let fp = inv.apply(cf_from(c.props.get("Focus").or(c.props.get("CFrame"))).p);
+        let d = sub(cam.p, fp);
+        if dot(d, d) < 1e-6 {
+            return None;
+        }
+        let fov = c.props.get("FieldOfView").and_then(|v| v.as_f64()).unwrap_or(70.0);
+        let fov = if fov == 0.0 { 70.0 } else { fov };
+        return Some(ThumbCam { eye: cam.p, up: [cam.r[1], cam.r[4], cam.r[7]], focus: fp, fov: fov.clamp(15.0, 90.0) });
+    }
+    None
+}
+
+pub fn package_ids(body: &[u8]) -> Vec<String> {
+    let s = String::from_utf8_lossy(body);
+    let t = s.trim();
+    if t.is_empty() || t.len() > 4096 || t.starts_with('<') || !t.chars().all(|c| (' '..='~').contains(&c) || c.is_whitespace()) {
+        return vec![];
+    }
+    let mut out: Vec<String> = vec![];
+    for piece in t.split(|c: char| c == ';' || c == ',' || c == '|' || c.is_whitespace()) {
+        if let Some(id) = crate::look::asset_id(piece) {
+            if !out.contains(&id) {
+                out.push(id);
+            }
+        }
+    }
+    out.truncate(16);
+    out
 }

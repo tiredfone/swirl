@@ -244,8 +244,54 @@ pub fn add_asset(ctx: &Ctx, look: &mut Look, id: &str, face_set: &mut bool, accs
         }
     };
     if !holds_wearable(&tree.roots, 0) && String::from_utf8_lossy(&b).contains("BodyColors") {
-        look.notes.push(format!("{}: body colour packages are not ported yet", id));
+        if let Some(c) = body_colors(&tree.roots) {
+            look.pkg_colors = Some(c);
+        }
         return;
     }
     absorb(ctx, look, &tree.roots, id, face_set, accs, tool);
+}
+
+fn find_body_colors(list: &[Inst]) -> Option<&Inst> {
+    for i in list {
+        if i.cls == "BodyColors" {
+            return Some(i);
+        }
+        if let Some(r) = find_body_colors(&i.children) {
+            return Some(r);
+        }
+    }
+    None
+}
+
+const DEFAULT_HEX: [[f64; 3]; 6] = [
+    [245.0 / 255.0, 205.0 / 255.0, 48.0 / 255.0],
+    [13.0 / 255.0, 105.0 / 255.0, 172.0 / 255.0],
+    [245.0 / 255.0, 205.0 / 255.0, 48.0 / 255.0],
+    [245.0 / 255.0, 205.0 / 255.0, 48.0 / 255.0],
+    [164.0 / 255.0, 189.0 / 255.0, 71.0 / 255.0],
+    [164.0 / 255.0, 189.0 / 255.0, 71.0 / 255.0],
+];
+
+pub fn body_colors(roots: &[Inst]) -> Option<[[f64; 3]; 6]> {
+    let bc = find_body_colors(roots)?;
+    let names = ["HeadColor", "TorsoColor", "LeftArmColor", "RightArmColor", "LeftLegColor", "RightLegColor"];
+    let mut out = DEFAULT_HEX;
+    for (j, n) in names.iter().enumerate() {
+        let v3 = bc.props.get(&format!("{}3", n));
+        let v = bc.props.get(*n);
+        if let Some(Value::Color3(r, g, b)) = v3 {
+            let q = |x: f64| (x * 255.0).round() / 255.0;
+            out[j] = [q(*r), q(*g), q(*b)];
+        } else if let Some(Value::Brick(n)) = v {
+            if swirl_core::brickcolors::has(*n) {
+                out[j] = brick(*n);
+            }
+        } else if let Some(Value::Num(n)) = v {
+            if swirl_core::brickcolors::has(*n as i64) {
+                out[j] = brick(*n as i64);
+            }
+        }
+    }
+    Some(out)
 }
