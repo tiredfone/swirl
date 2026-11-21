@@ -10,6 +10,7 @@ members = [
     "crates/swirl-client",
     "crates/swirl-net",
     "crates/swirl-bootstrapper",
+    "crates/swirl-desktop",
 ]
 
 [profile.release]
