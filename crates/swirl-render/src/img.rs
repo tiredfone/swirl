@@ -71,6 +71,15 @@ impl Img {
         Some(Img { w, h, px })
     }
 
+    pub fn decode_cap(b: &[u8], max_side: usize, big_side: usize) -> Option<Img> {
+        let im = Img::decode(b, big_side.max(max_side))?;
+        if im.w > max_side || im.h > max_side {
+            Some(im.resized(im.w.min(max_side), im.h.min(max_side)))
+        } else {
+            Some(im)
+        }
+    }
+
     pub fn decode_hat(b: &[u8], cap: usize) -> Option<Img> {
         let im = Img::decode(b, 4096)?;
         let mut tw = 1;

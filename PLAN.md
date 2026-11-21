@@ -17,16 +17,16 @@ Swirl is the Rust rewrite of Chocolate (game client and server) and vanilla (sof
 | `BrickColors.php` | `swirl-core/brickcolors.rs` | done |
 | `Geometry.php` | `swirl-core/math.rs` | done |
 | `Rbxm.php` (XML) | `swirl-core/rbx.rs` | done |
-| `Rbxm.php` (binary, LZ4) | `swirl-core/rbx.rs` | todo |
+| `Rbxm.php` (binary, LZ4, zstd) | `swirl-core/rbx.rs` | done; tree and property counts match PHP on 8 real binary models (only invalid-UTF-8 names differ) |
 | `Img.php` | `swirl-render/img.rs` | PNG only; JPEG, WebP, GIF todo; GD alpha quantisation matched |
 | `Texture.php` | `swirl-render/texture.rs` | done |
 | `Meshes.php` | `swirl-render/mesh.rs` | v1 to v5 done; v6/v7 chunked and `Draco.php` todo |
-| `LookBuilder.php` (clothes, face, hats, gear, welds, decals) | `swirl-render/look.rs`, `items.rs` | done except CharacterMesh, head SpecialMesh, material tiles |
+| `LookBuilder.php` (clothes, face, hats, gear, welds, decals) | `swirl-render/look.rs`, `items.rs` | done except material tiles, `packageGripOf` |
 | `Scene.php` draw (body, head views), `setup` | `swirl-render/scene.rs`, `raster.rs` | done |
 | `ReferenceRaster.php` | `swirl-render/raster.rs` | done (bit exact vs PHP `exact`) |
 | `FastRaster.php` | `swirl-render/raster.rs` | todo (PHP default; differs from reference by about 0.1 to 0.5 mean error) |
 | `RigR15.php`, `Character2016.php` | `swirl-render/r15.rs`, `char2016.rs` | todo (R6 stances done in `items.rs`) |
-| `ItemRender.php` (item and package thumbnails, `characterBase2012`) | `swirl-render/item.rs` | todo |
+| `ItemRender.php` `characterBase2012`, `partImage`, `clothesAtlas`, head variants | `swirl-render/body.rs` | done (avatar path); item and package thumbnails (`renderItem`) todo |
 | `SceneRender.php` (places, sky, materials, terrain parts, eras) | `swirl-render/place.rs` | todo |
 | `Particles*.php` | `swirl-render/particles.rs` | todo |
 | `Vanilla.php`, `avatar.php` entry | `swirl-vanilla` | CLI done (ids, colors, size, view, stance); HTTP and request validation todo |
@@ -76,7 +76,10 @@ Numbers are mean absolute error per channel (rgba), percentage of pixels off by 
 | gear 1049 + hat 1002 | 0 / 0% / 0 | 0.24 / 0.9% / 38 |
 | head view with hats | 0.07 / 0% / 8 | 0.79 / 3.0% / 28 |
 | stances walking, sitting, overlord with hat and gear | 0.07 / 0.002 to 0.005% / 16 | not recorded |
+| CharacterMesh packages 1106; 1151+1297; 1302+1304+1306+hat | 0 / 0% / 1; 0 / 0% / 0; 0.09 / 0.01% / 16 | 0.37 to 0.42 / 1.3 to 2.4% / 34 |
+| head meshes (SpecialMesh, CylinderMesh bevel, BlockMesh) 1008 1086 1090 1092 1094 115 130 154 1661 1756; head view 1095 | 0 / 0% / 0 | 0.16 to 0.42 (head view 1095: 1.7 / 9.0%) |
+| assets over 8 MB (135, 1083) refused like PHP | identical | identical |
 
 The only difference against exact comes from resizing non-power-of-two textures (PHP uses GD `imagescale`, Swirl its own bilinear). Speed: about 0.2 s per body render against 1.1 s for PHP.
 
-Known gaps (each needs a PHP case before it counts as done): CharacterMesh and head meshes, R15 and scale, packages, item/mesh/model/animation thumbnails, place scenes, eras, terrain, 2016 renderer, particles, material tiles, binary models, chunked meshes, JPEG textures, FastRaster.
+Known gaps (each needs a PHP case before it counts as done): R15 and scale, R15 packages, `packageGripOf`, item/mesh/model/animation thumbnails, place scenes, eras, terrain, 2016 renderer, particles, material tiles, chunked meshes, JPEG textures, FastRaster.

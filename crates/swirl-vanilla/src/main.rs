@@ -124,10 +124,10 @@ fn main() {
             }
         }
     }
-    let cfs = swirl_render::items::build_look(&ctx, &base, &mut look, &ids, &view, a.get("stance").map(|s| s.as_str()).unwrap_or("normal"));
+    let (cfs, base, btex) = swirl_render::items::build_look(&ctx, &base, &mut look, &ids, &view, a.get("stance").map(|s| s.as_str()).unwrap_or("normal"));
     for n in &look.notes {
         eprintln!("note: {}", n);
     }
-    let png = draw(&base, &look, &cfs, w, h, 4, &view);
+    let png = draw(&base, &btex, &look, &cfs, w, h, 4, &view);
     std::fs::write(out, png).unwrap();
 }

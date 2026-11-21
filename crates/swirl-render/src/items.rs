@@ -219,7 +219,7 @@ fn php_cast_int(v: Option<&Value>, d: i64) -> i64 {
     v.and_then(|v| v.as_f64()).map(|f| f as i64).unwrap_or(d)
 }
 
-fn mesh_bytes(ctx: &Ctx, r: &str) -> Option<Vec<u8>> {
+pub fn mesh_bytes(ctx: &Ctx, r: &str) -> Option<Vec<u8>> {
     if r.to_ascii_lowercase().starts_with("rbxasset://") {
         let rel = &r[11..];
         if !rel.is_empty() && rel.bytes().all(|b| b.is_ascii_digit()) {
@@ -426,13 +426,14 @@ pub fn build_decals(ctx: &Ctx, h: &Inst, cf: CF) -> Vec<Item> {
     out
 }
 
-pub fn build_look(ctx: &Ctx, base: &Base, look: &mut Look, ids: &[String], view: &str, stance: &str) -> Cfs {
+pub fn build_look(ctx: &Ctx, base: &Base, look: &mut Look, ids: &[String], view: &str, stance: &str) -> (Cfs, Base, crate::body::BodyTex) {
     let mut face_set = false;
     let mut accs: Vec<Inst> = vec![];
     let mut tool: Option<Inst> = None;
     for id in ids {
         crate::look::add_asset(ctx, look, id, &mut face_set, &mut accs, &mut tool);
     }
+    look.face_set = face_set;
     accs.truncate(8);
     if view == "head" {
         tool = None;
@@ -476,7 +477,8 @@ pub fn build_look(ctx: &Ctx, base: &Base, look: &mut Look, ids: &[String], view:
     }
     look.items = items;
     look.notes = notes;
-    cfs
+    let (nb, bt) = crate::body::character_base_2012(ctx, base, look);
+    (cfs, nb, bt)
 }
 
 pub fn stance_r6(cfs: &mut Cfs, tool: bool, stance: &str) {

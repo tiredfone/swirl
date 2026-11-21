@@ -50,7 +50,7 @@ impl<'a> Ctx<'a> {
     }
 
     pub fn fetch(&self, id: &str) -> Option<Vec<u8>> {
-        self.src.fetch(id)
+        self.src.fetch(id).filter(|b| b.len() <= 8 * 1024 * 1024)
     }
 
     pub fn image(&self, r: &str, depth: usize) -> Option<Img> {
@@ -189,9 +189,28 @@ pub fn absorb(ctx: &Ctx, look: &mut Look, roots: &[Inst], tag: &str, face_set: &
                         *tool = Some(x.clone());
                     }
                 }
-                "CharacterMesh" | "SpecialMesh" | "CylinderMesh" | "BlockMesh" | "FileMesh" => {
-                    look.notes.push(format!("{}: {} is not ported yet", tag, x.cls));
+                "CharacterMesh" => {
+                    let slot = match x.props.get("BodyPart") {
+                        Some(Value::Num(n)) => Some(*n as i64),
+                        Some(Value::Str(s)) => match s.as_str() {
+                            "Head" => Some(0),
+                            "Torso" => Some(1),
+                            "LeftArm" => Some(2),
+                            "RightArm" => Some(3),
+                            "LeftLeg" => Some(4),
+                            "RightLeg" => Some(5),
+                            _ => None,
+                        },
+                        None => Some(0),
+                        _ => None,
+                    };
+                    if let Some(s) = slot {
+                        if (0..6).contains(&s) {
+                            look.body_meshes[s as usize] = Some(x.clone());
+                        }
+                    }
                 }
+                "SpecialMesh" | "CylinderMesh" | "BlockMesh" | "FileMesh" => look.head_mesh = Some(x.clone()),
                 _ => take(ctx, look, &x.children, depth + 1, tag, face_set, accs, tool),
             }
         }

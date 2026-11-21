@@ -18,6 +18,7 @@ pub const HEAD_NEAR: f64 = 2.6;
 pub const TPL_WI: usize = 585;
 pub const TPL_HI: usize = 559;
 
+#[derive(Clone)]
 pub struct Base {
     pub head: Mesh,
     pub head_raw: Mesh,
@@ -72,6 +73,9 @@ pub struct Item {
 }
 
 pub struct Look {
+    pub body_meshes: [Option<swirl_core::rbx::Inst>; 6],
+    pub head_mesh: Option<swirl_core::rbx::Inst>,
+    pub face_set: bool,
     pub colors: [[f64; 3]; 6],
     pub shirt: Option<Img>,
     pub pants: Option<Img>,
@@ -97,7 +101,7 @@ pub fn brick(n: i64) -> [f64; 3] {
 
 impl Look {
     pub fn empty() -> Look {
-        Look { colors: [brick(194); 6], shirt: None, pants: None, tshirt: None, face: None, items: vec![], n_hats: 0, tool: false, notes: vec![] }
+        Look { body_meshes: Default::default(), head_mesh: None, face_set: false, colors: [brick(194); 6], shirt: None, pants: None, tshirt: None, face: None, items: vec![], n_hats: 0, tool: false, notes: vec![] }
     }
 }
 
@@ -206,7 +210,7 @@ fn scale_translate(s: f64, tx: f64, ty: f64) -> M4 {
     [s, 0.0, 0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, tx, ty, 0.0, 1.0]
 }
 
-pub fn draw(base: &Base, look: &Look, cfs: &Cfs, w: usize, h: usize, ss: usize, view: &str) -> Vec<u8> {
+pub fn draw(base: &Base, tex: &crate::body::BodyTex, look: &Look, cfs: &Cfs, w: usize, h: usize, ss: usize, view: &str) -> Vec<u8> {
     let head_view = view == "head";
     let items: Vec<&Item> = look.items.iter().collect();
     let n_hats = look.n_hats.min(items.len());
@@ -347,6 +351,23 @@ pub fn draw(base: &Base, look: &Look, cfs: &Cfs, w: usize, h: usize, ss: usize, 
             let c = [it.color[0] * it.tint[0], it.color[1] * it.tint[1], it.color[2] * it.tint[2]];
             calls.push(Call { geom: &it.geom, cf: it.cf, mode: 0, color: Some(c), tex: None, studs: false, half: None, tint: [1.0; 3], alpha: it.alpha, blend });
         }
+    }
+    let slots = [(0usize, 0usize), (1, 1), (2, 2), (3, 3), (4, 4)];
+    for (ci, pi) in slots {
+        if let Some(t) = &tex.parts[pi] {
+            let c = &mut calls[ci];
+            c.mode = 3;
+            c.color = None;
+            c.tex = Some(t.clone());
+            c.studs = false;
+            c.half = None;
+        }
+    }
+    if let Some(t) = &tex.head {
+        let c = &mut calls[5];
+        c.mode = 3;
+        c.color = None;
+        c.tex = Some(t.clone());
     }
     let mut solid = Vec::new();
     let mut glass = Vec::new();
