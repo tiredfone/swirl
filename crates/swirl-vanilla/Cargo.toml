@@ -1,0 +1,13 @@
+[package]
+name = "swirl-vanilla"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "swirl-vanilla"
+path = "src/main.rs"
+
+[dependencies]
+swirl-core = { path = "../swirl-core" }
+swirl-render = { path = "../swirl-render" }
+png = "0.17"

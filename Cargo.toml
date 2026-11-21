@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/swirl-core",
+    "crates/swirl-render",
+    "crates/swirl-vanilla",
+    "crates/swirl-physics",
+    "crates/swirl-lua",
+    "crates/swirl-server",
+    "crates/swirl-client",
+]
+
+[profile.release]
+opt-level = 3
+debug = false
+
+[profile.dev]
+opt-level = 1
