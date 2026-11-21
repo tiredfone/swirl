@@ -2,6 +2,7 @@ pub mod brickcolors;
 pub mod classes;
 pub mod instance;
 pub mod math;
+pub mod meshfile;
 pub mod rbx;
 
 #[cfg(test)]
