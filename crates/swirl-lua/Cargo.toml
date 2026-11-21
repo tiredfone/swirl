@@ -5,3 +5,4 @@ edition = "2021"
 
 [dependencies]
 swirl-core = { path = "../swirl-core" }
+mlua = { version = "0.10", features = ["lua51", "vendored"] }

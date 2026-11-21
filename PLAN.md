@@ -4,9 +4,9 @@ Swirl is the Rust rewrite of Chocolate (game client and server) and vanilla (sof
 
 ## Phases
 
-1. vanilla to parity (avatars, headshots, animations, R15, items done; model, mesh and place scenes todo).
+1. vanilla to parity: done for avatars, headshots, animations, R15, items, model, mesh and place scenes (with era and terrain parts). Remaining: Draco meshes, WebP/GIF textures, 2016 renderer, scene Hint/Message overlays, jpg/webp output; these exit 4 and fall back to PHP.
 2. Switch Solar renders to Swirl behind one toggle file (`/var/www/html/core/swirl.enabled`) with PHP vanilla as the fallback. Code is in place and off by default; see Solar switch below.
-3. 3D views with Swirl. Chosen approach: `swirl-vanilla` gets a `scene` mode that prints the data the viewer needs (per-part CFrames from `items::build_look`, converted meshes as typed arrays, textures as PNG URLs, body colours, stance), served next to the render endpoint. `js/mobile/avatar3d.js` asks for it and falls back to the current chocolate `avatarview.js` path on any error. Later, `swirl-render` compiled to wasm replaces the JS viewer. Not started.
+3. 3D views. Finding: the site's 3D views (`avatar3d.js`, `chocolate/client/avatarview.js`) never call vanilla or Arbiter; they build the character in the browser from `/asset` data with chocolate's own renderer, so they keep working unchanged while renders move to Swirl. The Swirl-driven viewer is part of phase 5 (swirl-client compiled to wasm). Original idea, kept for phase 5: `swirl-vanilla` gets a `scene` mode that prints the data the viewer needs (per-part CFrames from `items::build_look`, converted meshes as typed arrays, textures as PNG URLs, body colours, stance), served next to the render endpoint. `js/mobile/avatar3d.js` asks for it and falls back to the current chocolate `avatarview.js` path on any error. Later, `swirl-render` compiled to wasm replaces the JS viewer. Not started.
 4. swirl-core and swirl-server: instance tree, class tables, rbxl/rbxm readers, Lua host (mlua, lua51 + vendored), physics, humanoid, replication, WebSocket protocol identical to `chocolate/server`.
 5. swirl-client (wasm32-unknown-unknown + wasm-bindgen, WebGL2 via wgpu or raw web-sys), 2012 and 2018 eras. The JS client keeps working against the Swirl server during the transition.
 
@@ -62,24 +62,29 @@ What stays JS for now: the Studio UI, CoreScripts (Lua, run on the Lua host), co
 
 ## Solar switch
 
-`core/class/Arbiter.php` (`swirlRender`, used by avatar, headshot, animation, R15 package and item renders) and `core/vanilla-rcc/avatar.php` (`swirl_png`, `/api/v1/render` for 2012, no zoom/yaw/pitch, png, smooth) run `/var/www/swirl/target/release/swirl-vanilla` as a child process with an argument list (no shell), a 45 second limit and a temp PNG under /tmp. Any non-zero exit, timeout or empty image falls back to the PHP renderer, and Arbiter logs `swirl fallback code=N` to render.log. Exit codes: 3 item error, 4 unsupported asset format, 5 asset not on local disk (Solar's PHP path then fetches it over HTTP as before). The switch is the file `/var/www/html/core/swirl.enabled`: create it to turn Swirl on, delete it to turn it off at once. It does not exist yet. `RENDER_VERSION` in avatar.php was bumped to `vanilla-1.7-lighting-12`. Model, mesh and place renders (`renderScene`) always use PHP until ported.
+`core/class/Arbiter.php` (`swirlRender`, used by avatar, headshot, animation, R15 package and item renders) and `core/vanilla-rcc/avatar.php` (`swirl_png`, `/api/v1/render` for 2012, no zoom/yaw/pitch, png, smooth) run `/var/www/swirl/target/release/swirl-vanilla` as a child process with an argument list (no shell), a 45 second limit and a temp PNG under /tmp. Any non-zero exit, timeout or empty image falls back to the PHP renderer, and Arbiter logs `swirl fallback code=N` to render.log. Exit codes: 3 item error, 4 unsupported asset format, 5 asset not on local disk (Solar's PHP path then fetches it over HTTP as before). The switch is the file `/var/www/html/core/swirl.enabled`: create it to turn Swirl on, delete it to turn it off at once. It does not exist yet. `RENDER_VERSION` in avatar.php was bumped to `vanilla-1.7-lighting-12`. Model, mesh and place renders go through `swirlScene` in Arbiter (place bytes and the terrain mesh blobs from `withTerrainParts` are written to /tmp and passed as `--scene-file` and `--content-dir`), with the same fallback. `tools/install.sh` also gates on a model, a place and a mesh parity check. The binary rejects unknown options (exit 2) so a stale binary can never answer a newer request wrongly.
 
 ## Parity status
 
-Mean absolute error per channel (rgba), percent of pixels off by more than 8, max difference, against PHP in its default mode (the fast rasteriser, what Solar runs). Test assets come from /var/www/assets; PNGs in /tmp/swirl/p_*.
+Mean absolute error per channel (rgba), percent of pixels off by more than 8, max difference, against PHP in its default mode. PNGs in /tmp/swirl.
 
 | Case | mae / pct>8 / max |
 | --- | --- |
-| plain R6 352x352, head view 150x150 | 0 / 0% / 0 |
-| shirt + pants + hat + gear | 0.066 / 0% / 8 |
-| face decal head view, hats 102+112, accessories 410+539, gear 1011, head meshes 1086 | 0 / 0% / 0 |
-| stances walking (hat+gear) | 0.065 / 0.003% / 16; sitting 0 |
-| CharacterMesh package 1106; 1302+1304+1306+hat | 0.0001 / 0% / 2; 0.082 / 0.006% / 16 |
-| R15 plain, pose 507766388; with gear | 0 / 0% / 0 |
-| R15 scaled with hats; R15 package 1106 + hat; R15 head view | 0.04 / 0.001% / 16; 0.076 / 0.002% / 16; 0.105 / 0% / 6 |
-| item thumbnails 512x512: accessory 410, gear 1011, shirt 1287, face 121, head 1086, package 1106 | 0 / 0% / 0-3 |
-| item thumbnail: hat 1005 | 0.42 / 0.16% / 17 |
+| plain R6, head view, face, hats, accessories, gear, head meshes, R15 plain and with gear | 0 / 0% / 0 |
+| shirt, pants, hat, gear; stances | 0.065 / 0% / 8 to 16 |
+| CharacterMesh packages; R15 packages, scale, head view | 0 to 0.1 / 0% / 2 to 16 |
+| item thumbnails (accessory, gear, shirt, face, head, package) | 0 / 0% / 0 to 3 |
+| item thumbnail hat 1005, zoom/yaw/pitch variants | 0.1 to 0.55 / up to 0.24% / 15 to 18 |
+| model thumbnails 512x512 (assets 11, 1085, 1074, 1, 1002, 1005, 1011, 1015, 1031, 104, 1043) | 0.01 to 0.18 / 0% / 3 |
+| mesh thumbnail (asset 1000) | 0.001 / 0% / 3 |
+| place thumbnails 854x480, era 2012 (assets 1939, 352, 564, 1197) | 0.29 to 0.42 / 0% / 1 to 3 |
+| place thumbnail, era 2018 (asset 3) | 0.54 / 0% / 4 |
+| place with Chocolate terrain (asset 1968 via withTerrainParts), 2012 and 2018 | 0.42, 0.53 / 0% / 3, 5 |
 
-Exact mode (PHP `exact => true`) also matches pixel for pixel on all avatar cases. The only recorded residuals come from textures whose sides are not powers of two: PHP scales them with GD `imagescale` and Swirl with its own bilinear. Speed: 0.2 s per body render against 1.1 s for PHP.
+Residuals: textures with sides that are not powers of two (PHP uses GD `imagescale`), skybox decoding and scaling (JPEG decoder and GD scaling differ slightly), and the final GD `imagecopyresampled` (ported in f32 from memory, matches to within 3 levels). Speed: 0.2 s per body render, 0.3 to 8 s per place against PHP's several seconds.
 
-Not yet at parity or not ported: glass (transparent items) and particles in the fast rasteriser, model/mesh/place scenes, eras and terrain parts, 2016 renderer, Draco meshes, WebP/GIF textures, zoom/yaw/pitch camera options, jpg/webp output, the PHP default for assets fetched over HTTP.
+## Chocolate port status
+
+- swirl-core: class table (394 classes, 183 enums) dumped from `chocolate/shared/classes.js` by `tools/dump-classes.mjs` into `data/classes.json`, resolved in `classes.rs` (is_a, canonical_prop, creatable, services, eras); `instance.rs` has the DataModel arena (create, services, parent with cycle check, props with defaults, find, descendants, clone, destroy, load from an rbx tree). Tests pass, including loading a real place.
+- swirl-lua: mlua with lua51 and vendored builds and reports Lua 5.1 semantics (no string.split, setfenv and unpack present).
+- Not started: Lua host bindings (luahost.js, runtime.lua), signals and replication, physics, humanoid, server protocol, wasm client.
