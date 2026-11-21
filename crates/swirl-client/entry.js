@@ -37,6 +37,28 @@ export async function start(opts = {}) {
     setStatus('Joining');
     client.connect(base + '?ticket=' + encodeURIComponent(t.ticket));
     setInterval(() => client.ping(), 5000);
+    const assetUrl = (id) => ((cfg.endpoints && cfg.endpoints.asset) || '/asset/?id={id}').replace('{id}', id);
+    let inflight = 0;
+    const fetchAsset = async (r) => {
+      inflight++;
+      try {
+        const resp = await fetch(assetUrl(r.id), { credentials: 'same-origin' });
+        if (!resp.ok) throw new Error('status ' + resp.status);
+        let buf = new Uint8Array(await resp.arrayBuffer());
+        if (buf[0] === 0x25) buf = buf.subarray(buf.indexOf(10) + 1);
+        if (r.k === 'mesh') client.provide_mesh(r.id, buf);
+        else client.provide_texture(r.id, await createImageBitmap(new Blob([buf]), { premultiplyAlpha: 'none', colorSpaceConversion: 'none' }));
+      } catch (e) {
+        client.provide_failed(r.k, r.id);
+      } finally {
+        inflight--;
+      }
+    };
+    const pending = [];
+    setInterval(() => {
+      for (const r of JSON.parse(client.take_requests())) pending.push(r);
+      while (inflight < 6 && pending.length) fetchAsset(pending.shift());
+    }, 80);
     let shown = false;
     const loop = () => {
       client.frame(performance.now());

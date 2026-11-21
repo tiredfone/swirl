@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use swirl_net::controller::{Controller, Input};
 use swirl_net::mat;
@@ -9,15 +9,15 @@ use wasm_bindgen::JsCast;
 use web_sys::{HtmlCanvasElement, WebGl2RenderingContext as G, WebGlProgram, WebGlUniformLocation, WebSocket};
 
 const VS: &str = "#version 300 es
-in vec3 p; in vec3 n;
+in vec3 p; in vec3 n; in vec2 uv;
 uniform mat4 vp; uniform mat4 m;
-out vec3 vn;
-void main(){ vn = mat3(m) * n; gl_Position = vp * m * vec4(p,1.0); }";
+out vec3 vn; out vec2 vuv;
+void main(){ vn = mat3(m) * n; vuv = uv; gl_Position = vp * m * vec4(p,1.0); }";
 const FS: &str = "#version 300 es
 precision mediump float;
-in vec3 vn; uniform vec4 col; out vec4 o;
+in vec3 vn; in vec2 vuv; uniform vec4 col; uniform sampler2D tex; uniform float useTex; out vec4 o;
 void main(){ vec3 N = normalize(vn); float d = max(dot(N, normalize(vec3(0.47,0.82,-0.31))), 0.0); float f = max(dot(N, normalize(vec3(-0.5,-0.2,0.6))), 0.0);
-float l = 0.5 + 0.6*d + 0.2*f; o = vec4(col.rgb * l, col.a); }";
+float l = 0.5 + 0.6*d + 0.2*f; vec4 c = col; if (useTex > 0.5) { vec4 t = texture(tex, vuv); c = vec4(mix(col.rgb, t.rgb, t.a), col.a); } o = vec4(c.rgb * l, c.a); }";
 
 struct State {
     world: World,
@@ -37,17 +37,27 @@ struct State {
     cube: Mesh,
     sphere: Mesh,
     cyl: Mesh,
+    cyl_y: Mesh,
+    wedge: Mesh,
     ctl: Option<Controller>,
     keys: HashSet<String>,
     last_t: f64,
     send_acc: f64,
     ws: Option<WebSocket>,
     follow: bool,
+    failed: HashSet<String>,
+    u_tex_on: Option<WebGlUniformLocation>,
+    meshes: HashMap<String, Mesh>,
+    textures: HashMap<String, Option<web_sys::WebGlTexture>>,
+    requested: HashSet<String>,
+    queue: Vec<(String, String)>,
 }
 
 struct Mesh {
     vao: Option<web_sys::WebGlVertexArrayObject>,
     count: i32,
+    lo: [f32; 3],
+    hi: [f32; 3],
 }
 
 #[wasm_bindgen]
@@ -74,10 +84,12 @@ fn cube() -> Vec<f32> {
         ([0.0, 0.0, -1.0], [[-0.5, -0.5, -0.5], [-0.5, 0.5, -0.5], [0.5, 0.5, -0.5], [0.5, -0.5, -0.5]]),
     ];
     let mut v = vec![];
+    let uvs = [[0.0f32, 1.0], [0.0, 0.0], [1.0, 0.0], [1.0, 1.0]];
     for (n, q) in faces.iter() {
         for i in [0usize, 1, 2, 0, 2, 3] {
             v.extend_from_slice(&q[i]);
             v.extend_from_slice(n);
+            v.extend_from_slice(&uvs[i]);
         }
     }
     v
@@ -95,7 +107,7 @@ fn sphere_data() -> Vec<f32> {
         for j in 0..lat {
             let (a, b, c, d) = (pt(i, j), pt(i + 1, j), pt(i + 1, j + 1), pt(i, j + 1));
             for q in [a, c, b, a, d, c] {
-                v.extend_from_slice(&[q[0] * 0.5, q[1] * 0.5, q[2] * 0.5, q[0], q[1], q[2]]);
+                v.extend_from_slice(&[q[0] * 0.5, q[1] * 0.5, q[2] * 0.5, q[0], q[1], q[2], 0.0, 0.0]);
             }
         }
     }
@@ -109,13 +121,13 @@ fn cylinder_data() -> Vec<f32> {
         let a0 = i as f32 / n as f32 * std::f32::consts::TAU;
         let a1 = (i + 1) as f32 / n as f32 * std::f32::consts::TAU;
         let (y0, z0, y1, z1) = (a0.cos(), a0.sin(), a1.cos(), a1.sin());
-        let p = |x: f32, y: f32, z: f32, n: [f32; 3]| [x, y * 0.5, z * 0.5, n[0], n[1], n[2]];
+        let p = |x: f32, y: f32, z: f32, n: [f32; 3]| [x, y * 0.5, z * 0.5, n[0], n[1], n[2], 0.0, 0.0];
         let quad = [p(-0.5, y0, z0, [0.0, y0, z0]), p(0.5, y0, z0, [0.0, y0, z0]), p(0.5, y1, z1, [0.0, y1, z1]), p(-0.5, y1, z1, [0.0, y1, z1])];
         for k in [0usize, 2, 1, 0, 3, 2] {
             v.extend_from_slice(&quad[k]);
         }
         for (x, nx) in [(0.5f32, 1.0f32), (-0.5, -1.0)] {
-            let c = [x, 0.0, 0.0, nx, 0.0, 0.0];
+            let c = [x, 0.0, 0.0, nx, 0.0, 0.0, 0.0, 0.0];
             let (a, b) = (p(x, y0, z0, [nx, 0.0, 0.0]), p(x, y1, z1, [nx, 0.0, 0.0]));
             if nx > 0.0 {
                 v.extend_from_slice(&c);
@@ -131,6 +143,45 @@ fn cylinder_data() -> Vec<f32> {
     v
 }
 
+fn cylinder_y_data() -> Vec<f32> {
+    let src = cylinder_data();
+    let mut out = Vec::with_capacity(src.len());
+    for tri in src.chunks(24) {
+        let mut v: Vec<[f32; 8]> = tri.chunks(8).map(|c| [c[1], c[0], c[2], c[4], c[3], c[5], c[6], c[7]]).collect();
+        v.swap(1, 2);
+        for q in v {
+            out.extend_from_slice(&q);
+        }
+    }
+    out
+}
+
+fn wedge_data() -> Vec<f32> {
+    let (a, b, c, d, e, f) = ([-0.5f32, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, -0.5, 0.5], [-0.5, -0.5, 0.5], [-0.5, 0.5, 0.5], [0.5, 0.5, 0.5]);
+    let faces: [Vec<[f32; 3]>; 5] = [vec![a, b, c, d], vec![d, c, f, e], vec![a, e, f, b], vec![a, d, e], vec![b, f, c]];
+    let mut v = vec![];
+    for q in faces.iter() {
+        let e1 = [q[1][0] - q[0][0], q[1][1] - q[0][1], q[1][2] - q[0][2]];
+        let e2 = [q[2][0] - q[0][0], q[2][1] - q[0][1], q[2][2] - q[0][2]];
+        let mut n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+        let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-9);
+        n = [n[0] / l, n[1] / l, n[2] / l];
+        let mid = q.iter().fold([0.0f32; 3], |s, p| [s[0] + p[0], s[1] + p[1], s[2] + p[2]]);
+        let flip = n[0] * mid[0] + n[1] * mid[1] + n[2] * mid[2] < 0.0;
+        let mut pts = q.clone();
+        if flip {
+            pts.reverse();
+            n = [-n[0], -n[1], -n[2]];
+        }
+        for i in 1..pts.len() - 1 {
+            for p in [pts[0], pts[i], pts[i + 1]] {
+                v.extend_from_slice(&[p[0], p[1], p[2], n[0], n[1], n[2], 0.0, 0.0]);
+            }
+        }
+    }
+    v
+}
+
 fn make_mesh(gl: &G, prog: &WebGlProgram, data: &[f32]) -> Mesh {
     let vao = gl.create_vertex_array();
     gl.bind_vertex_array(vao.as_ref());
@@ -140,12 +191,22 @@ fn make_mesh(gl: &G, prog: &WebGlProgram, data: &[f32]) -> Mesh {
         let view = js_sys_f32(data);
         gl.buffer_data_with_array_buffer_view(G::ARRAY_BUFFER, &view, G::STATIC_DRAW);
     }
-    let (lp, ln) = (gl.get_attrib_location(prog, "p") as u32, gl.get_attrib_location(prog, "n") as u32);
-    gl.enable_vertex_attrib_array(lp);
-    gl.vertex_attrib_pointer_with_i32(lp, 3, G::FLOAT, false, 24, 0);
-    gl.enable_vertex_attrib_array(ln);
-    gl.vertex_attrib_pointer_with_i32(ln, 3, G::FLOAT, false, 24, 12);
-    Mesh { vao, count: (data.len() / 6) as i32 }
+    for (name, size, off) in [("p", 3, 0), ("n", 3, 12), ("uv", 2, 24)] {
+        let l = gl.get_attrib_location(prog, name);
+        if l >= 0 {
+            gl.enable_vertex_attrib_array(l as u32);
+            gl.vertex_attrib_pointer_with_i32(l as u32, size, G::FLOAT, false, 32, off);
+        }
+    }
+    let mut lo = [f32::INFINITY; 3];
+    let mut hi = [f32::NEG_INFINITY; 3];
+    for v in data.chunks(8) {
+        for k in 0..3 {
+            lo[k] = lo[k].min(v[k]);
+            hi[k] = hi[k].max(v[k]);
+        }
+    }
+    Mesh { vao, count: (data.len() / 8) as i32, lo, hi }
 }
 
 #[wasm_bindgen]
@@ -161,10 +222,13 @@ impl Client {
         let cube_m = make_mesh(&gl, &prog, &cube());
         let sphere_m = make_mesh(&gl, &prog, &sphere_data());
         let cyl_m = make_mesh(&gl, &prog, &cylinder_data());
+        let cyl_y_m = make_mesh(&gl, &prog, &cylinder_y_data());
+        let wedge_m = make_mesh(&gl, &prog, &wedge_data());
         gl.enable(G::DEPTH_TEST);
         gl.enable(G::CULL_FACE);
         gl.enable(G::BLEND);
         gl.blend_func(G::SRC_ALPHA, G::ONE_MINUS_SRC_ALPHA);
+        let u_tex_on = gl.get_uniform_location(&prog, "useTex");
         let st = Rc::new(RefCell::new(State {
             u_vp: gl.get_uniform_location(&prog, "vp"),
             u_m: gl.get_uniform_location(&prog, "m"),
@@ -183,12 +247,20 @@ impl Client {
             cube: cube_m,
             sphere: sphere_m,
             cyl: cyl_m,
+            cyl_y: cyl_y_m,
+            wedge: wedge_m,
             ctl: None,
             keys: HashSet::new(),
             last_t: 0.0,
             send_acc: 0.0,
             ws: None,
             follow: false,
+            u_tex_on,
+            failed: HashSet::new(),
+            meshes: HashMap::new(),
+            textures: HashMap::new(),
+            requested: HashSet::new(),
+            queue: vec![],
         }));
         let s2 = st.clone();
         let down = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |e: web_sys::MouseEvent| {
@@ -268,6 +340,57 @@ impl Client {
         self.st.borrow_mut().ws = Some(ws.clone());
         self._ws = Some(ws);
         Ok(())
+    }
+
+    pub fn take_requests(&self) -> String {
+        let mut st = self.st.borrow_mut();
+        let q: Vec<(String, String)> = st.queue.drain(..).collect();
+        let items: Vec<String> = q.iter().map(|(k, id)| format!("{{\"k\":\"{}\",\"id\":\"{}\"}}", k, id)).collect();
+        format!("[{}]", items.join(","))
+    }
+
+    pub fn provide_mesh(&self, id: &str, bytes: &[u8]) {
+        let mut st = self.st.borrow_mut();
+        match swirl_net::meshdata::parse(bytes) {
+            Some(data) => {
+                let m = make_mesh(&st.gl, &st.prog, &data);
+                st.meshes.insert(id.to_string(), m);
+            }
+            None => {
+                st.failed.insert(id.to_string());
+            }
+        }
+    }
+
+    pub fn provide_texture(&self, id: &str, img: &web_sys::ImageBitmap) {
+        let mut st = self.st.borrow_mut();
+        let gl = st.gl.clone();
+        let t = gl.create_texture();
+        gl.bind_texture(G::TEXTURE_2D, t.as_ref());
+        let _ = gl.tex_image_2d_with_u32_and_u32_and_image_bitmap(G::TEXTURE_2D, 0, G::RGBA as i32, G::RGBA, G::UNSIGNED_BYTE, img);
+        let (w, h) = (img.width(), img.height());
+        let pot = w.is_power_of_two() && h.is_power_of_two();
+        if pot {
+            gl.generate_mipmap(G::TEXTURE_2D);
+            gl.tex_parameteri(G::TEXTURE_2D, G::TEXTURE_MIN_FILTER, G::LINEAR_MIPMAP_LINEAR as i32);
+            gl.tex_parameteri(G::TEXTURE_2D, G::TEXTURE_WRAP_S, G::REPEAT as i32);
+            gl.tex_parameteri(G::TEXTURE_2D, G::TEXTURE_WRAP_T, G::REPEAT as i32);
+        } else {
+            gl.tex_parameteri(G::TEXTURE_2D, G::TEXTURE_MIN_FILTER, G::LINEAR as i32);
+            gl.tex_parameteri(G::TEXTURE_2D, G::TEXTURE_WRAP_S, G::CLAMP_TO_EDGE as i32);
+            gl.tex_parameteri(G::TEXTURE_2D, G::TEXTURE_WRAP_T, G::CLAMP_TO_EDGE as i32);
+        }
+        gl.tex_parameteri(G::TEXTURE_2D, G::TEXTURE_MAG_FILTER, G::LINEAR as i32);
+        st.textures.insert(id.to_string(), t);
+    }
+
+    pub fn provide_failed(&self, kind: &str, id: &str) {
+        let mut st = self.st.borrow_mut();
+        if kind == "tex" {
+            st.textures.insert(id.to_string(), None);
+        } else {
+            st.failed.insert(id.to_string());
+        }
     }
 
     pub fn own_pos(&self) -> String {
@@ -395,17 +518,70 @@ impl Client {
             db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
         });
         solid.extend(glass);
+        let mut wants: Vec<(String, String)> = vec![];
         for p in solid {
+            let base = mat::from_cframe(&p.cf, [1.0, 1.0, 1.0]);
+            let mut drawn = false;
+            if let Some(mr) = &p.mesh {
+                let key = mr.mesh.clone();
+                if let Some(mesh) = st.meshes.get(&key) {
+                    let (s, o) = if mr.fit {
+                        let ext = [(mesh.hi[0] - mesh.lo[0]).max(0.001), (mesh.hi[1] - mesh.lo[1]).max(0.001), (mesh.hi[2] - mesh.lo[2]).max(0.001)];
+                        let s = [p.size[0] / ext[0], p.size[1] / ext[1], p.size[2] / ext[2]];
+                        let c = [(mesh.hi[0] + mesh.lo[0]) / 2.0, (mesh.hi[1] + mesh.lo[1]) / 2.0, (mesh.hi[2] + mesh.lo[2]) / 2.0];
+                        (s, [-c[0] * s[0], -c[1] * s[1], -c[2] * s[2]])
+                    } else {
+                        (mr.scale, mr.off)
+                    };
+                    let local = [s[0], 0.0, 0.0, 0.0, 0.0, s[1], 0.0, 0.0, 0.0, 0.0, s[2], 0.0, o[0], o[1], o[2], 1.0];
+                    let m = mat::mul(&base, &local);
+                    gl.uniform_matrix4fv_with_f32_array(st.u_m.as_ref(), false, &m);
+                    gl.uniform4f(st.u_col.as_ref(), p.color[0], p.color[1], p.color[2], p.alpha);
+                    let mut tex_on = 0.0;
+                    if let Some(tid) = &mr.tex {
+                        match st.textures.get(tid) {
+                            Some(Some(t)) => {
+                                gl.active_texture(G::TEXTURE0);
+                                gl.bind_texture(G::TEXTURE_2D, Some(t));
+                                tex_on = 1.0;
+                            }
+                            Some(None) => {}
+                            None => wants.push(("tex".into(), tid.clone())),
+                        }
+                    }
+                    gl.uniform1f(st.u_tex_on.as_ref(), tex_on);
+                    gl.disable(G::CULL_FACE);
+                    gl.bind_vertex_array(mesh.vao.as_ref());
+                    gl.draw_arrays(G::TRIANGLES, 0, mesh.count);
+                    gl.enable(G::CULL_FACE);
+                    drawn = true;
+                } else if !st.failed.contains(&key) {
+                    wants.push(("mesh".into(), key));
+                    drawn = true;
+                }
+            }
+            if drawn {
+                continue;
+            }
             let m = mat::from_cframe(&p.cf, p.size);
             gl.uniform_matrix4fv_with_f32_array(st.u_m.as_ref(), false, &m);
             gl.uniform4f(st.u_col.as_ref(), p.color[0], p.color[1], p.color[2], p.alpha);
+            gl.uniform1f(st.u_tex_on.as_ref(), 0.0);
             let mesh = match p.shape {
                 0 => &st.sphere,
                 2 => &st.cyl,
+                3 => &st.wedge,
+                4 => &st.cyl_y,
                 _ => &st.cube,
             };
             gl.bind_vertex_array(mesh.vao.as_ref());
             gl.draw_arrays(G::TRIANGLES, 0, mesh.count);
+        }
+        for (k, id) in wants {
+            let key = format!("{}:{}", k, id);
+            if st.requested.insert(key) {
+                st.queue.push((k, id));
+            }
         }
     }
 }

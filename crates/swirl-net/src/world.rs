@@ -18,6 +18,38 @@ pub struct Part {
     pub color: [f32; 3],
     pub alpha: f32,
     pub shape: u8,
+    pub mesh: Option<MeshRef>,
+}
+
+#[derive(Clone, Debug)]
+pub struct MeshRef {
+    pub mesh: String,
+    pub tex: Option<String>,
+    pub scale: [f32; 3],
+    pub off: [f32; 3],
+    pub fit: bool,
+}
+
+pub fn asset_id(s: &str) -> Option<String> {
+    let low = s.to_ascii_lowercase();
+    let digits = |x: &str| -> Option<String> {
+        let d: String = x.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if d.is_empty() || d.starts_with('0') || d.len() > 18 {
+            None
+        } else {
+            Some(d)
+        }
+    };
+    if let Some(i) = low.find("id=") {
+        return digits(&low[i + 3..]);
+    }
+    if let Some(r) = low.strip_prefix("rbxassetid://") {
+        return digits(r);
+    }
+    if low.bytes().all(|b| b.is_ascii_digit()) {
+        return digits(&low);
+    }
+    None
 }
 
 #[derive(Default)]
@@ -462,8 +494,59 @@ impl World {
                 }
             };
             let alpha = 1.0 - i.props.get("Transparency").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-            let shape = i.props.get("shape").or(i.props.get("Shape")).and_then(|v| v.as_i64()).unwrap_or(1) as u8;
-            out.push(Part { id, cf, size, color, alpha, shape });
+            let mut shape = i.props.get("shape").or(i.props.get("Shape")).and_then(|v| v.as_i64()).unwrap_or(1) as u8;
+            if i.class == "WedgePart" {
+                shape = 3;
+            }
+            let mut size = size;
+            for &c in &i.children {
+                if let Some(ci) = self.insts.get(&c) {
+                    if matches!(ci.class.as_str(), "SpecialMesh" | "BlockMesh" | "CylinderMesh") {
+                        let ty = match ci.class.as_str() {
+                            "BlockMesh" => 6,
+                            "CylinderMesh" => 4,
+                            _ => ci.props.get("MeshType").and_then(|v| v.as_i64()).unwrap_or(6),
+                        };
+                        if ty != 5 {
+                            if let Some(sc) = arr(ci.props.get("Scale"), 3) {
+                                size = [size[0] * sc[0], size[1] * sc[1], size[2] * sc[2]];
+                            }
+                            shape = match ty {
+                                2 => 3,
+                                3 => 0,
+                                4 => 4,
+                                _ => 1,
+                            };
+                        }
+                        break;
+                    }
+                }
+            }
+            let mut mesh = None;
+            if i.class == "MeshPart" {
+                if let Some(m) = i.props.get("MeshId").and_then(|v| v.as_str()).and_then(asset_id) {
+                    let tex = i.props.get("TextureID").or(i.props.get("TextureId")).and_then(|v| v.as_str()).and_then(asset_id);
+                    mesh = Some(MeshRef { mesh: m, tex, scale: [1.0; 3], off: [0.0; 3], fit: true });
+                }
+            } else {
+                for &c in &i.children {
+                    if let Some(ci) = self.insts.get(&c) {
+                        if classes::is_a(&ci.class, "FileMesh") {
+                            let ty = ci.props.get("MeshType").and_then(|v| v.as_i64()).unwrap_or(6);
+                            if ci.class == "FileMesh" || ty == 5 {
+                                if let Some(m) = ci.props.get("MeshId").and_then(|v| v.as_str()).and_then(asset_id) {
+                                    let tex = ci.props.get("TextureId").and_then(|v| v.as_str()).and_then(asset_id);
+                                    let sc = arr(ci.props.get("Scale"), 3).map(|v| [v[0], v[1], v[2]]).unwrap_or([1.0; 3]);
+                                    let of = arr(ci.props.get("Offset"), 3).map(|v| [v[0], v[1], v[2]]).unwrap_or([0.0; 3]);
+                                    mesh = Some(MeshRef { mesh: m, tex, scale: sc, off: of, fit: false });
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            out.push(Part { id, cf, size, color, alpha, shape, mesh });
         }
         out
     }
