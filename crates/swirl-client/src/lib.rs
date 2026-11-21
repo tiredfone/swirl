@@ -29,6 +29,10 @@ impl Scene {
         self.world.parts().len()
     }
 
+    pub fn mesh_part_count(&self) -> usize {
+        self.world.parts().iter().filter(|p| p.mesh.is_some()).count()
+    }
+
     pub fn instance_count(&self) -> usize {
         self.world.insts.len()
     }

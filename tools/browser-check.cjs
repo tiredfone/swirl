@@ -5,6 +5,13 @@ const acct = JSON.parse(fs.readFileSync('/home/fone/.config/solar/testing-accoun
 const user = acct.username || acct.Username || acct.user || acct.name;
 const pass = acct.password || acct.Password;
 (async () => {
+  const stamp = '/tmp/swirl/last-join';
+  try {
+    const last = Number(fs.readFileSync(stamp, 'utf8'));
+    const wait = last + 80000 - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  } catch (e) {}
+  fs.writeFileSync(stamp, String(Date.now()));
   const b = await p.launch({ executablePath: '/usr/bin/chromium', headless: 'new', args: ['--no-sandbox', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] });
   const pg = await b.newPage();
   await pg.setViewport({ width: 1100, height: 700 });
@@ -34,7 +41,13 @@ const pass = acct.password || acct.Password;
     hasSwirlPage: !!document.getElementById('swirl-canvas'),
     config: !!window.solarClientConfig,
   }));
-  if (shot) await pg.screenshot({ path: shot });
+  let focus = null;
+  if (process.env.FOCUS) {
+    const [x, y, z, d] = process.env.FOCUS.split(',').map(Number);
+    await pg.evaluate((x, y, z, d) => window.solarClient.focus(x, y, z, d), x, y, z, d);
+    await new Promise((r) => setTimeout(r, 6000));
+    focus = await pg.evaluate(() => ({ parts: window.solarClient.debug_parts(), dbg: window.solarClient.debug(), pos: window.solarClient.own_pos(), meshes: window.solarClient.loaded_meshes(), textures: window.solarClient.loaded_textures() }));
+  }
   let walk = null;
   if (process.env.WALK) {
     const pos = () => pg.evaluate(() => (window.solarClient ? JSON.parse(window.solarClient.own_pos()) : null));
@@ -51,6 +64,7 @@ const pass = acct.password || acct.Password;
     walk = { start: a, afterW: b2, afterJump: c2, moved: a && b2 ? Math.hypot(b2[0] - a[0], b2[2] - a[2]) : 0, jumped: a && c2 ? c2[1] - b2[1] : 0 };
   }
   const b64 = (await pg.screenshot({ encoding: 'base64' }));
+  if (shot) fs.writeFileSync(shot, Buffer.from(b64, 'base64'));
   const drawn = await pg.evaluate(async (data) => {
     const img = new Image();
     img.src = 'data:image/png;base64,' + data;
@@ -64,8 +78,9 @@ const pass = acct.password || acct.Password;
     for (let i = 0; i < d.length; i += 4) set.add((d[i] >> 4) + ',' + (d[i + 1] >> 4) + ',' + (d[i + 2] >> 4));
     return set.size;
   }, b64);
-  console.log(JSON.stringify({ walk, login: ok, url: url.replace(/\?.*/, '?swirl=' + version), state, distinctColors: drawn, ...log }, null, 1));
+  console.log(JSON.stringify({ focus, walk, login: ok, url: url.replace(/\?.*/, '?swirl=' + version), state, distinctColors: drawn, ...log }, null, 1));
   await b.close();
+  const meshOk = !process.env.MIN_MESHES || (focus && focus.meshes >= Number(process.env.MIN_MESHES) && focus.textures >= 1);
   const walkOk = !process.env.WALK || (walk && walk.moved > 3 && walk.afterW[1] > -5 && walk.jumped > 1);
-  process.exit(state.hasSwirlPage && state.statusHidden === true && state.fatalHidden === true && drawn > 3 && walkOk ? 0 : 1);
+  process.exit(state.hasSwirlPage && state.statusHidden === true && state.fatalHidden === true && drawn > 3 && walkOk && meshOk ? 0 : 1);
 })();

@@ -46,6 +46,7 @@ struct State {
     ws: Option<WebSocket>,
     follow: bool,
     failed: HashSet<String>,
+    focus: Option<[f32; 3]>,
     u_tex_on: Option<WebGlUniformLocation>,
     meshes: HashMap<String, Mesh>,
     textures: HashMap<String, Option<web_sys::WebGlTexture>>,
@@ -257,6 +258,7 @@ impl Client {
             follow: false,
             u_tex_on,
             failed: HashSet::new(),
+            focus: None,
             meshes: HashMap::new(),
             textures: HashMap::new(),
             requested: HashSet::new(),
@@ -393,6 +395,32 @@ impl Client {
         }
     }
 
+    pub fn focus(&self, x: f32, y: f32, z: f32, dist: f32) {
+        let mut st = self.st.borrow_mut();
+        st.focus = Some([x, y, z]);
+        st.target = [x, y, z];
+        st.dist = dist;
+        st.fitted = true;
+    }
+
+    pub fn debug(&self) -> String {
+        let st = self.st.borrow();
+        format!("{{\"target\":[{:.1},{:.1},{:.1}],\"dist\":{:.1},\"yaw\":{:.2},\"pitch\":{:.2},\"focus\":{},\"meshes\":{},\"failed\":{},\"requested\":{}}}", st.target[0], st.target[1], st.target[2], st.dist, st.yaw, st.pitch, st.focus.is_some(), st.meshes.len(), st.failed.len(), st.requested.len())
+    }
+
+    pub fn debug_parts(&self) -> String {
+        let st = self.st.borrow();
+        st.world.parts().iter().take(40).map(|p| format!("{}:[{:.1},{:.1},{:.1}] s[{:.1},{:.1},{:.1}] shape{} mesh{}", p.id, p.cf[0], p.cf[1], p.cf[2], p.size[0], p.size[1], p.size[2], p.shape, p.mesh.is_some())).collect::<Vec<_>>().join("\n")
+    }
+
+    pub fn loaded_meshes(&self) -> usize {
+        self.st.borrow().meshes.len()
+    }
+
+    pub fn loaded_textures(&self) -> usize {
+        self.st.borrow().textures.values().filter(|t| t.is_some()).count()
+    }
+
     pub fn own_pos(&self) -> String {
         match self.st.borrow().ctl.as_ref() {
             Some(c) => format!("[{:.2},{:.2},{:.2}]", c.pos[0], c.pos[1], c.pos[2]),
@@ -470,7 +498,10 @@ impl Client {
                 let cf = mat::cf_yaw(c.pos, c.yaw);
                 let (pos, vel, state) = (c.pos, c.vel, c.state);
                 st.world.move_own(cf);
-                st.target = [pos[0], pos[1] + 1.5, pos[2]];
+                st.target = match st.focus {
+                    Some(f) => f,
+                    None => [pos[0], pos[1] + 1.5, pos[2]],
+                };
                 st.send_acc += dt as f64;
                 if st.send_acc >= 1.0 / 30.0 {
                     st.send_acc = 0.0;

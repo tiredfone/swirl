@@ -15,7 +15,11 @@ if ! WALK=1 node tools/browser-check.cjs "$place" "$version" "/tmp/swirl/release
     echo "browser check failed for $version, see /tmp/swirl/release-$version.json and .png; not made current"
     exit 1
 fi
-echo "browser check passed for $version (screenshot /tmp/swirl/release-$version.png)"
+if ! FOCUS=${MESH_FOCUS:--20.33,5.7,-28.96,6} MIN_MESHES=1 node tools/browser-check.cjs "${MESH_PLACE:-972}" "$version" "/tmp/swirl/release-$version-mesh.png" > "/tmp/swirl/release-$version-mesh.json" 2>&1; then
+    echo "mesh check failed for $version, see /tmp/swirl/release-$version-mesh.json and .png; not made current"
+    exit 1
+fi
+echo "browser checks passed for $version (screenshots /tmp/swirl/release-$version.png and -mesh.png)"
 if [ -n "$CURRENT" ]; then
     php /var/www/html/tools/release.php current developer "$version"
 fi
