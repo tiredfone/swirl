@@ -13,8 +13,9 @@ export async function start(opts = {}) {
     if (status) status.textContent = s;
   };
   try {
-    setStatus('Loading Swirl ' + client_version());
+    setStatus('Loading Swirl');
     await init({ module_or_path: new URL('./swirl_client_bg.wasm', import.meta.url) });
+    setStatus('Swirl ' + client_version());
     setStatus('Requesting a server');
     let t = opts.ticket;
     if (!t) {

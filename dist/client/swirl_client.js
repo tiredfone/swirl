@@ -146,12 +146,6 @@ function getDataViewMemory0() {
     }
     return cachedDataViewMemory0;
 }
-
-function takeFromExternrefTable0(idx) {
-    const value = wasm.__wbindgen_export_2.get(idx);
-    wasm.__externref_table_dealloc(idx);
-    return value;
-}
 /**
  * @returns {string}
  */
@@ -168,6 +162,11 @@ export function client_version() {
     }
 }
 
+function takeFromExternrefTable0(idx) {
+    const value = wasm.__wbindgen_export_2.get(idx);
+    wasm.__externref_table_dealloc(idx);
+    return value;
+}
 function __wbg_adapter_18(arg0, arg1, arg2) {
     wasm.closure5_externref_shim(arg0, arg1, arg2);
 }
