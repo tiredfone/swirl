@@ -24,6 +24,8 @@ pub struct Game {
     touching: HashSet<(InstId, InstId)>,
     dead: HashMap<InstId, f64>,
     debris: Vec<(f64, InstId)>,
+    spawn_cache: Vec<InstId>,
+    spawn_refresh: f64,
 }
 
 impl Game {
@@ -72,7 +74,7 @@ impl Game {
         let dm = Rc::new(RefCell::new(dm));
         let mut host = Host::new(dm.clone()).map_err(|e| e.to_string())?;
         host.scan_scripts();
-        Ok(Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![] })
+        Ok(Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0 })
     }
 
     pub fn join(&mut self, name: &str) -> (J, InstId) {
@@ -94,6 +96,7 @@ impl Game {
                     let _ = dm.set_prop(c, "Name", Val::Str(nm.to_string()));
                 }
             }
+            character::assign_team(&mut dm, player);
             dm.set_parent(player, Some(players)).unwrap();
             let snap = codec::snapshot_for(&dm, &self.roots, player);
             dm.journal.clear();
@@ -112,7 +115,7 @@ impl Game {
     pub fn spawn_character(&mut self, player: InstId, name: &str) {
         let mut dm = self.dm.borrow_mut();
         let ws = dm.services["Workspace"];
-        let origin = character::spawn_origin(&dm, ws);
+        let origin = character::spawn_origin(&dm, ws, player);
         match character::build(&mut dm, ws, player, name, origin) {
             Ok(ch) => {
                 let own = json!({"t": "own", "id": ch.model, "s": ch.seq, "c": ch.cf});
@@ -251,7 +254,24 @@ impl Game {
                 self.host.fire(id, name, args);
             }
         }
-        let touch_parts: Vec<InstId> = self.host.subscribed("Touched");
+        if self.spawn_refresh <= self.t {
+            self.spawn_refresh = self.t + 2.0;
+            let dm = self.dm.borrow();
+            let ws = dm.services["Workspace"];
+            let mut all = vec![];
+            dm.descendants(ws, &mut all);
+            self.spawn_cache = all
+                .into_iter()
+                .filter(|id| dm.get(*id).map(|i| i.class == "SpawnLocation").unwrap_or(false) && matches!(dm.get_prop(*id, "AllowTeamChangeOnTouch"), Some(Val::Bool(true))) && !matches!(dm.get_prop(*id, "Neutral"), Some(Val::Bool(true))))
+                .collect();
+        }
+        let touch_parts: Vec<InstId> = {
+            let mut v = self.host.subscribed("Touched");
+            v.extend(self.spawn_cache.iter().copied());
+            v.sort();
+            v.dedup();
+            v
+        };
         let end_parts: Vec<InstId> = self.host.subscribed("TouchEnded");
         if !touch_parts.is_empty() || !end_parts.is_empty() {
             let mut now: HashSet<(InstId, InstId)> = HashSet::new();
@@ -281,7 +301,20 @@ impl Game {
                 }
             }
             for (p, cp) in now.difference(&self.touching).copied().collect::<Vec<_>>() {
-                self.host.fire(p, "Touched", vec![Wire::I(cp)]);
+                if self.spawn_cache.contains(&p) {
+                    let owner = self.chars.values().find(|c| c.parts.iter().any(|(id, _)| *id == cp)).map(|c| c.player);
+                    if let Some(o) = owner {
+                        let mut dm = self.dm.borrow_mut();
+                        let col = dm.get_prop(p, "TeamColor").cloned();
+                        if let Some(col) = col {
+                            let _ = dm.set_prop(o, "TeamColor", col);
+                            let _ = dm.set_prop(o, "Neutral", Val::Bool(false));
+                        }
+                    }
+                }
+                if self.host.subscribed("Touched").contains(&p) {
+                    self.host.fire(p, "Touched", vec![Wire::I(cp)]);
+                }
             }
             for (p, cp) in self.touching.difference(&now).copied().collect::<Vec<_>>() {
                 self.host.fire(p, "TouchEnded", vec![Wire::I(cp)]);

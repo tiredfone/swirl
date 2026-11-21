@@ -34,7 +34,7 @@ pub fn overlap(a: &Box3, b: &Box3) -> bool {
     for axis in axes {
         let ra: f64 = (0..3).map(|k| a.h[k] * dot(ax[k], axis).abs()).sum();
         let rb: f64 = (0..3).map(|k| b.h[k] * dot(bx[k], axis).abs()).sum();
-        if dot(t, axis).abs() > ra + rb {
+        if dot(t, axis).abs() > ra + rb + 0.2 * dot(axis, axis).sqrt() {
             return false;
         }
     }

@@ -74,17 +74,63 @@ pub fn build(dm: &mut DataModel, workspace: InstId, player: InstId, name: &str, 
     Ok(Char { player, model, torso, parts, cf: id12(origin), vel: [0.0; 3], state: 7, seq: 1 })
 }
 
-pub fn spawn_origin(dm: &DataModel, workspace: InstId) -> [f64; 3] {
+pub fn assign_team(dm: &mut DataModel, player: InstId) {
+    let teams = match dm.services.get("Teams") {
+        Some(t) => *t,
+        None => return,
+    };
+    let list: Vec<InstId> = dm.get(teams).map(|t| t.children.clone()).unwrap_or_default().into_iter().filter(|c| dm.get(*c).map(|i| i.class == "Team").unwrap_or(false) && matches!(dm.get_prop(*c, "AutoAssignable"), Some(Val::Bool(true)))).collect();
+    if list.is_empty() {
+        let _ = dm.set_prop(player, "Neutral", Val::Bool(true));
+        return;
+    }
+    let players = dm.services.get("Players").copied();
+    let members: Vec<InstId> = players.and_then(|p| dm.get(p)).map(|p| p.children.clone()).unwrap_or_default();
+    let mut best = list[0];
+    let mut bn = usize::MAX;
+    for t in &list {
+        let col = dm.get_prop(*t, "TeamColor").cloned();
+        let n = members.iter().filter(|m| **m != player && matches!(dm.get_prop(**m, "Neutral"), Some(Val::Bool(false))) && dm.get_prop(**m, "TeamColor").cloned() == col).count();
+        if n < bn {
+            bn = n;
+            best = *t;
+        }
+    }
+    let col = dm.get_prop(best, "TeamColor").cloned().unwrap_or(Val::Num(194.0));
+    let _ = dm.set_prop(player, "Neutral", Val::Bool(false));
+    let _ = dm.set_prop(player, "TeamColor", col);
+}
+
+pub fn spawn_origin(dm: &DataModel, workspace: InstId, player: InstId) -> [f64; 3] {
     let mut all = vec![];
     dm.descendants(workspace, &mut all);
-    for id in all {
-        if let Some(i) = dm.get(id) {
-            if i.class == "SpawnLocation" {
-                if let (Some(Val::Arr(cf)), Some(Val::Arr(sz))) = (i.props.get("CFrame"), i.props.get("Size")) {
-                    if cf.len() >= 3 && sz.len() >= 3 {
-                        return [cf[0], cf[1] + sz[1] / 2.0 + 3.0, cf[2]];
-                    }
-                }
+    let spawns: Vec<InstId> = all
+        .into_iter()
+        .filter(|id| dm.get(*id).map(|i| i.class == "SpawnLocation").unwrap_or(false) && !matches!(dm.get_prop(*id, "Enabled"), Some(Val::Bool(false))))
+        .collect();
+    let neutral = |s: &InstId| matches!(dm.get_prop(*s, "Neutral"), Some(Val::Bool(true)));
+    let pool: Vec<InstId> = if !matches!(dm.get_prop(player, "Neutral"), Some(Val::Bool(true))) {
+        let col = dm.get_prop(player, "TeamColor").cloned();
+        let team: Vec<InstId> = spawns.iter().copied().filter(|s| !neutral(s) && dm.get_prop(*s, "TeamColor").cloned() == col).collect();
+        if team.is_empty() {
+            spawns.iter().copied().filter(|s| neutral(s)).collect()
+        } else {
+            team
+        }
+    } else {
+        let n: Vec<InstId> = spawns.iter().copied().filter(|s| neutral(s)).collect();
+        if n.is_empty() {
+            spawns.clone()
+        } else {
+            n
+        }
+    };
+    let pool = if pool.is_empty() { spawns } else { pool };
+    if let Some(&s) = pool.first() {
+        if let (Some(Val::Arr(cf)), Some(Val::Arr(sz))) = (dm.get_prop(s, "CFrame"), dm.get_prop(s, "Size")) {
+            if cf.len() >= 12 && sz.len() >= 3 {
+                let top = cf[1] + cf[7].abs() * sz[1] / 2.0 + cf[6].abs() * sz[0] / 2.0 + cf[8].abs() * sz[2] / 2.0;
+                return [cf[0], top + 3.2, cf[2]];
             }
         }
     }
