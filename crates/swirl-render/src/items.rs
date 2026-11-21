@@ -495,11 +495,6 @@ pub fn build_look(ctx: &Ctx, base: &Base, look: &mut Look, ids: &[String], o: &B
         r.use_package(&look.r15_parts);
         r.compute_world(ctx, look.tool, &mut notes);
         r.apply_cfs(&mut cfs);
-        if std::env::var("SWIRL_DEBUG").is_ok() {
-            for n in r.world.keys().cloned().collect::<Vec<_>>() {
-                eprintln!("{} {:?}", n, r.world[&n].p);
-            }
-        }
     }
     let mut items: Vec<Item> = vec![];
     for acc in &accs {

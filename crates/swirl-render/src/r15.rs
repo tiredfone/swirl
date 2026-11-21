@@ -552,17 +552,9 @@ impl<'a> R15<'a> {
                 Some(g) => g.1,
                 None => continue,
             };
-            if let Ok(o) = std::env::var("SWIRL_ONLY") {
-                if o != p.name {
-                    continue;
-                }
-            }
             let cf = self.world.get(&p.name).copied().unwrap_or(p.cf);
             if self.pkg.contains_key(&p.name) {
                 let pm = self.package_mesh(ctx, &p.name);
-                if std::env::var("SWIRL_DEBUG").is_ok() {
-                    eprintln!("{} g={} pkgmesh={} tex={}", p.name, g, pm.is_some(), pm.as_ref().map(|x| x.1.is_some()).unwrap_or(false));
-                }
                 if let Some((mesh, ptex, pimg)) = pm {
                     let mut skin = ptex.clone().unwrap_or_else(|| tex[g].clone());
                     if ptex.is_some() {

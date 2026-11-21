@@ -32,7 +32,7 @@ Rust rewrite of Chocolate (browser game client and node game server) and vanilla
 
 ## Status
 
-See PLAN.md. vanilla R6 body, head view, clothes, face, hats, gear, decals and R6 stances are ported and match PHP exact mode pixel for pixel.
+See PLAN.md. Avatars (R6 and R15, scale, pose, stances, packages), headshots, animation thumbnails and item thumbnails are ported and match PHP's default renderer (see the parity table). Model, mesh and place scenes are not ported and stay on PHP. Solar calls the `swirl-vanilla` binary through `core/class/Arbiter.php` and `core/vanilla-rcc/avatar.php` only while `/var/www/html/core/swirl.enabled` exists, and falls back to PHP on any error. Exit codes: 3 item error, 4 unsupported format, 5 asset not on local disk.
 
 ## Port order
 

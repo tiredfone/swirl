@@ -14,3 +14,6 @@ description: Run the vanilla PHP versus Swirl render comparison and read the pix
 - PHP renders with the fast rasteriser by default; `--exact=1` uses the reference one. Swirl follows the reference one, so compare against both when the numbers are off.
 - Never point the harness at the live cache or write to /var/www/assets.
 - Record results per case in PLAN.md.
+
+- `swirl-vanilla` takes `--ids`, `--item` (with `--with`), `--colors` (brick numbers or #rrggbb), `--size`, `--view`, `--rig=R15`, `--scale=height:0.9,width:0.8,head:0.95`, `--pose`, `--stance`, `--straight-legs`, `--exact`. Exit 3 means an item error, 4 an unsupported asset format, 5 an asset missing from local disk; Solar falls back to PHP on any non-zero exit.
+- PHP default mode uses the fast rasteriser, which Swirl ports; `--exact` plus `PARITY_EXACT=1` compares the reference rasteriser.
