@@ -1,6 +1,6 @@
 pub mod host;
 
-pub use host::{Host, LogLine, Req, Wire};
+pub use host::{wire_from_json, wire_to_json, Host, LogLine, Req, Wire};
 
 #[cfg(test)]
 mod tests {

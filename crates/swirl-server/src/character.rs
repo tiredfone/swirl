@@ -39,7 +39,7 @@ fn make_part(dm: &mut DataModel, parent: InstId, name: &str, size: [f64; 3], off
     Ok((id, id12(offset)))
 }
 
-pub fn build(dm: &mut DataModel, workspace: InstId, player: InstId, name: &str, origin: [f64; 3]) -> Result<Char, String> {
+pub fn build(dm: &mut DataModel, workspace: InstId, player: InstId, name: &str, origin: [f64; 3], look: Option<&crate::appearance::Look>) -> Result<Char, String> {
     let model = dm.create_any("Model", None)?;
     dm.set_prop_quiet(model, "Name", Val::Str(name.to_string()));
     dm.get_mut_name(model, name);
@@ -69,6 +69,22 @@ pub fn build(dm: &mut DataModel, workspace: InstId, player: InstId, name: &str, 
         }
     }
     dm.set_prop_quiet(model, "PrimaryPart", Val::Ref(Some(torso)));
+    if let Some(l) = look {
+        if let Some(c) = l.colors {
+            let order = ["Head", "Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg"];
+            let props = ["HeadColor", "TorsoColor", "LeftArmColor", "RightArmColor", "LeftLegColor", "RightLegColor"];
+            let bc = dm.create_any("BodyColors", Some(model))?;
+            dm.set_prop_quiet(bc, "Name", Val::Str("Body Colors".into()));
+            dm.get_mut_name(bc, "Body Colors");
+            for k in 0..6 {
+                if let Some(p) = dm.find_child(model, order[k], false) {
+                    brick_color(dm, p, c[k]);
+                }
+                dm.set_prop_quiet(bc, props[k], Val::Num(c[k] as f64));
+            }
+        }
+        crate::appearance::apply(dm, model, l);
+    }
     dm.set_parent(model, Some(workspace))?;
     dm.set_prop(player, "Character", Val::Ref(Some(model)))?;
     Ok(Char { player, model, torso, parts, cf: id12(origin), vel: [0.0; 3], state: 7, seq: 1 })
@@ -137,26 +153,82 @@ pub fn spawn_origin(dm: &DataModel, workspace: InstId, player: InstId) -> [f64; 
     [0.0, 5.0, 0.0]
 }
 
+pub fn mul12(a: &[f64; 12], b: &[f64; 12]) -> [f64; 12] {
+    let mut r = [0.0; 9];
+    for i in 0..3 {
+        for j in 0..3 {
+            r[i * 3 + j] = a[3 + i * 3] * b[3 + j] + a[4 + i * 3] * b[6 + j] + a[5 + i * 3] * b[9 + j];
+        }
+    }
+    [
+        a[3] * b[0] + a[4] * b[1] + a[5] * b[2] + a[0],
+        a[6] * b[0] + a[7] * b[1] + a[8] * b[2] + a[1],
+        a[9] * b[0] + a[10] * b[1] + a[11] * b[2] + a[2],
+        r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8],
+    ]
+}
+
+pub fn inv12(a: &[f64; 12]) -> [f64; 12] {
+    let r = [a[3], a[6], a[9], a[4], a[7], a[10], a[5], a[8], a[11]];
+    let p = [
+        -(r[0] * a[0] + r[1] * a[1] + r[2] * a[2]),
+        -(r[3] * a[0] + r[4] * a[1] + r[5] * a[2]),
+        -(r[6] * a[0] + r[7] * a[1] + r[8] * a[2]),
+    ];
+    [p[0], p[1], p[2], r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8]]
+}
+
 pub fn apply_cf(dm: &mut DataModel, ch: &mut Char, cf: [f64; 12]) {
     ch.cf = cf;
-    let mul = |a: &[f64; 12], b: &[f64; 12]| -> [f64; 12] {
-        let mut r = [0.0; 9];
-        for i in 0..3 {
-            for j in 0..3 {
-                r[i * 3 + j] = a[3 + i * 3] * b[3 + j] + a[4 + i * 3] * b[6 + j] + a[5 + i * 3] * b[9 + j];
-            }
-        }
-        [
-            a[3] * b[0] + a[4] * b[1] + a[5] * b[2] + a[0],
-            a[6] * b[0] + a[7] * b[1] + a[8] * b[2] + a[1],
-            a[9] * b[0] + a[10] * b[1] + a[11] * b[2] + a[2],
-            r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8],
-        ]
-    };
     for (id, off) in ch.parts.clone() {
-        let w = mul(&cf, &off);
+        let w = mul12(&cf, &off);
         dm.set_prop_quiet(id, "CFrame", Val::Arr(w.to_vec()));
     }
+    sync_tools(dm, ch);
+}
+
+pub const RIGHT_GRIP_C0: [f64; 12] = [0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0];
+
+pub fn arm_of(dm: &DataModel, model: InstId) -> Option<InstId> {
+    dm.find_child(model, "Right Arm", false)
+}
+
+pub fn cf_prop(dm: &DataModel, id: InstId, key: &str) -> [f64; 12] {
+    match dm.get_prop(id, key) {
+        Some(Val::Arr(a)) if a.len() >= 12 => {
+            let mut c = [0.0; 12];
+            c.copy_from_slice(&a[..12]);
+            c
+        }
+        _ => [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+    }
+}
+
+pub fn sync_tools(dm: &mut DataModel, ch: &Char) {
+    let arm = match arm_of(dm, ch.model) {
+        Some(a) => a,
+        None => return,
+    };
+    let weld = match dm.find_child(arm, "RightGrip", false) {
+        Some(w) => w,
+        None => return,
+    };
+    let handle = match dm.get_prop(weld, "Part1") {
+        Some(Val::Ref(Some(h))) => *h,
+        _ => return,
+    };
+    let c0 = cf_prop(dm, weld, "C0");
+    let tool = dm.get(handle).and_then(|h| h.parent);
+    let mut c1 = cf_prop(dm, weld, "C1");
+    if let Some(t) = tool {
+        let g = cf_prop(dm, t, "Grip");
+        if g != c1 {
+            c1 = g;
+            let _ = dm.set_prop(weld, "C1", Val::Arr(g.to_vec()));
+        }
+    }
+    let w = mul12(&mul12(&cf_prop(dm, arm, "CFrame"), &c0), &inv12(&c1));
+    dm.set_prop_quiet(handle, "CFrame", Val::Arr(w.to_vec()));
 }
 
 pub type Chars = HashMap<InstId, Char>;

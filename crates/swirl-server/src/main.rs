@@ -3,6 +3,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::collections::HashMap;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use swirl_server::appearance;
+use swirl_server::fetch::Site;
 use swirl_server::game::Game;
 use swirl_server::redeem::Redeemer;
 use tokio::net::TcpListener;
@@ -29,6 +31,7 @@ async fn main() {
         }
         _ => None,
     };
+    let site: Option<Site> = arg("site").and_then(|u| Site::parse(&u));
     let bytes = std::fs::read(format!("{}/assets/{}", assets, place)).expect("place file");
     let game = Rc::new(RefCell::new(Game::load(place, &bytes, era).unwrap_or_else(|e| panic!("{}", e))));
     let clients: Rc<RefCell<HashMap<u32, (u32, UnboundedSender<String>)>>> = Rc::new(RefCell::new(HashMap::new()));
@@ -46,6 +49,15 @@ async fn main() {
                 let logs = game.borrow_mut().tick(0.033);
                 for l in logs {
                     eprintln!("[{}] {}", l.kind, l.msg);
+                }
+                let remote = std::mem::take(&mut game.borrow_mut().remote_out);
+                for (target, m) in remote {
+                    let text = m.to_string();
+                    for (pl, tx) in clients.borrow().values() {
+                        if target.is_empty() || target.contains(pl) {
+                            let _ = tx.send(text.clone());
+                        }
+                    }
                 }
                 let players: Vec<u32> = clients.borrow().values().map(|(p, _)| *p).collect();
                 let outs = game.borrow_mut().flush_all(&players);
@@ -67,6 +79,8 @@ async fn main() {
         let n = cid;
         let clients = clients.clone();
         let redeemer = redeemer.clone();
+        let site = site.clone();
+        let assets = assets.clone();
         tokio::task::spawn_local(async move {
             let uri = Rc::new(RefCell::new(String::new()));
             let u2 = uri.clone();
@@ -81,12 +95,14 @@ async fn main() {
             };
             let ticket = uri.borrow().split("ticket=").nth(1).map(|s| s.split('&').next().unwrap_or("").to_string()).unwrap_or_default();
             let mut user_name = format!("Player{}", n);
+            let mut user_id: Option<i64> = None;
             if let Some(r) = &redeemer {
                 match r.redeem(&ticket).await {
                     Some(j) if j["mode"] == "play" && j["placeId"].as_u64() == Some(place) => {
                         if let Some(nm) = j["username"].as_str() {
                             user_name = nm.to_string();
                         }
+                        user_id = j["userId"].as_i64();
                     }
                     _ => {
                         let (mut tx, _rx) = ws.split();
@@ -97,7 +113,11 @@ async fn main() {
                 }
             }
             let (mut tx, mut rx) = ws.split();
-            let (init, player) = game.borrow_mut().join(&user_name);
+            let look = match &site {
+                Some(st) => appearance::fetch(st, &assets, user_id.unwrap_or(n as i64)).await,
+                None => appearance::Look::default(),
+            };
+            let (init, player) = game.borrow_mut().join(&user_name, user_id.or(site.as_ref().map(|_| n as i64)), look);
             let (otx, mut orx) = unbounded_channel::<String>();
             clients.borrow_mut().insert(n, (player, otx));
             if tx.send(Message::Text(init.to_string())).await.is_err() {
@@ -110,7 +130,7 @@ async fn main() {
                         match m {
                             Some(Ok(Message::Text(t))) => {
                                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {
-                                    if v["t"] == "char" {
+                                    if v["t"] != "ping" {
                                         game.borrow_mut().message(player, &t);
                                     }
                                     if v["t"] == "ping" {

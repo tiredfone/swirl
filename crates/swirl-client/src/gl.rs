@@ -10,9 +10,9 @@ use web_sys::{HtmlCanvasElement, WebGl2RenderingContext as G, WebGlProgram, WebG
 
 const VS: &str = "#version 300 es
 in vec3 p; in vec3 n; in vec2 uv;
-uniform mat4 vp; uniform mat4 m;
+uniform mat4 vp; uniform mat4 m; uniform vec4 uvr;
 out vec3 vn; out vec2 vuv;
-void main(){ vn = mat3(m) * n; vuv = uv; gl_Position = vp * m * vec4(p,1.0); }";
+void main(){ vn = mat3(m) * n; vuv = uv * uvr.zw + uvr.xy; gl_Position = vp * m * vec4(p,1.0); }";
 const FS: &str = "#version 300 es
 precision mediump float;
 in vec3 vn; in vec2 vuv; uniform vec4 col; uniform sampler2D tex; uniform float useTex; uniform vec4 lt; uniform vec3 tint; out vec4 o;
@@ -52,6 +52,7 @@ struct State {
     u_vp: Option<WebGlUniformLocation>,
     u_m: Option<WebGlUniformLocation>,
     u_col: Option<WebGlUniformLocation>,
+    u_uvr: Option<WebGlUniformLocation>,
     canvas: HtmlCanvasElement,
     yaw: f32,
     pitch: f32,
@@ -78,6 +79,7 @@ struct State {
     meshes: HashMap<String, Mesh>,
     textures: HashMap<String, Option<web_sys::WebGlTexture>>,
     requested: HashSet<String>,
+    remotes: Vec<String>,
     queue: Vec<(String, String)>,
 }
 
@@ -218,7 +220,8 @@ fn decal_face_data(face: usize) -> Vec<f32> {
         2 => ([-0.5, 0.5, g], [0.5, 0.5, g], [0.5, -0.5, g], [-0.5, -0.5, g], [0.0, 0.0, 1.0]),
         3 => ([-g, 0.5, -0.5], [-g, 0.5, 0.5], [-g, -0.5, 0.5], [-g, -0.5, -0.5], [-1.0, 0.0, 0.0]),
         4 => ([-0.5, -g, 0.5], [0.5, -g, 0.5], [0.5, -g, -0.5], [-0.5, -g, -0.5], [0.0, -1.0, 0.0]),
-        _ => ([0.5, 0.5, -g], [-0.5, 0.5, -g], [-0.5, -0.5, -g], [0.5, -0.5, -g], [0.0, 0.0, -1.0]),
+        5 => ([0.5, 0.5, -g], [-0.5, 0.5, -g], [-0.5, -0.5, -g], [0.5, -0.5, -g], [0.0, 0.0, -1.0]),
+        _ => ([0.25, 0.5, -g], [-0.25, 0.5, -g], [-0.25, -0.5, -g], [0.25, -0.5, -g], [0.0, 0.0, -1.0]),
     };
     let (tl, tr, br, bl, n) = q;
     let mut v = vec![];
@@ -281,7 +284,7 @@ impl Client {
         gl.enable(G::CULL_FACE);
         gl.enable(G::BLEND);
         gl.blend_func(G::SRC_ALPHA, G::ONE_MINUS_SRC_ALPHA);
-        let decal_faces: Vec<Mesh> = (0..6).map(|f| make_mesh(&gl, &prog, &decal_face_data(f))).collect();
+        let decal_faces: Vec<Mesh> = (0..7).map(|f| make_mesh(&gl, &prog, &decal_face_data(f))).collect();
         let u_tex_on = gl.get_uniform_location(&prog, "useTex");
         let st = Rc::new(RefCell::new(State {
             sky_prog,
@@ -291,6 +294,7 @@ impl Client {
             u_vp: gl.get_uniform_location(&prog, "vp"),
             u_m: gl.get_uniform_location(&prog, "m"),
             u_col: gl.get_uniform_location(&prog, "col"),
+            u_uvr: gl.get_uniform_location(&prog, "uvr"),
             world: World::new(),
             gl,
             prog,
@@ -320,6 +324,7 @@ impl Client {
             meshes: HashMap::new(),
             textures: HashMap::new(),
             requested: HashSet::new(),
+            remotes: vec![],
             queue: vec![],
         }));
         let s2 = st.clone();
@@ -381,6 +386,11 @@ impl Client {
             if let Some(t) = e.data().as_string() {
                 let mut st = s.borrow_mut();
                 if let Some(kind) = st.world.apply(&t) {
+                    if matches!(kind.as_str(), "re" | "rfc" | "rfr" | "chat" | "sys" | "fre") {
+                        if st.remotes.len() < 500 {
+                            st.remotes.push(t.clone());
+                        }
+                    }
                     if kind == "init" {
                         st.fitted = false;
                         st.status = "Loaded".into();
@@ -488,6 +498,27 @@ impl Client {
             Some(c) => format!("[{:.2},{:.2},{:.2}]", c.pos[0], c.pos[1], c.pos[2]),
             None => "null".into(),
         }
+    }
+
+    pub fn send(&self, text: &str) {
+        let st = self.st.borrow();
+        if let Some(ws) = st.ws.as_ref() {
+            if ws.ready_state() == 1 {
+                let _ = ws.send_with_str(text);
+            }
+        }
+    }
+
+    pub fn inventory(&self) -> String {
+        let st = self.st.borrow();
+        let items: Vec<serde_json::Value> = st.world.inventory().into_iter().map(|(id, name, eq)| serde_json::json!({"id": id, "name": name, "equipped": eq})).collect();
+        serde_json::Value::Array(items).to_string()
+    }
+
+    pub fn take_remote(&self) -> String {
+        let mut st = self.st.borrow_mut();
+        let v: Vec<String> = std::mem::take(&mut st.remotes);
+        serde_json::Value::Array(v.into_iter().map(serde_json::Value::String).collect()).to_string()
     }
 
     pub fn ping(&self) {
@@ -652,6 +683,7 @@ impl Client {
             gl.active_texture(G::TEXTURE0);
         }
         gl.use_program(Some(&st.prog));
+        gl.uniform4f(st.u_uvr.as_ref(), 0.0, 0.0, 1.0, 1.0);
         let lt = st.world.light();
         gl.uniform4f(st.u_lt.as_ref(), lt.amb, lt.key, lt.fill, 0.0);
         gl.uniform3f(st.u_tint.as_ref(), lt.tint[0], lt.tint[1], lt.tint[2]);
@@ -730,14 +762,15 @@ impl Client {
         for p in parts.iter().filter(|p| !p.decals.is_empty()) {
             let m = mat::from_cframe(&p.cf, p.size);
             gl.uniform_matrix4fv_with_f32_array(st.u_m.as_ref(), false, &m);
-            for (face, tid, da) in &p.decals {
+            for (face, tid, da, rect) in &p.decals {
                 match st.textures.get(tid) {
                     Some(Some(t)) => {
                         gl.active_texture(G::TEXTURE0);
                         gl.bind_texture(G::TEXTURE_2D, Some(t));
                         gl.uniform1f(st.u_tex_on.as_ref(), 2.0);
                         gl.uniform4f(st.u_col.as_ref(), 1.0, 1.0, 1.0, *da);
-                        let mesh = &st.decal_faces[(*face as usize).min(5)];
+                        gl.uniform4f(st.u_uvr.as_ref(), rect[0], rect[1], rect[2], rect[3]);
+                        let mesh = &st.decal_faces[(*face as usize).min(6)];
                         gl.bind_vertex_array(mesh.vao.as_ref());
                         gl.draw_arrays(G::TRIANGLES, 0, mesh.count);
                     }
@@ -746,6 +779,7 @@ impl Client {
                 }
             }
         }
+        gl.uniform4f(st.u_uvr.as_ref(), 0.0, 0.0, 1.0, 1.0);
         gl.depth_mask(true);
         for (k, id) in wants {
             let key = format!("{}:{}", k, id);

@@ -130,7 +130,7 @@ pub fn snapshot_for(dm: &DataModel, roots: &[InstId], player: InstId) -> Vec<J> 
     out
 }
 
-pub fn replicated(dm: &DataModel, roots: &[InstId], id: InstId) -> bool {
+pub fn replicated(dm: &DataModel, roots: &[InstId], id: InstId, viewer: Option<InstId>) -> bool {
     let mut cur = Some(id);
     let mut guard = 0;
     while let Some(c) = cur {
@@ -146,7 +146,7 @@ pub fn replicated(dm: &DataModel, roots: &[InstId], id: InstId) -> bool {
         }
         if SCOPED.contains(&i.class.as_str()) {
             if let Some(p) = i.parent {
-                if dm.get(p).map(|x| x.class == "Player").unwrap_or(false) {
+                if dm.get(p).map(|x| x.class == "Player").unwrap_or(false) && viewer != Some(p) {
                     return false;
                 }
             }
@@ -160,24 +160,28 @@ pub fn replicated(dm: &DataModel, roots: &[InstId], id: InstId) -> bool {
     false
 }
 
-pub fn subtree(dm: &DataModel, id: InstId, out: &mut Vec<J>) {
+pub fn subtree(dm: &DataModel, id: InstId, out: &mut Vec<J>, viewer: Option<InstId>) {
     out.push(encode_inst(dm, id));
     if let Some(i) = dm.get(id) {
+        let is_player = i.class == "Player";
         for &c in &i.children {
-            subtree(dm, c, out);
+            if is_player && viewer != Some(id) && dm.get(c).map(|k| SCOPED.contains(&k.class.as_str())).unwrap_or(false) {
+                continue;
+            }
+            subtree(dm, c, out, viewer);
         }
     }
 }
 
-pub fn ops_for(dm: &DataModel, roots: &[InstId], journal: &[swirl_core::instance::Change]) -> Vec<J> {
+pub fn ops_for(dm: &DataModel, roots: &[InstId], journal: &[swirl_core::instance::Change], viewer: Option<InstId>) -> Vec<J> {
     use swirl_core::instance::Change;
     let mut ops: Vec<J> = vec![];
     let mut sent_new: std::collections::HashSet<InstId> = std::collections::HashSet::new();
     let mut new_roots: Vec<InstId> = vec![];
     for ch in journal {
         if let Change::Parent { id, old, .. } = ch {
-            let was = old.map(|o| replicated(dm, roots, o)).unwrap_or(false);
-            if !was && replicated(dm, roots, *id) {
+            let was = old.map(|o| replicated(dm, roots, o, viewer)).unwrap_or(false);
+            if !was && replicated(dm, roots, *id, viewer) {
                 new_roots.push(*id);
             }
         }
@@ -185,7 +189,7 @@ pub fn ops_for(dm: &DataModel, roots: &[InstId], journal: &[swirl_core::instance
     for ch in journal {
         match ch {
             Change::Prop(id, name) => {
-                if !replicated(dm, roots, *id) || hidden_prop(dm, *id, name) || new_roots.iter().any(|r| r == id || dm.is_descendant_of(*id, *r)) {
+                if !replicated(dm, roots, *id, viewer) || hidden_prop(dm, *id, name) || new_roots.iter().any(|r| r == id || dm.is_descendant_of(*id, *r)) {
                     continue;
                 }
                 let inst = match dm.get(*id) {
@@ -201,16 +205,16 @@ pub fn ops_for(dm: &DataModel, roots: &[InstId], journal: &[swirl_core::instance
                 }
             }
             Change::Parent { id, old, new } => {
-                let now = replicated(dm, roots, *id);
-                let was = old.map(|o| replicated(dm, roots, o)).unwrap_or(false);
+                let now = replicated(dm, roots, *id, viewer);
+                let was = old.map(|o| replicated(dm, roots, o, viewer)).unwrap_or(false);
                 if was && now {
                     ops.push(json!(["m", id, new]));
                 } else if !was && now {
-                    if sent_new.iter().any(|s| dm.is_descendant_of(*id, *s)) {
+                    if sent_new.iter().any(|s| *s == *id || dm.is_descendant_of(*id, *s)) {
                         continue;
                     }
                     let mut recs = vec![];
-                    subtree(dm, *id, &mut recs);
+                    subtree(dm, *id, &mut recs, viewer);
                     sent_new.insert(*id);
                     ops.push(json!(["n", recs]));
                 } else if was && !now {
@@ -218,7 +222,7 @@ pub fn ops_for(dm: &DataModel, roots: &[InstId], journal: &[swirl_core::instance
                 }
             }
             Change::Destroy { id, old } => {
-                if old.map(|o| replicated(dm, roots, o)).unwrap_or(false) {
+                if old.map(|o| replicated(dm, roots, o, viewer)).unwrap_or(false) {
                     ops.push(json!(["d", id]));
                 }
             }

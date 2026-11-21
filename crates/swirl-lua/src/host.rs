@@ -1,4 +1,5 @@
 use mlua::{Function, Lua, Table, Value};
+use serde_json::Value as J;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -26,6 +27,7 @@ pub enum Wire {
     Ud2([f64; 4]),
     E(String, f64),
     List(Vec<Wire>),
+    Dict(Vec<(String, Wire)>),
 }
 
 enum Q {
@@ -37,6 +39,10 @@ enum Q {
 pub enum Req {
     LoadCharacter(u32),
     Debris(u32, f64),
+    EquipTool(u32, u32),
+    UnequipTools(u32),
+    Remote(u32, String, Vec<Wire>),
+    InvokeResult(u32, f64, Vec<Wire>),
 }
 
 struct State {
@@ -55,10 +61,12 @@ pub struct Host {
     step: Function,
 }
 
-const METHODS: [&str; 33] = [
+const METHODS: [&str; 50] = [
     "GetChildren", "children", "getChildren", "FindFirstChild", "findFirstChild", "FindFirstChildOfClass", "FindFirstChildWhichIsA", "GetDescendants", "GetFullName", "IsA", "isA",
     "IsDescendantOf", "IsAncestorOf", "Clone", "clone", "Destroy", "destroy", "ClearAllChildren", "GetService", "service", "getService", "WaitForChild", "Remove", "remove",
     "TakeDamage", "LoadCharacter", "AddItem", "GetPlayers", "getPlayers", "GetPlayerFromCharacter", "getPlayerFromCharacter", "Fire", "Invoke",
+    "playerFromCharacter", "PlayerFromCharacter", "Play", "play", "Stop", "stop", "Pause", "pause", "Resume", "EquipTool", "UnequipTools", "Move",
+    "FireServer", "FireClient", "FireAllClients", "InvokeServer", "InvokeClient",
 ];
 
 fn event_names(class: &str) -> Vec<&'static str> {
@@ -72,6 +80,12 @@ fn event_names(class: &str) -> Vec<&'static str> {
     if class == "Player" {
         v.extend(["CharacterAdded", "CharacterRemoving", "Chatted"]);
     }
+    if classes::is_a(class, "Tool") {
+        v.extend(["Activated", "Deactivated", "Equipped", "Unequipped"]);
+    }
+    if classes::is_a(class, "Mouse") {
+        v.extend(["Button1Down", "Button1Up", "Button2Down", "Button2Up", "Move", "Idle", "KeyDown", "KeyUp", "WheelForward", "WheelBackward"]);
+    }
     if class == "Humanoid" {
         v.extend(["Died", "HealthChanged", "Running", "Jumping"]);
     }
@@ -80,6 +94,9 @@ fn event_names(class: &str) -> Vec<&'static str> {
     }
     if class == "BindableEvent" {
         v.push("Event");
+    }
+    if class == "RemoteFunction" {
+        v.push("__Invoke");
     }
     if class == "RemoteEvent" {
         v.extend(["OnServerEvent", "OnClientEvent"]);
@@ -161,77 +178,195 @@ fn enc_into(lua: &Lua, out: &mut Vec<Value>, w: &Wire) -> mlua::Result<()> {
                 enc_into(lua, out, x)?;
             }
         }
+        Wire::Dict(d) => {
+            out.push(s(lua, "d")?);
+            out.push(Value::Number(d.len() as f64));
+            for (k, x) in d {
+                out.push(s(lua, k)?);
+                enc_into(lua, out, x)?;
+            }
+        }
     }
     Ok(())
 }
 
 fn decode_args(args: &[Value]) -> Vec<Wire> {
+    let mut flat: Vec<J> = vec![];
+    for a in args {
+        flat.push(match a {
+            Value::Nil => J::Null,
+            Value::Boolean(b) => J::Bool(*b),
+            Value::Number(n) => serde_json::Number::from_f64(*n).map(J::Number).unwrap_or(J::Null),
+            Value::Integer(n) => J::from(*n),
+            Value::String(x) => J::String(x.to_str().map(|x| x.to_string()).unwrap_or_default()),
+            _ => J::Null,
+        });
+    }
+    wire_from_json(&flat)
+}
+
+pub fn wire_from_json(a: &[J]) -> Vec<Wire> {
     let mut out = vec![];
     let mut i = 0;
-    let num = |v: &Value| match v {
-        Value::Number(n) => *n,
-        Value::Integer(n) => *n as f64,
-        _ => 0.0,
-    };
-    while i < args.len() {
-        let tag = match &args[i] {
-            Value::String(t) => t.to_str().map(|x| x.to_string()).unwrap_or_default(),
-            _ => {
-                i += 1;
-                continue;
-            }
-        };
-        i += 1;
-        match tag.as_str() {
-            "nil" => out.push(Wire::Nil),
-            "b" => {
-                out.push(Wire::B(matches!(args.get(i), Some(Value::Boolean(true)))));
-                i += 1;
-            }
-            "n" => {
-                out.push(Wire::N(args.get(i).map(num).unwrap_or(0.0)));
-                i += 1;
-            }
-            "s" => {
-                out.push(Wire::S(match args.get(i) {
-                    Some(Value::String(x)) => x.to_str().map(|x| x.to_string()).unwrap_or_default(),
-                    _ => String::new(),
-                }));
-                i += 1;
-            }
-            "i" => {
-                out.push(Wire::I(args.get(i).map(num).unwrap_or(0.0) as u32));
-                i += 1;
-            }
-            "v3" | "c3" => {
-                let v = [args.get(i).map(num).unwrap_or(0.0), args.get(i + 1).map(num).unwrap_or(0.0), args.get(i + 2).map(num).unwrap_or(0.0)];
-                out.push(if tag == "v3" { Wire::V3(v) } else { Wire::C3(v) });
-                i += 3;
-            }
-            "cf" => {
-                let mut v = [0.0; 12];
-                for k in 0..12 {
-                    v[k] = args.get(i + k).map(num).unwrap_or(0.0);
-                }
-                out.push(Wire::Cf(v));
-                i += 12;
-            }
-            "v2" => {
-                out.push(Wire::V2([args.get(i).map(num).unwrap_or(0.0), args.get(i + 1).map(num).unwrap_or(0.0)]));
-                i += 2;
-            }
-            "ud2" => {
-                out.push(Wire::Ud2([args.get(i).map(num).unwrap_or(0.0), args.get(i + 1).map(num).unwrap_or(0.0), args.get(i + 2).map(num).unwrap_or(0.0), args.get(i + 3).map(num).unwrap_or(0.0)]));
-                i += 4;
-            }
-            "bc" | "e" => {
-                out.push(Wire::N(args.get(i + if tag == "e" { 1 } else { 0 }).map(num).unwrap_or(0.0)));
-                i += if tag == "e" { 2 } else { 1 };
-            }
-            _ => out.push(Wire::Nil),
+    while i < a.len() {
+        match one_wire(a, &mut i) {
+            Some(w) => out.push(w),
+            None => break,
         }
     }
     out
+}
+
+fn one_wire(a: &[J], i: &mut usize) -> Option<Wire> {
+    let num = |x: Option<&J>| x.and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let tag = match a.get(*i) {
+        Some(J::String(t)) => t.clone(),
+        Some(_) => {
+            *i += 1;
+            return Some(Wire::Nil);
+        }
+        None => return None,
+    };
+    *i += 1;
+    let take = |i: &mut usize, n: usize| -> Vec<f64> {
+        let v: Vec<f64> = (0..n).map(|k| num(a.get(*i + k))).collect();
+        *i += n;
+        v
+    };
+    Some(match tag.as_str() {
+        "nil" => Wire::Nil,
+        "b" => {
+            let v = matches!(a.get(*i), Some(J::Bool(true)));
+            *i += 1;
+            Wire::B(v)
+        }
+        "n" => Wire::N(take(i, 1)[0]),
+        "s" => {
+            let v = a.get(*i).and_then(|x| x.as_str()).unwrap_or("").to_string();
+            *i += 1;
+            Wire::S(v)
+        }
+        "i" => Wire::I(take(i, 1)[0] as u32),
+        "v3" => {
+            let v = take(i, 3);
+            Wire::V3([v[0], v[1], v[2]])
+        }
+        "c3" => {
+            let v = take(i, 3);
+            Wire::C3([v[0], v[1], v[2]])
+        }
+        "cf" => {
+            let v = take(i, 12);
+            let mut c = [0.0; 12];
+            c.copy_from_slice(&v);
+            Wire::Cf(c)
+        }
+        "v2" => {
+            let v = take(i, 2);
+            Wire::V2([v[0], v[1]])
+        }
+        "ud2" => {
+            let v = take(i, 4);
+            Wire::Ud2([v[0], v[1], v[2], v[3]])
+        }
+        "bc" => Wire::N(take(i, 1)[0]),
+        "e" => {
+            let ty = a.get(*i).and_then(|x| x.as_str()).unwrap_or("").to_string();
+            *i += 1;
+            let n = take(i, 1)[0];
+            Wire::E(ty, n)
+        }
+        "l" => {
+            let n = take(i, 1)[0] as usize;
+            let mut l = vec![];
+            for _ in 0..n.min(20000) {
+                l.push(one_wire(a, i)?);
+            }
+            Wire::List(l)
+        }
+        "d" => {
+            let n = take(i, 1)[0] as usize;
+            let mut d = vec![];
+            for _ in 0..n.min(20000) {
+                let k = match a.get(*i) {
+                    Some(J::String(k)) => k.clone(),
+                    Some(J::Number(k)) => k.to_string(),
+                    _ => String::new(),
+                };
+                *i += 1;
+                d.push((k, one_wire(a, i)?));
+            }
+            Wire::Dict(d)
+        }
+        _ => Wire::Nil,
+    })
+}
+
+pub fn wire_to_json(ws: &[Wire]) -> Vec<J> {
+    let mut out = vec![];
+    for w in ws {
+        wire_push(&mut out, w);
+    }
+    out
+}
+
+fn wire_push(out: &mut Vec<J>, w: &Wire) {
+    let n = |x: f64| serde_json::Number::from_f64(x).map(J::Number).unwrap_or(J::Null);
+    match w {
+        Wire::Nil => out.push(J::from("nil")),
+        Wire::B(b) => {
+            out.push(J::from("b"));
+            out.push(J::Bool(*b));
+        }
+        Wire::N(x) => {
+            out.push(J::from("n"));
+            out.push(n(*x));
+        }
+        Wire::S(x) => {
+            out.push(J::from("s"));
+            out.push(J::from(x.as_str()));
+        }
+        Wire::I(x) => {
+            out.push(J::from("i"));
+            out.push(J::from(*x));
+        }
+        Wire::V3(v) | Wire::C3(v) => {
+            out.push(J::from(if matches!(w, Wire::V3(_)) { "v3" } else { "c3" }));
+            out.extend(v.iter().map(|x| n(*x)));
+        }
+        Wire::Cf(v) => {
+            out.push(J::from("cf"));
+            out.extend(v.iter().map(|x| n(*x)));
+        }
+        Wire::V2(v) => {
+            out.push(J::from("v2"));
+            out.extend(v.iter().map(|x| n(*x)));
+        }
+        Wire::Ud2(v) => {
+            out.push(J::from("ud2"));
+            out.extend(v.iter().map(|x| n(*x)));
+        }
+        Wire::E(t, x) => {
+            out.push(J::from("e"));
+            out.push(J::from(t.as_str()));
+            out.push(n(*x));
+        }
+        Wire::List(l) => {
+            out.push(J::from("l"));
+            out.push(J::from(l.len()));
+            for x in l {
+                wire_push(out, x);
+            }
+        }
+        Wire::Dict(d) => {
+            out.push(J::from("d"));
+            out.push(J::from(d.len()));
+            for (k, x) in d {
+                out.push(J::from(k.as_str()));
+                wire_push(out, x);
+            }
+        }
+    }
 }
 
 fn val_to_wire(ty: &str, enum_type: Option<&str>, v: &Val) -> Wire {
@@ -271,6 +406,126 @@ fn wire_to_val(ty: &str, w: &Wire) -> Option<Val> {
     })
 }
 
+
+fn cf_of(d: &DataModel, id: InstId, key: &str) -> [f64; 12] {
+    match d.get_prop(id, key) {
+        Some(Val::Arr(a)) if a.len() >= 12 => {
+            let mut c = [0.0; 12];
+            c.copy_from_slice(&a[..12]);
+            c
+        }
+        _ => [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+    }
+}
+
+fn virtual_get(d: &DataModel, id: InstId, class: &str, key: &str) -> Option<Wire> {
+    if classes::is_a(class, "BasePart") && (key == "Position" || key == "position") {
+        let c = cf_of(d, id, "CFrame");
+        return Some(Wire::V3([c[0], c[1], c[2]]));
+    }
+    if classes::is_a(class, "Tool") {
+        let g = cf_of(d, id, "Grip");
+        return match key {
+            "GripPos" => Some(Wire::V3([g[0], g[1], g[2]])),
+            "GripRight" => Some(Wire::V3([g[3], g[6], g[9]])),
+            "GripUp" => Some(Wire::V3([g[4], g[7], g[10]])),
+            "GripForward" => Some(Wire::V3([-g[5], -g[8], -g[11]])),
+            _ => None,
+        };
+    }
+    if class == "Player" && (key == "Backpack" || key == "PlayerGui") {
+        return Some(d.find_child_of_class(id, key).map(Wire::I).unwrap_or(Wire::Nil));
+    }
+    None
+}
+
+fn virtual_set(d: &mut DataModel, id: InstId, class: &str, key: &str, w: &Wire) -> Option<bool> {
+    if classes::is_a(class, "BasePart") && (key == "Position" || key == "position") {
+        if let Wire::V3(v) = w {
+            let mut c = cf_of(d, id, "CFrame");
+            c[0] = v[0];
+            c[1] = v[1];
+            c[2] = v[2];
+            let _ = d.set_prop(id, "CFrame", Val::Arr(c.to_vec()));
+            return Some(true);
+        }
+        return Some(false);
+    }
+    if classes::is_a(class, "Tool") && matches!(key, "GripPos" | "GripRight" | "GripUp" | "GripForward") {
+        if let Wire::V3(v) = w {
+            let mut g = cf_of(d, id, "Grip");
+            match key {
+                "GripPos" => {
+                    g[0] = v[0];
+                    g[1] = v[1];
+                    g[2] = v[2];
+                }
+                "GripRight" => {
+                    g[3] = v[0];
+                    g[6] = v[1];
+                    g[9] = v[2];
+                }
+                "GripUp" => {
+                    g[4] = v[0];
+                    g[7] = v[1];
+                    g[10] = v[2];
+                }
+                _ => {
+                    g[5] = -v[0];
+                    g[8] = -v[1];
+                    g[11] = -v[2];
+                }
+            }
+            let _ = d.set_prop(id, "Grip", Val::Arr(g.to_vec()));
+            return Some(true);
+        }
+        return Some(false);
+    }
+    None
+}
+
+fn can_run(d: &DataModel, id: InstId) -> bool {
+    let i = match d.get(id) {
+        Some(i) if !i.destroyed => i,
+        _ => return false,
+    };
+    if i.class != "Script" || matches!(i.props.get("Disabled"), Some(Val::Bool(true))) {
+        return false;
+    }
+    let mut cur = i.parent;
+    let mut guard = 0;
+    while let Some(c) = cur {
+        if let Some(ci) = d.get(c) {
+            if matches!(ci.class.as_str(), "Workspace" | "ServerScriptService" | "Players") && d.services.get(&ci.class) == Some(&c) {
+                return true;
+            }
+            if ci.class == "StarterPack" || ci.class == "StarterGui" {
+                return false;
+            }
+            cur = ci.parent;
+        } else {
+            return false;
+        }
+        guard += 1;
+        if guard > 10000 {
+            return false;
+        }
+    }
+    false
+}
+
+fn scan_into(st: &Rc<RefCell<State>>, d: &DataModel, id: InstId) {
+    let mut all = vec![id];
+    d.descendants(id, &mut all);
+    let mut s = st.borrow_mut();
+    for i in all {
+        if !s.running.contains(&i) && can_run(d, i) {
+            s.running.insert(i);
+            s.queue.push(Q::Start(i));
+        }
+    }
+}
+
 fn push_event(st: &Rc<RefCell<State>>, id: u32, name: &str, args: Vec<Wire>) {
     let key = format!("{}:{}", id, name);
     if st.borrow().subs.contains(&key) {
@@ -283,6 +538,9 @@ fn after_parent_change(st: &Rc<RefCell<State>>, dm: &DataModel, id: InstId, old:
         if Some(o) != new {
             push_event(st, o, "ChildRemoved", vec![Wire::I(id)]);
         }
+    }
+    if new.is_some() {
+        scan_into(st, dm, id);
     }
     if let Some(n) = new {
         if Some(n) != old {
@@ -329,6 +587,11 @@ impl Host {
                     }
                     if key == "Name" {
                         return s(lua, &inst.name);
+                    }
+                    if let Some(w) = virtual_get(&d, id, &inst.class, &key) {
+                        let mut out = vec![];
+                        enc_into(lua, &mut out, &w)?;
+                        return Ok(Value::Table(tagged(lua, &out)?));
                     }
                     if METHODS.contains(&key.as_str()) {
                         return Ok(Value::Table(tagged(lua, &[s(lua, "m")?, s(lua, &key)?])?));
@@ -390,6 +653,9 @@ impl Host {
                         return Ok(Value::Nil);
                     }
                     let class = d.get(id).unwrap().class.clone();
+                    if let Some(r) = virtual_set(&mut d, id, &class, &key, &w) {
+                        return if r { push_event(&st2, id, "Changed", vec![Wire::S(key.clone())]); Ok(Value::Nil) } else { Ok(Value::String(lua.create_string(&format!("invalid value for {}", key))?)) };
+                    }
                     let pn = match classes::canonical_prop(&class, &key) {
                         Some(p) => p,
                         None => return Ok(Value::String(lua.create_string(&format!("{} is not a valid member of {}", key, class))?)),
@@ -530,7 +796,32 @@ impl Host {
                             let l: Vec<Wire> = d.get(id).unwrap().children.iter().copied().filter(|c| d.get(*c).map(|i| i.class == "Player").unwrap_or(false)).map(Wire::I).collect();
                             ok(Wire::List(l))
                         }
-                        "GetPlayerFromCharacter" | "getPlayerFromCharacter" => {
+                        "Play" | "play" | "Stop" | "stop" | "Pause" | "pause" | "Resume" | "Move" => ok(Wire::Nil),
+                        "__remote" => {
+                            if let Some(Wire::S(op)) = args.first() {
+                                st2.borrow_mut().reqs.push(Req::Remote(id, op.clone(), args[1..].to_vec()));
+                            }
+                            ok(Wire::Nil)
+                        }
+                        "__invokeResult" => {
+                            let tok = match args.first() {
+                                Some(Wire::N(t)) => *t,
+                                _ => -1.0,
+                            };
+                            st2.borrow_mut().reqs.push(Req::InvokeResult(id, tok, args.get(1..).map(|a| a.to_vec()).unwrap_or_default()));
+                            ok(Wire::Nil)
+                        }
+                        "EquipTool" => {
+                            if let Some(Wire::I(t)) = args.first() {
+                                st2.borrow_mut().reqs.push(Req::EquipTool(id, *t));
+                            }
+                            ok(Wire::Nil)
+                        }
+                        "UnequipTools" => {
+                            st2.borrow_mut().reqs.push(Req::UnequipTools(id));
+                            ok(Wire::Nil)
+                        }
+                        "GetPlayerFromCharacter" | "getPlayerFromCharacter" | "playerFromCharacter" | "PlayerFromCharacter" => {
                             let target = match args.first() {
                                 Some(Wire::I(m)) => *m,
                                 _ => 0,
@@ -642,22 +933,26 @@ impl Host {
         j.set("data", include_str!("../data/luadata.lua"))?;
         let rt: Table = lua.load(include_str!("../data/runtime.lua")).set_name("=runtime").call(j)?;
         let step: Function = rt.get("step")?;
+        if dm.borrow().era == 2018 {
+            let ext: Function = rt.get("extend")?;
+            ext.call::<()>((include_str!("../data/runtime2018.lua"), "runtime2018"))?;
+        }
         Ok(Host { lua, dm, st, step })
     }
 
     pub fn scan_scripts(&mut self) {
         let d = self.dm.borrow();
-        let mut all = vec![];
-        d.descendants(d.root, &mut all);
-        let mut st = self.st.borrow_mut();
-        for id in all {
-            if let Some(i) = d.get(id) {
-                if i.class == "Script" && !matches!(i.props.get("Disabled"), Some(Val::Bool(true))) {
-                    st.running.insert(id);
-                    st.queue.push(Q::Start(id));
-                }
-            }
-        }
+        scan_into(&self.st, &d, d.root);
+    }
+
+    pub fn notify_parent(&mut self, id: u32, old: Option<u32>, new: Option<u32>) {
+        let d = self.dm.borrow();
+        after_parent_change(&self.st, &d, id, old, new);
+    }
+
+    pub fn scan_subtree(&mut self, id: u32) {
+        let d = self.dm.borrow();
+        scan_into(&self.st, &d, id);
     }
 
     pub fn tick(&mut self, t: f64) {
