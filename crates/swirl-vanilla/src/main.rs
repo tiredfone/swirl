@@ -76,6 +76,20 @@ fn diff(a: &str, b: &str, out: Option<&str>) {
 
 fn main() {
     let raw: Vec<String> = std::env::args().collect();
+    if raw.get(1).map(|s| s.as_str()) == Some("dump") {
+        let b = std::fs::read(&raw[2]).unwrap();
+        let tree = swirl_core::rbx::parse(&b).unwrap_or_else(|e| panic!("{}", e));
+        fn walk(x: &swirl_core::rbx::Inst, d: usize) {
+            println!("{}{} {} {}", " ".repeat(d), x.cls, x.name, x.props.len());
+            for c in &x.children {
+                walk(c, d + 1);
+            }
+        }
+        for r in &tree.roots {
+            walk(r, 0);
+        }
+        return;
+    }
     if raw.get(1).map(|s| s.as_str()) == Some("diff") {
         diff(&raw[2], &raw[3], raw.get(4).map(|s| s.as_str()));
         return;
