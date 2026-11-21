@@ -30,6 +30,10 @@ Rust rewrite of Chocolate (browser game client and node game server) and vanilla
 - Use f64 where the PHP uses floats so results match; keep the PHP algorithm order unless a change is recorded in PLAN.md.
 - Stage files by name; commit locally; push with `git push -u origin main` (never force). If the remote repo does not exist yet, keep committing and tell the owner.
 
+## Status
+
+See PLAN.md. vanilla R6 body, head view, clothes, face, hats, gear, decals and R6 stances are ported and match PHP exact mode pixel for pixel.
+
 ## Port order
 
 1. vanilla: R6 avatar, then hats, gear, R15, items, places.

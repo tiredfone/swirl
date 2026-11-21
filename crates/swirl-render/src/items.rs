@@ -426,7 +426,7 @@ pub fn build_decals(ctx: &Ctx, h: &Inst, cf: CF) -> Vec<Item> {
     out
 }
 
-pub fn build_look(ctx: &Ctx, base: &Base, look: &mut Look, ids: &[String], view: &str) -> Cfs {
+pub fn build_look(ctx: &Ctx, base: &Base, look: &mut Look, ids: &[String], view: &str, stance: &str) -> Cfs {
     let mut face_set = false;
     let mut accs: Vec<Inst> = vec![];
     let mut tool: Option<Inst> = None;
@@ -438,7 +438,8 @@ pub fn build_look(ctx: &Ctx, base: &Base, look: &mut Look, ids: &[String], view:
         tool = None;
     }
     look.tool = tool.is_some();
-    let cfs = part_cfs(look.tool, std::f64::consts::PI / 2.0);
+    let mut cfs = part_cfs(look.tool, std::f64::consts::PI / 2.0);
+    stance_r6(&mut cfs, look.tool, stance);
     let mut notes = std::mem::take(&mut look.notes);
     let mut items: Vec<Item> = vec![];
     for acc in &accs {
@@ -476,4 +477,28 @@ pub fn build_look(ctx: &Ctx, base: &Base, look: &mut Look, ids: &[String], view:
     look.items = items;
     look.notes = notes;
     cfs
+}
+
+pub fn stance_r6(cfs: &mut Cfs, tool: bool, stance: &str) {
+    let pi = std::f64::consts::PI;
+    let angles: Vec<(&str, f64)> = match stance {
+        "walking" => vec![("Right Arm", 0.6), ("Left Arm", -0.6), ("Right Leg", -0.6), ("Left Leg", 0.6)],
+        "sitting" => vec![("Right Arm", 0.25), ("Left Arm", 0.25), ("Right Leg", pi / 2.0), ("Left Leg", pi / 2.0)],
+        "overlord" => vec![("Right Arm", pi / 2.0)],
+        _ => return,
+    };
+    for (part, a) in angles {
+        if tool && part == "Right Arm" {
+            continue;
+        }
+        let p = if part.ends_with("Arm") { [0.0, 3.5, 0.0] } else { [0.0, 2.0, 0.0] };
+        let cur = *part_cf(cfs, part);
+        let m = CF::new(p, rot_x(a)).mul(&CF::at([-p[0], -p[1], -p[2]])).mul(&cur);
+        match part {
+            "Right Arm" => cfs.rarm = m,
+            "Left Arm" => cfs.larm = m,
+            "Right Leg" => cfs.rleg = m,
+            _ => cfs.lleg = m,
+        }
+    }
 }

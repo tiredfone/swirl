@@ -91,6 +91,9 @@ fn main() {
     let ctx = Ctx::new(&src, &data);
     let base = Base::load(&data).unwrap_or_else(|e| panic!("{}", e));
     let mut look = Look::empty();
+    for (k, c) in [HEAD, TORSO, LARM, RARM, LLEG, RLEG].iter().zip([[245, 205, 48], [13, 105, 172], [245, 205, 48], [245, 205, 48], [164, 189, 71], [164, 189, 71]]) {
+        look.colors[*k] = [c[0] as f64 / 255.0, c[1] as f64 / 255.0, c[2] as f64 / 255.0];
+    }
     if let Some(c) = a.get("colors") {
         let v: Vec<i64> = c.split(',').map(|s| s.trim().parse().unwrap()).collect();
         assert!(v.len() == 6, "six colours");
@@ -107,7 +110,7 @@ fn main() {
             }
         }
     }
-    let cfs = swirl_render::items::build_look(&ctx, &base, &mut look, &ids, &view);
+    let cfs = swirl_render::items::build_look(&ctx, &base, &mut look, &ids, &view, a.get("stance").map(|s| s.as_str()).unwrap_or("normal"));
     for n in &look.notes {
         eprintln!("note: {}", n);
     }
