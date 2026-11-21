@@ -6,7 +6,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use swirl_core::classes;
 use swirl_core::instance::{Change, DataModel, InstId, Val};
-use swirl_lua::{Host, LogLine};
+use swirl_lua::host::Wire;
+use swirl_lua::{Host, LogLine, Req};
+use crate::touch::{overlap, Box3};
 
 pub struct Game {
     pub place_id: u64,
@@ -19,6 +21,9 @@ pub struct Game {
     pub chars: HashMap<InstId, Char>,
     pending: HashMap<InstId, Vec<J>>,
     dirty: HashSet<InstId>,
+    touching: HashSet<(InstId, InstId)>,
+    dead: HashMap<InstId, f64>,
+    debris: Vec<(f64, InstId)>,
 }
 
 impl Game {
@@ -67,7 +72,7 @@ impl Game {
         let dm = Rc::new(RefCell::new(dm));
         let mut host = Host::new(dm.clone()).map_err(|e| e.to_string())?;
         host.scan_scripts();
-        Ok(Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new() })
+        Ok(Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![] })
     }
 
     pub fn join(&mut self, name: &str) -> (J, InstId) {
@@ -171,9 +176,118 @@ impl Game {
         }
     }
 
+    fn box_of(dm: &DataModel, id: InstId) -> Option<Box3> {
+        let i = dm.get(id)?;
+        let cf = match i.props.get("CFrame") {
+            Some(Val::Arr(a)) if a.len() >= 12 => a.clone(),
+            _ => return None,
+        };
+        let sz = match i.props.get("Size") {
+            Some(Val::Arr(a)) if a.len() >= 3 => a.clone(),
+            _ => return None,
+        };
+        Some(Box3 { c: [cf[0], cf[1], cf[2]], r: [cf[3], cf[4], cf[5], cf[6], cf[7], cf[8], cf[9], cf[10], cf[11]], h: [sz[0] / 2.0, sz[1] / 2.0, sz[2] / 2.0] })
+    }
+
+    fn respawn(&mut self, player: InstId) {
+        let old: Vec<InstId> = self.chars.iter().filter(|(_, c)| c.player == player).map(|(m, _)| *m).collect();
+        let name = {
+            let mut dm = self.dm.borrow_mut();
+            for m in old {
+                dm.destroy(m);
+                self.chars.remove(&m);
+                self.dead.remove(&m);
+            }
+            dm.get(player).map(|i| i.name.clone()).unwrap_or_default()
+        };
+        self.spawn_character(player, &name);
+    }
+
     pub fn tick(&mut self, dt: f64) -> Vec<LogLine> {
         self.t += dt;
         self.host.tick(self.t);
+        for r in self.host.take_requests() {
+            match r {
+                Req::LoadCharacter(p) => self.respawn(p),
+                Req::Debris(i, s) => self.debris.push((self.t + s, i)),
+            }
+        }
+        let due: Vec<InstId> = self.debris.iter().filter(|(t, _)| *t <= self.t).map(|(_, i)| *i).collect();
+        if !due.is_empty() {
+            self.debris.retain(|(t, _)| *t > self.t);
+            let mut dm = self.dm.borrow_mut();
+            for i in due {
+                dm.destroy(i);
+            }
+        }
+        let mut died: Vec<(InstId, InstId)> = vec![];
+        let mut respawn: Vec<InstId> = vec![];
+        {
+            let dm = self.dm.borrow();
+            for (m, c) in self.chars.iter() {
+                if self.dead.contains_key(m) {
+                    if self.dead[m] <= self.t {
+                        respawn.push(c.player);
+                    }
+                    continue;
+                }
+                if let Some(h) = dm.get(*m).and_then(|mi| mi.children.iter().copied().find(|k| dm.get(*k).map(|i| i.class == "Humanoid").unwrap_or(false))) {
+                    if matches!(dm.get_prop(h, "Health"), Some(Val::Num(x)) if *x <= 0.0) {
+                        died.push((*m, h));
+                    }
+                }
+            }
+        }
+        for (m, h) in died {
+            self.dead.insert(m, self.t + 5.0);
+            self.host.fire(h, "Died", vec![]);
+        }
+        for p in respawn {
+            self.respawn(p);
+        }
+        for name in ["Stepped", "Heartbeat"] {
+            for id in self.host.subscribed(name) {
+                let args = if name == "Stepped" { vec![Wire::N(self.t), Wire::N(dt)] } else { vec![Wire::N(dt)] };
+                self.host.fire(id, name, args);
+            }
+        }
+        let touch_parts: Vec<InstId> = self.host.subscribed("Touched");
+        let end_parts: Vec<InstId> = self.host.subscribed("TouchEnded");
+        if !touch_parts.is_empty() || !end_parts.is_empty() {
+            let mut now: HashSet<(InstId, InstId)> = HashSet::new();
+            {
+                let dm = self.dm.borrow();
+                let mut watch: Vec<InstId> = touch_parts.clone();
+                watch.extend(end_parts.iter().copied());
+                watch.sort();
+                watch.dedup();
+                for p in watch {
+                    let pb = match Self::box_of(&dm, p) {
+                        Some(b) => b,
+                        None => continue,
+                    };
+                    for (m, c) in self.chars.iter() {
+                        if self.dead.contains_key(m) {
+                            continue;
+                        }
+                        for (cp, _) in c.parts.iter() {
+                            if let Some(cb) = Self::box_of(&dm, *cp) {
+                                if overlap(&pb, &cb) {
+                                    now.insert((p, *cp));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for (p, cp) in now.difference(&self.touching).copied().collect::<Vec<_>>() {
+                self.host.fire(p, "Touched", vec![Wire::I(cp)]);
+            }
+            for (p, cp) in self.touching.difference(&now).copied().collect::<Vec<_>>() {
+                self.host.fire(p, "TouchEnded", vec![Wire::I(cp)]);
+            }
+            self.touching = now;
+        }
         self.host.take_logs()
     }
 

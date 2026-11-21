@@ -1,6 +1,6 @@
 pub mod host;
 
-pub use host::{Host, LogLine};
+pub use host::{Host, LogLine, Req, Wire};
 
 #[cfg(test)]
 mod tests {

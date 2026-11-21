@@ -22,6 +22,9 @@ pub enum Wire {
     V3([f64; 3]),
     Cf([f64; 12]),
     C3([f64; 3]),
+    V2([f64; 2]),
+    Ud2([f64; 4]),
+    E(String, f64),
     List(Vec<Wire>),
 }
 
@@ -31,7 +34,13 @@ enum Q {
     Event(u32, String, Vec<Wire>),
 }
 
+pub enum Req {
+    LoadCharacter(u32),
+    Debris(u32, f64),
+}
+
 struct State {
+    reqs: Vec<Req>,
     queue: Vec<Q>,
     subs: HashSet<String>,
     logs: Vec<LogLine>,
@@ -46,9 +55,10 @@ pub struct Host {
     step: Function,
 }
 
-const METHODS: [&str; 24] = [
+const METHODS: [&str; 33] = [
     "GetChildren", "children", "getChildren", "FindFirstChild", "findFirstChild", "FindFirstChildOfClass", "FindFirstChildWhichIsA", "GetDescendants", "GetFullName", "IsA", "isA",
     "IsDescendantOf", "IsAncestorOf", "Clone", "clone", "Destroy", "destroy", "ClearAllChildren", "GetService", "service", "getService", "WaitForChild", "Remove", "remove",
+    "TakeDamage", "LoadCharacter", "AddItem", "GetPlayers", "getPlayers", "GetPlayerFromCharacter", "getPlayerFromCharacter", "Fire", "Invoke",
 ];
 
 fn event_names(class: &str) -> Vec<&'static str> {
@@ -127,6 +137,23 @@ fn enc_into(lua: &Lua, out: &mut Vec<Value>, w: &Wire) -> mlua::Result<()> {
                 out.push(Value::Number(*x));
             }
         }
+        Wire::V2(v) => {
+            out.push(s(lua, "v2")?);
+            for x in v {
+                out.push(Value::Number(*x));
+            }
+        }
+        Wire::Ud2(v) => {
+            out.push(s(lua, "ud2")?);
+            for x in v {
+                out.push(Value::Number(*x));
+            }
+        }
+        Wire::E(ty, n) => {
+            out.push(s(lua, "e")?);
+            out.push(s(lua, ty)?);
+            out.push(Value::Number(*n));
+        }
         Wire::List(l) => {
             out.push(s(lua, "l")?);
             out.push(Value::Number(l.len() as f64));
@@ -189,6 +216,14 @@ fn decode_args(args: &[Value]) -> Vec<Wire> {
                 out.push(Wire::Cf(v));
                 i += 12;
             }
+            "v2" => {
+                out.push(Wire::V2([args.get(i).map(num).unwrap_or(0.0), args.get(i + 1).map(num).unwrap_or(0.0)]));
+                i += 2;
+            }
+            "ud2" => {
+                out.push(Wire::Ud2([args.get(i).map(num).unwrap_or(0.0), args.get(i + 1).map(num).unwrap_or(0.0), args.get(i + 2).map(num).unwrap_or(0.0), args.get(i + 3).map(num).unwrap_or(0.0)]));
+                i += 4;
+            }
             "bc" | "e" => {
                 out.push(Wire::N(args.get(i + if tag == "e" { 1 } else { 0 }).map(num).unwrap_or(0.0)));
                 i += if tag == "e" { 2 } else { 1 };
@@ -199,8 +234,11 @@ fn decode_args(args: &[Value]) -> Vec<Wire> {
     out
 }
 
-fn val_to_wire(ty: &str, v: &Val) -> Wire {
+fn val_to_wire(ty: &str, enum_type: Option<&str>, v: &Val) -> Wire {
     match (ty, v) {
+        ("enum", Val::Num(n)) if enum_type.is_some() => Wire::E(enum_type.unwrap().to_string(), *n),
+        ("V2", Val::Arr(a)) if a.len() >= 2 => Wire::V2([a[0], a[1]]),
+        ("UD2", Val::Arr(a)) if a.len() >= 4 => Wire::Ud2([a[0], a[1], a[2], a[3]]),
         ("bool", Val::Bool(b)) => Wire::B(*b),
         ("string", Val::Str(x)) | ("Content", Val::Str(x)) => Wire::S(x.clone()),
         ("int", Val::Num(n)) | ("number", Val::Num(n)) | ("BC", Val::Num(n)) | ("enum", Val::Num(n)) => Wire::N(*n),
@@ -224,6 +262,8 @@ fn wire_to_val(ty: &str, w: &Wire) -> Option<Val> {
         ("int", Wire::N(n)) => Val::Num(n.trunc()),
         ("number", Wire::N(n)) | ("enum", Wire::N(n)) | ("BC", Wire::N(n)) => Val::Num(*n),
         ("V3", Wire::V3(a)) | ("C3", Wire::C3(a)) => Val::Arr(a.to_vec()),
+        ("V2", Wire::V2(a)) => Val::Arr(a.to_vec()),
+        ("UD2", Wire::Ud2(a)) => Val::Arr(a.to_vec()),
         ("CF", Wire::Cf(a)) => Val::Arr(a.to_vec()),
         ("Ref", Wire::I(i)) => Val::Ref(Some(*i)),
         ("Ref", Wire::Nil) => Val::Ref(None),
@@ -263,7 +303,7 @@ fn after_parent_change(st: &Rc<RefCell<State>>, dm: &DataModel, id: InstId, old:
 impl Host {
     pub fn new(dm: Rc<RefCell<DataModel>>) -> mlua::Result<Host> {
         let lua = unsafe { Lua::unsafe_new() };
-        let st = Rc::new(RefCell::new(State { queue: vec![], subs: HashSet::new(), logs: vec![], running: HashSet::new(), t0: std::time::Instant::now() }));
+        let st = Rc::new(RefCell::new(State { reqs: vec![], queue: vec![], subs: HashSet::new(), logs: vec![], running: HashSet::new(), t0: std::time::Instant::now() }));
         let j = lua.create_table()?;
         {
             let dm = dm.clone();
@@ -306,7 +346,7 @@ impl Host {
                     if let Some(pn) = classes::canonical_prop(&inst.class, &key) {
                         if let Some(p) = classes::prop_info(&inst.class, &pn) {
                             let mut out = vec![];
-                            let w = inst.props.get(&pn).map(|v| val_to_wire(&p.ty, v)).unwrap_or(Wire::Nil);
+                            let w = inst.props.get(&pn).map(|v| val_to_wire(&p.ty, p.enum_type.as_deref(), v)).unwrap_or(Wire::Nil);
                             enc_into(lua, &mut out, &w)?;
                             return Ok(Value::Table(tagged(lua, &out)?));
                         }
@@ -462,6 +502,45 @@ impl Host {
                             }
                             ok(Wire::Nil)
                         }
+                        "TakeDamage" => {
+                            let n = match args.first() {
+                                Some(Wire::N(n)) => *n,
+                                _ => 0.0,
+                            };
+                            let cur = match d.get_prop(id, "Health") {
+                                Some(Val::Num(h)) => *h,
+                                _ => 100.0,
+                            };
+                            let nh = (cur - n).max(0.0);
+                            let _ = d.set_prop(id, "Health", Val::Num(nh));
+                            push_event(&st2, id, "HealthChanged", vec![Wire::N(nh)]);
+                            ok(Wire::Nil)
+                        }
+                        "LoadCharacter" => {
+                            st2.borrow_mut().reqs.push(Req::LoadCharacter(id));
+                            ok(Wire::Nil)
+                        }
+                        "AddItem" => {
+                            if let (Some(Wire::I(t)), Some(Wire::N(s))) = (args.first(), args.get(1)) {
+                                st2.borrow_mut().reqs.push(Req::Debris(*t, *s));
+                            }
+                            ok(Wire::Nil)
+                        }
+                        "GetPlayers" | "getPlayers" => {
+                            let l: Vec<Wire> = d.get(id).unwrap().children.iter().copied().filter(|c| d.get(*c).map(|i| i.class == "Player").unwrap_or(false)).map(Wire::I).collect();
+                            ok(Wire::List(l))
+                        }
+                        "GetPlayerFromCharacter" | "getPlayerFromCharacter" => {
+                            let target = match args.first() {
+                                Some(Wire::I(m)) => *m,
+                                _ => 0,
+                            };
+                            let found = d.get(id).unwrap().children.iter().copied().find(|c| matches!(d.get_prop(*c, "Character"), Some(Val::Ref(Some(m))) if *m == target));
+                            match found {
+                                Some(p) => ok(Wire::I(p)),
+                                None => ok(Wire::Nil),
+                            }
+                        }
                         "GetService" | "service" | "getService" => {
                             let n = name_arg(0);
                             match d.service(&n) {
@@ -593,6 +672,15 @@ impl Host {
 
     pub fn fire(&mut self, id: u32, name: &str, args: Vec<Wire>) {
         push_event(&self.st, id, name, args);
+    }
+
+    pub fn subscribed(&self, name: &str) -> Vec<u32> {
+        let suffix = format!(":{}", name);
+        self.st.borrow().subs.iter().filter(|k| k.ends_with(&suffix)).filter_map(|k| k.split(':').next().and_then(|n| n.parse().ok())).collect()
+    }
+
+    pub fn take_requests(&mut self) -> Vec<Req> {
+        std::mem::take(&mut self.st.borrow_mut().reqs)
     }
 
     pub fn lua(&self) -> &Lua {
