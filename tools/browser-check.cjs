@@ -41,6 +41,7 @@ const pass = acct.password || acct.Password;
     fatalHidden: document.getElementById('swirl-fatal') ? document.getElementById('swirl-fatal').hidden : null,
     hasSwirlPage: !!document.getElementById('swirl-canvas'),
     config: !!window.solarClientConfig,
+    luaFailed: window.solarLuaFailed || null,
   }));
   await pg.waitForFunction('window.solarLua && window.solarLua.ready()', { timeout: 40000 }).catch(() => {});
   await new Promise((r) => setTimeout(r, 4000));
@@ -64,12 +65,12 @@ const pass = acct.password || acct.Password;
   let animInfo = null;
   if (process.env.WALK) {
     const pos = () => pg.evaluate(() => (window.solarLua && window.solarLua.ownPos ? window.solarLua.ownPos() : null));
-    const limbs = () => pg.evaluate(() => { const w = window.solarLua.world; const m = w.own && w.own.model; if (!m) return null; const t = m.findChild('Torso') || m.findChild('HumanoidRootPart'); const tc = t.props.get('CFrame'); const rel = (n) => { const q = m.findChild(n); if (!q) return null; const c = q.props.get('CFrame'); const d = [c[0] - tc[0], c[1] - tc[1], c[2] - tc[2]]; return [tc[3] * d[0] + tc[6] * d[1] + tc[9] * d[2], tc[4] * d[0] + tc[7] * d[1] + tc[10] * d[2], tc[5] * d[0] + tc[8] * d[1] + tc[11] * d[2]]; }; let tracks = 0; try { tracks = (w.anims.playing(w.own.hum) || []).length; } catch (e) {} return { ll: rel('Left Leg') || rel('LeftUpperLeg'), rl: rel('Right Leg') || rel('RightUpperLeg'), animate: !!m.findChild('Animate'), tracks }; });
+    const limbs = () => pg.evaluate(() => { if (!window.solarLua) return null; const w = window.solarLua.world; const m = w.own && w.own.model; if (!m) return null; const t = m.findChild('Torso') || m.findChild('HumanoidRootPart'); const tc = t.props.get('CFrame'); const rel = (n) => { const q = m.findChild(n); if (!q) return null; const c = q.props.get('CFrame'); const d = [c[0] - tc[0], c[1] - tc[1], c[2] - tc[2]]; return [tc[3] * d[0] + tc[6] * d[1] + tc[9] * d[2], tc[4] * d[0] + tc[7] * d[1] + tc[10] * d[2], tc[5] * d[0] + tc[8] * d[1] + tc[11] * d[2]]; }; let tracks = 0; try { tracks = (w.anims.playing(w.own.hum) || []).length; } catch (e) {} return { ll: rel('Left Leg') || rel('LeftUpperLeg'), rl: rel('Right Leg') || rel('RightUpperLeg'), animate: !!m.findChild('Animate'), tracks }; });
     await pg.focus('#swirl-canvas').catch(() => {});
     const a = await pos();
     await pg.keyboard.down('w');
     const swing = [];
-    for (let i = 0; i < 8; i++) { await new Promise((r) => setTimeout(r, 120)); const l = await limbs(); if (l && l.ll && l.rl) swing.push(l.ll[2] - l.rl[2]); animInfo = l; }
+    for (let i = 0; i < 4; i++) { await new Promise((r) => setTimeout(r, 100)); const l = await limbs(); if (l && l.ll && l.rl) swing.push(l.ll[2] - l.rl[2]); animInfo = l; }
     await pg.keyboard.up('w');
     animSwing = swing.length ? Math.max(...swing) - Math.min(...swing) : 0;
     const b2 = await pos();

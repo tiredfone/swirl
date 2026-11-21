@@ -1,4 +1,3 @@
-import { mapUrl } from './urlmap.js';
 
 const addImportMap = (pub) => {
   const map = {
@@ -30,8 +29,6 @@ export async function startLua(opts) {
   const { client, canvas } = opts;
   const pub = new URL('./chocolate', import.meta.url).href;
   const cfg = Object.assign({}, opts.cfg, { publicPath: pub });
-  const realFetch = window.fetch.bind(window);
-  window.fetch = (input, init) => (typeof input === 'string' ? realFetch(mapUrl(input, pub), init) : realFetch(input, init));
   addImportMap(pub);
   addStyle(pub);
   const [THREE, assets, worldMod, guiMod, inputMod, luahost, C, wasmoon, rapierMod, cameraMod, codec, cursorMod, renderMod] = await Promise.all([

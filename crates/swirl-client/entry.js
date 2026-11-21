@@ -1,4 +1,3 @@
-import { safeName } from './urlmap.js';
 import './pack.js';
 import init, { Client, client_version } from './swirl_client.js';
 
@@ -41,7 +40,7 @@ export async function start(opts = {}) {
     setStatus('Joining');
     client.connect(base + '?ticket=' + encodeURIComponent(t.ticket));
     setInterval(() => client.ping(), 5000);
-    const assetUrl = (id) => (id.startsWith('c:') ? new URL('./chocolate/' + safeName('content/' + id.slice(2)).split('/').map(encodeURIComponent).join('/'), import.meta.url).href : ((cfg.endpoints && cfg.endpoints.asset) || '/asset/?id={id}').replace('{id}', id));
+    const assetUrl = (id) => (id.startsWith('c:') ? new URL('./chocolate/content/' + id.slice(2), import.meta.url).href : ((cfg.endpoints && cfg.endpoints.asset) || '/asset/?id={id}').replace('{id}', id));
     let inflight = 0;
     const fetchAsset = async (r) => {
       inflight++;
