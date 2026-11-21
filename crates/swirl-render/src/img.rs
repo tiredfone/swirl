@@ -36,7 +36,13 @@ impl Img {
     }
 
     pub fn decode(b: &[u8], max_side: usize) -> Option<Img> {
-        if !Img::is_image_bytes(b) || !b.starts_with(b"\x89PNG") {
+        if !Img::is_image_bytes(b) {
+            return None;
+        }
+        if b.starts_with(b"\xff\xd8\xff") {
+            return Img::decode_jpeg(b, max_side);
+        }
+        if !b.starts_with(b"\x89PNG") {
             return None;
         }
         let mut dec = png::Decoder::new(std::io::Cursor::new(b));
@@ -67,6 +73,32 @@ impl Img {
                 (((127 - a7) as f64) * 255.0 / 127.0).round() as u32
             };
             px.push((a8 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | bl as u32);
+        }
+        Some(Img { w, h, px })
+    }
+
+    fn decode_jpeg(b: &[u8], max_side: usize) -> Option<Img> {
+        let mut d = jpeg_decoder::Decoder::new(std::io::Cursor::new(b));
+        let data = d.decode().ok()?;
+        let info = d.info()?;
+        let (w, h) = (info.width as usize, info.height as usize);
+        if w < 1 || h < 1 || w > max_side || h > max_side {
+            return None;
+        }
+        let mut px = Vec::with_capacity(w * h);
+        match info.pixel_format {
+            jpeg_decoder::PixelFormat::RGB24 => {
+                for i in 0..w * h {
+                    px.push((255u32 << 24) | ((data[i * 3] as u32) << 16) | ((data[i * 3 + 1] as u32) << 8) | data[i * 3 + 2] as u32);
+                }
+            }
+            jpeg_decoder::PixelFormat::L8 => {
+                for i in 0..w * h {
+                    let v = data[i] as u32;
+                    px.push((255 << 24) | (v << 16) | (v << 8) | v);
+                }
+            }
+            _ => return None,
         }
         Some(Img { w, h, px })
     }

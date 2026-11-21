@@ -155,6 +155,10 @@ fn main() {
         std::process::exit(3)
     });
     let (cfs, base, btex) = (out_b.cfs, out_b.base, out_b.tex);
+    if ctx.unsupported.get() {
+        eprintln!("error: unsupported asset format");
+        std::process::exit(4);
+    }
     for n in &look.notes {
         eprintln!("note: {}", n);
     }

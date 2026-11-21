@@ -78,7 +78,15 @@ fn neck_rig(mesh: &Inst) -> Option<V3> {
 fn mesh_from(ctx: &Ctx, v: Option<&Value>) -> Option<Mesh> {
     let c = mesh_content(v)?;
     let b = mesh_bytes(ctx, &c)?;
-    parse_mesh2016(&b).ok().map(|m| clean_mesh(&m))
+    match parse_mesh2016(&b) {
+        Ok(m) => Some(clean_mesh(&m)),
+        Err(e) => {
+            if e.contains("not ported") {
+                ctx.unsupported.set(true);
+            }
+            None
+        }
+    }
 }
 
 pub fn composite_layer(ctx: &Ctx, out: &mut Img, name: &str, image: &Img, color: [f64; 3]) {

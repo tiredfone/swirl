@@ -489,7 +489,13 @@ impl<'a> R15<'a> {
         let mid = pk.mesh.as_ref().and_then(|u| asset_id(u))?;
         let tid = pk.tex.as_ref().and_then(|u| asset_id(u));
         let bytes = ctx.fetch(&mid)?;
-        let mesh = fit_mesh(&parse_mesh(&bytes).ok()?, self.size_of(name));
+        let parsed = parse_mesh(&bytes);
+        if let Err(e) = &parsed {
+            if e.contains("not ported") {
+                ctx.unsupported.set(true);
+            }
+        }
+        let mesh = fit_mesh(&parsed.ok()?, self.size_of(name));
         let mut texture = None;
         let img = tid.and_then(|t| ctx.image(&format!("rbxassetid://{}", t), 0));
         if let Some(i) = &img {

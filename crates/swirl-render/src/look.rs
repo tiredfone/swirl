@@ -9,6 +9,7 @@ pub struct Ctx<'a> {
     pub src: &'a dyn AssetSource,
     pub data: String,
     pub images: RefCell<HashMap<String, Option<Img>>>,
+    pub unsupported: std::cell::Cell<bool>,
 }
 
 fn digits_at(s: &str, from: usize) -> Option<String> {
@@ -46,7 +47,7 @@ pub fn asset_id(r: &str) -> Option<String> {
 
 impl<'a> Ctx<'a> {
     pub fn new(src: &'a dyn AssetSource, data: &str) -> Ctx<'a> {
-        Ctx { src, data: data.to_string(), images: RefCell::new(HashMap::new()) }
+        Ctx { src, data: data.to_string(), images: RefCell::new(HashMap::new()), unsupported: std::cell::Cell::new(false) }
     }
 
     pub fn fetch(&self, id: &str) -> Option<Vec<u8>> {
@@ -65,11 +66,11 @@ impl<'a> Ctx<'a> {
         }
         let b = self.fetch(&id)?;
         let res = if Img::is_image_bytes(&b) {
-            if big {
-                Img::decode_hat(&b, 512)
-            } else {
-                Img::decode(&b, 2048)
+            let r = if big { Img::decode_hat(&b, 512) } else { Img::decode(&b, 2048) };
+            if r.is_none() && !b.starts_with(b"\x89PNG") {
+                self.unsupported.set(true);
             }
+            r
         } else if depth > 2 {
             None
         } else {

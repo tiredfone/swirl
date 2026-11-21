@@ -303,7 +303,10 @@ pub fn build_handle(ctx: &Ctx, base: &Base, h: &Inst, cf: CF, notes: &mut Vec<St
         let parsed = b.ok_or_else(|| "a mesh could not be fetched".to_string()).and_then(|b| parse_mesh2016(&b));
         match parsed {
             Ok(p) => m = clean_mesh(&p),
-            Err(_) => {
+            Err(e) => {
+                if e.contains("not ported") {
+                    ctx.unsupported.set(true);
+                }
                 fail(notes);
                 return None;
             }
