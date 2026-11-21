@@ -154,3 +154,16 @@ pub fn rgb(n: i64) -> [u8; 3] {
     let f = |k: i64| TABLE.binary_search_by_key(&k, |e| e.0).ok().map(|i| TABLE[i].1);
     f(n).or_else(|| f(FALLBACK)).unwrap()
 }
+
+pub fn nearest(r: f64, g: f64, b: f64) -> i64 {
+    let mut best = FALLBACK;
+    let mut bd = f64::INFINITY;
+    for (n, c) in TABLE {
+        let d = (c[0] as f64 / 255.0 - r).powi(2) + (c[1] as f64 / 255.0 - g).powi(2) + (c[2] as f64 / 255.0 - b).powi(2);
+        if d < bd {
+            bd = d;
+            best = *n;
+        }
+    }
+    best
+}

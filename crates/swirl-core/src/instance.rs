@@ -51,7 +51,7 @@ pub struct DataModel {
 
 impl DataModel {
     pub fn new(side: &str) -> DataModel {
-        let mut dm = DataModel { side: side.to_string(), era: 2012, insts: vec![None], root: 0, services: HashMap::new() };
+        let mut dm = DataModel { side: side.to_string(), era: 2012, insts: vec![], root: 0, services: HashMap::new() };
         let id = dm.alloc("DataModel", "Game");
         dm.root = id;
         dm
@@ -64,6 +64,9 @@ impl DataModel {
             for (k, p) in &c.all {
                 props.insert(k.clone(), Val::from_default(&p.ty, &p.def));
             }
+        }
+        if props.contains_key("Name") {
+            props.insert("Name".to_string(), Val::Str(name.to_string()));
         }
         self.insts.push(Some(Instance { id, class: class.to_string(), name: name.to_string(), parent: None, children: vec![], props, tags: vec![], destroyed: false }));
         id
@@ -80,6 +83,17 @@ impl DataModel {
     pub fn create(&mut self, class: &str, parent: Option<InstId>) -> Result<InstId, String> {
         if !classes::is_creatable(class) {
             return Err(format!("Can not create an Instance of class {}", class));
+        }
+        let id = self.alloc(class, class);
+        if let Some(p) = parent {
+            self.set_parent(id, Some(p))?;
+        }
+        Ok(id)
+    }
+
+    pub fn create_any(&mut self, class: &str, parent: Option<InstId>) -> Result<InstId, String> {
+        if classes::class_info(class).is_none() {
+            return Err(format!("unknown class {}", class));
         }
         let id = self.alloc(class, class);
         if let Some(p) = parent {
@@ -280,7 +294,21 @@ impl DataModel {
             refs.insert(r.clone(), id);
         }
         self.get_mut(id).unwrap().name = x.name.clone();
+        let has_brick = x.props.contains_key("BrickColor");
+        let has_color = x.props.contains_key("Color3uint8") || x.props.contains_key("Color");
         for (k, v) in &x.props {
+            if (k == "Color3uint8" || k == "Color") && classes::prop_info(&x.cls, "BrickColor").is_some() {
+                if let Value::Color3(r, g, b) = v {
+                    if !has_brick {
+                        let nb = crate::brickcolors::nearest(*r, *g, *b);
+                        self.get_mut(id).unwrap().props.insert("BrickColor".into(), Val::Num(nb as f64));
+                    }
+                    if classes::prop_info(&x.cls, "Color").map(|p| p.ty == "C3").unwrap_or(false) {
+                        self.get_mut(id).unwrap().props.insert("Color".into(), Val::Arr(vec![*r, *g, *b]));
+                    }
+                    continue;
+                }
+            }
             let canon = match classes::canonical_prop(&x.cls, k) {
                 Some(c) => c,
                 None => continue,
@@ -305,6 +333,12 @@ impl DataModel {
                 continue;
             }
             self.get_mut(id).unwrap().props.insert(canon, val);
+        }
+        if has_brick && !has_color && classes::prop_info(&x.cls, "Color").map(|p| p.ty == "C3").unwrap_or(false) {
+            if let Some(Val::Num(b)) = self.get(id).unwrap().props.get("BrickColor").cloned() {
+                let c = crate::rbx::brick_rgb01(b as i64);
+                self.get_mut(id).unwrap().props.insert("Color".into(), Val::Arr(c.to_vec()));
+            }
         }
         for c in &x.children {
             self.load_inst(c, id, refs, pending);

@@ -1,7 +1,18 @@
 [package]
 name = "swirl-client"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
-swirl-core = { path = "../swirl-core" }
+swirl-net = { path = "../swirl-net" }
+wasm-bindgen = "=0.2.100"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
+version = "0.3.77"
+features = [
+    "Window", "Document", "Element", "HtmlCanvasElement", "WebGl2RenderingContext", "WebGlProgram", "WebGlShader", "WebGlBuffer",
+    "WebGlVertexArrayObject", "WebGlUniformLocation", "WebSocket", "MessageEvent", "MouseEvent", "WheelEvent", "Event", "CloseEvent",
+]

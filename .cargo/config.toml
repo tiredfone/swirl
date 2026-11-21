@@ -1,0 +1,8 @@
+[build]
+jobs = 4
+
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=--no-demangle", "-C", "link-arg=-zstack-size=1048576"]
+
+[net]
+retry = 3

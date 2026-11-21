@@ -38,6 +38,10 @@ See PLAN.md. Avatars (R6 and R15, scale, pose, stances, packages), headshots, an
 
 Solar runs `/var/www/swirl/bin/swirl-vanilla`, never the build dir. `tools/install.sh` builds, runs five parity checks against PHP (every channel must stay under 0.5 mean error) and only then copies the binary to `bin/` through a temp file and `mv`. Run it after every renderer change that should go live; `bin/` is not in git.
 
+## Client builds
+
+The wasm client (`swirl-client`, glue over `swirl-net`) is built with `tools/build-client.sh` and released with `tools/release-client.sh` to Solar's developer channel (versions 1.0, 1.1, ...). Timings: clean 27 s, incremental 1 to 2 s. See the `build-client` skill. `wasm-bindgen` 0.2.100 is installed in `~/.cargo/bin` and the crate is pinned to the same version.
+
 ## Port order
 
 1. vanilla: R6 avatar, then hats, gear, R15, items, places.

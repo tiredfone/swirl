@@ -1,0 +1,8 @@
+[package]
+name = "swirl-net"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+swirl-core = { path = "../swirl-core" }
+serde_json = "1"

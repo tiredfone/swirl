@@ -1,0 +1,11 @@
+const CH = '/var/www/html/chocolate';
+const placeId = +process.argv[2];
+const era = +(process.argv[3] || 2012);
+const { Game } = await import(CH + '/server/game.js');
+const toClient = [];
+const game = new Game(placeId, { jobId: 'cmp', kind: 'public', privateId: 0, allowGear: false, era, send: (cid, data) => toClient.push(JSON.parse(data)), kick: () => {}, log: () => {} });
+await game.start();
+await game.join(1, { id: 1, name: 'Player1', membership: 0, age: 100, dev: false });
+const init = toClient.find((m) => m.t === 'init');
+console.log(JSON.stringify(init));
+process.exit(0);
