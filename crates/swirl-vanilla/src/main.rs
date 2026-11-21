@@ -125,6 +125,43 @@ fn main() {
             };
         }
     }
+    if let Some(kind) = a.get("scene") {
+        let bytes = std::fs::read(a.get("scene-file").expect("--scene-file required")).unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(3)
+        });
+        let dims = |k: &str, d: (usize, usize)| -> (usize, usize) { a.get(k).and_then(|s| s.split_once('x')).map(|(w, h)| (w.parse().unwrap_or(d.0), h.parse().unwrap_or(d.1))).unwrap_or(d) };
+        let (sw, sh) = dims("scene-size", (1024, 1024));
+        let (ow, oh) = dims("out-size", (sw, sh));
+        let req = swirl_render::place::SceneReq {
+            kind: kind.clone(),
+            bytes,
+            w: sw,
+            h: sh,
+            out_w: ow,
+            out_h: oh,
+            era: a.get("era").and_then(|s| s.parse().ok()).unwrap_or(2012),
+            content_dir: a.get("content-dir").cloned(),
+        };
+        let res = swirl_render::place::render_scene(&ctx, &base, &req);
+        if ctx.unsupported.get() {
+            eprintln!("error: unsupported asset format");
+            std::process::exit(4);
+        }
+        match res {
+            Ok((png, notes)) => {
+                for n in &notes {
+                    eprintln!("note: {}", n);
+                }
+                std::fs::write(out, png).unwrap();
+                return;
+            }
+            Err(e) => {
+                eprintln!("error: {}", e);
+                std::process::exit(if e.contains("not ported") { 4 } else { 3 });
+            }
+        }
+    }
     let item_mode = a.contains_key("item");
     let mut is_pkg = false;
     let mut ids: Vec<String> = vec![];

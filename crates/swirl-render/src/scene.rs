@@ -32,6 +32,7 @@ pub struct Base {
     pub stud: Rc<Texture>,
     pub inlet: Img,
     pub face: Img,
+    pub fx_sparkle: Option<Img>,
 }
 
 fn load(dir: &str, f: &str) -> Result<Vec<u8>, String> {
@@ -58,6 +59,7 @@ impl Base {
             stud: Rc::new(Texture::new(dec("stud.png")?, false)),
             inlet: dec("inlet.png")?,
             face: dec("face.png")?,
+            fx_sparkle: std::fs::read(format!("{}/fx_sparkle.png", data)).ok().and_then(|b| Img::decode(&b, 2048)),
         })
     }
 }
@@ -490,4 +492,8 @@ pub fn draw(base: &Base, tex: &crate::body::BodyTex, r15: Option<&R15Draw>, look
 
 fn mk<'a>(geom: &'a Mesh, cf: CF, mode: u8, color: Option<[f64; 3]>, tex: Option<Rc<Texture>>, studs: bool, half: Option<[f64; 3]>) -> Call<'a> {
     Call { geom, cf, mode, color, tex, studs, half, tint: [1.0; 3], alpha: 1.0, blend: false }
+}
+
+pub fn fx_sparkle(base: &Base) -> Option<crate::img::Img> {
+    base.fx_sparkle.clone()
 }

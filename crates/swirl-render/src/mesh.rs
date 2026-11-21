@@ -403,7 +403,7 @@ pub fn sphere_mesh(rx: f64, ry: f64, rz: f64) -> Mesh {
     out
 }
 
-pub fn scene_faces(faces: &[Vec<V3>]) -> Mesh {
+pub fn scene_faces_pub(faces: &[Vec<V3>]) -> Mesh {
     let mut out = Mesh::default();
     for f in faces {
         let mut f = f.clone();
@@ -459,7 +459,7 @@ pub fn scene_cylinder(x: f64, y: f64, z: f64, along_y: bool) -> Mesh {
         faces.push(top);
         faces.push(bot);
     }
-    scene_faces(&faces)
+    scene_faces_pub(&faces)
 }
 
 pub fn scene_decal(size: V3, face: i64) -> Mesh {
