@@ -339,10 +339,6 @@ pub fn draw(base: &Base, look: &Look, cfs: &Cfs, w: usize, h: usize, ss: usize, 
         mk(&base.left_leg, cfs.lleg, 1, None, Some(lo_tex.clone()), false, None),
         mk(&base.head, cfs.head, 2, Some(look.colors[HEAD]), Some(face_tex), false, None),
     ];
-    if head_view {
-        let hd = calls.pop().unwrap();
-        calls = vec![hd];
-    }
     for it in &items {
         let blend = it.alpha < 0.999;
         if let Some(t) = &it.tex {
