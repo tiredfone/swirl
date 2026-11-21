@@ -1,0 +1,18 @@
+---
+name: bootstrapper
+description: Work on the Solar desktop launchers (SolarPlayer2012Launcher and SolarPlayer2018Launcher, crate swirl-bootstrapper) and the native client (swirl-desktop, binary SolarPlayer). Use for install, auto-update, protocol registration, launcher window look, or testing them with a fake update server.
+---
+
+# Solar launchers
+
+- `crates/swirl-bootstrapper`: one library, two bins (`src/bin/p2012.rs`, `p2018.rs`) that call `run(Era)`. Deps are kept small: minifb (window), ab_glyph + embedded Liberation Sans (text), png, sha2, ureq (rustls), zip (deflate only), serde_json. Modules: `era` (names, window size, status wording), `draw` (software renderer for both looks, buttons), `ui` (args, minifb loop, worker thread, `--screenshot`), `flow` (check, self-update, client install, launch), `install`, `register`, `launch` (protocol URL parser), `net`, `paths`, `state`.
+- Contract: `solar-<era>://launch/?place=&token=&channel=[&server=]` as argv[1]; no arguments installs and shows "installed". Update check `GET <base>/api/v1/client/desktop?era=&platform=&channel=`. Base URL: runtime env `SOLAR_BASE_URL`, build-time env `SOLAR_BASE_URL`, default `https://imfone.dev`. Own version: build-time env `SOLAR_BOOTSTRAPPER_VERSION` (N.M), default the crate's major.minor.
+- Layout: `<data>/Solar/<era>/Versions/<ver>/` (Windows `%LOCALAPPDATA%`) or `~/.local/share/solar/<era>/versions/<ver>/` holds `SolarPlayer[.exe]` and a copy of the launcher; a launcher self-update goes to `launcher-<ver>/`. `current.json` records `client` and `launcher` (the registered copy). Cleanup keeps the two newest client folders and the folder of the registered launcher.
+- Client package: zip with `SolarPlayer[.exe]` at its root. Launcher package: the launcher binary itself. Both sha256-checked while streaming.
+- Launch: starts `SolarPlayer --place --token --channel [--server] --base-url`, reads its stdout; `SOLAR_READY` closes the launcher window, `SOLAR_ERROR msg` or an early exit shows the error with Retry/Close (120 s limit).
+- Env for tests: `SOLAR_HEADLESS=1` (no window, console log, exit 1 on error), `SOLAR_NO_REGISTER=1` (skip update-desktop-database, xdg-mime, reg), `XDG_DATA_HOME` and `HOME` to sandbox the install, `SOLAR_UPDATED` is set on the re-exec after a self-update to stop loops.
+- Screenshots: `SolarPlayer2012Launcher --screenshot out.png --state downloading:45` (states connecting, checking, downloading[:pct], installing, configuring, starting, done[:installed], error[:message]).
+- Fake server test (see the 5 scenarios in PLAN.md): serve a static dir with `api/v1/client/desktop` (JSON file, query string ignored by python's http.server), `client-N.M.zip` and `boot-N.M`; pick an unusual port (others are in use); build a second launcher with `SOLAR_BOOTSTRAPPER_VERSION=1.1` to test self-update.
+- Native client: `crates/swirl-desktop`, winit + glutin + glow (GL 3.3), tungstenite with rustls, shares `swirl-net` (World, Controller, mat). `--direct <ws-url>` skips the redeem; `--offscreen --screenshot out.png --frames N` renders through an EGL pbuffer (needs an X display, e.g. `xvfb-run`, no winit window). The windowed path needs `libxkbcommon-x11` at runtime (missing on this server, so it was only compiled here).
+- Windows: needs `x86_64-w64-mingw32-gcc` (not installed here). Type-check without it: `CC_x86_64_pc_windows_gnu=/bin/true AR_x86_64_pc_windows_gnu=/bin/true cargo check --target x86_64-pc-windows-gnu -p swirl-bootstrapper`.
+- No comments in code. The look of both launchers is Solar's own; do not add Roblox logos, art or strings. Research notes: `docs/bootstrapper-research.md`.

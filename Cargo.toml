@@ -42,3 +42,8 @@ opt-level = "s"
 lto = "thin"
 codegen-units = 1
 incremental = false
+
+[profile.launcher]
+inherits = "client"
+opt-level = "s"
+strip = true

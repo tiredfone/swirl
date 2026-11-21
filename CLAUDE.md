@@ -13,6 +13,8 @@ Rust rewrite of Chocolate (browser game client and node game server) and vanilla
 | `crates/swirl-lua` | Lua 5.1 host through mlua (lua51, vendored) |
 | `crates/swirl-server` | Chocolate `server/`, same WebSocket protocol |
 | `crates/swirl-client` | Chocolate `client/`, wasm |
+| `crates/swirl-bootstrapper` | Solar desktop launchers `SolarPlayer2012Launcher` and `SolarPlayer2018Launcher` (install, auto-update, protocol, window) |
+| `crates/swirl-desktop` | native client `SolarPlayer` (winit, glutin, glow, tungstenite) over `swirl-net` |
 | `tools/parity/` | PHP side of the parity harness and the pixel diff runner |
 
 ## Commands
@@ -42,6 +44,10 @@ Solar runs `/var/www/swirl/bin/swirl-vanilla`, never the build dir. `tools/insta
 
 The wasm client (`swirl-client`, glue over `swirl-net`) is built with `tools/build-client.sh` and released with `tools/release-client.sh` to Solar's developer channel (versions 1.0, 1.1, ...). Timings: clean 27 s, incremental 1 to 2 s. See the `build-client` skill. `wasm-bindgen` 0.2.100 is installed in `~/.cargo/bin` and the crate is pinned to the same version.
 
+## Desktop app
+
+The launchers and the native client are built with `tools/release-desktop.sh` (profiles `launcher` and `client`) and published to Solar's developer channel with `release.php publish-desktop`. See the `bootstrapper` and `desktop-release` skills and `docs/bootstrapper-research.md`. Linux builds run here; Windows needs mingw-w64, which is not installed.
+
 ## Port order
 
 1. vanilla: R6 avatar, then hats, gear, R15, items, places.
@@ -53,3 +59,5 @@ The wasm client (`swirl-client`, glue over `swirl-net`) is built with `tools/bui
 - `port-module`: port a Chocolate or vanilla file to Rust and check parity.
 - `render-parity`: run and read the vanilla pixel diff.
 - `subagent-tasks`: hand work to Sonnet subagents.
+- `bootstrapper`: the desktop launchers and native client, and how to test them.
+- `desktop-release`: build and publish the desktop app.
