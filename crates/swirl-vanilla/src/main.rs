@@ -143,6 +143,7 @@ fn main() {
             era: a.get("era").and_then(|s| s.parse().ok()).unwrap_or(2012),
             content_dir: a.get("content-dir").cloned(),
         };
+        *ctx.content_dir.borrow_mut() = req.content_dir.clone();
         let res = swirl_render::place::render_scene(&ctx, &base, &req);
         if ctx.unsupported.get() {
             eprintln!("error: unsupported asset format");

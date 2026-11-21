@@ -439,7 +439,11 @@ fn item(el: &El) -> Inst {
 }
 
 pub fn parse(bytes: &[u8]) -> Result<Tree, String> {
-    if bytes.len() > 16 * 1024 * 1024 {
+    parse_limit(bytes, 16 * 1024 * 1024)
+}
+
+pub fn parse_limit(bytes: &[u8], max: usize) -> Result<Tree, String> {
+    if bytes.len() > max {
         return Err("model too large".into());
     }
     if bytes.len() > 8 && &bytes[..8] == b"<roblox!" {

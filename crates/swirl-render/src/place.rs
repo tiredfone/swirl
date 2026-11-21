@@ -10,26 +10,86 @@ use swirl_core::rbx::{self, Inst, Value};
 
 const SCENE_PARTS: [&str; 11] = ["Part", "WedgePart", "CornerWedgePart", "TrussPart", "Seat", "VehicleSeat", "SpawnLocation", "SkateboardPlatform", "FlagStand", "MeshPart", "UnionOperation"];
 
-const DROP: &[&str] = &[
-    "Script", "LocalScript", "ModuleScript", "Sound", "SoundGroup", "KeyframeSequence", "Animation", "Animator", "AnimationController", "BoolValue", "IntValue", "NumberValue",
-    "StringValue", "Color3Value", "Vector3Value", "CFrameValue", "ObjectValue", "BrickColorValue", "RemoteEvent", "RemoteFunction", "BindableEvent", "BindableFunction", "ClickDetector",
-    "ScreenGui", "BillboardGui", "SurfaceGui", "PlayerGui", "StarterGui", "StarterPack", "StarterPlayer", "Players", "Teams", "ReplicatedStorage", "ReplicatedFirst", "ServerStorage",
-    "ServerScriptService", "SoundService", "Chat", "TextChatService", "VRService", "VoiceChatService", "VirtualInputManager", "VideoService", "Humanoid", "CharacterMesh", "Weld",
-    "WeldConstraint", "ParticleEmitter", "PointLight", "SpotLight", "SurfaceLight", "UserInputService", "GuiService",
-];
+const DROP_RE: &str = r#"<Item class="(?:Script|LocalScript|ModuleScript|Sound|[A-Za-z]*SoundEffect|SoundGroup|KeyframeSequence|Animation|Animator|AnimationController|BoolValue|IntValue|NumberValue|StringValue|Color3Value|Vector3Value|CFrameValue|ObjectValue|BrickColorValue|RemoteEvent|RemoteFunction|BindableEvent|BindableFunction|ClickDetector|ScreenGui|BillboardGui|SurfaceGui|PlayerGui|StarterGui|StarterPack|StarterPlayer|Players|Teams|ReplicatedStorage|ReplicatedFirst|ServerStorage|ServerScriptService|SoundService|Chat|TextChatService|VRService|VoiceChatService|VirtualInputManager|VideoService|Humanoid|CharacterMesh|Weld|WeldConstraint|ParticleEmitter|PointLight|SpotLight|SurfaceLight|UserInputService|GuiService)""#;
 
-fn dropped(cls: &str) -> bool {
-    if DROP.contains(&cls) {
-        return true;
+fn drop_items_text(xml: &str) -> String {
+    let re = regex::Regex::new(DROP_RE).unwrap();
+    let starts: Vec<usize> = re.find_iter(xml).map(|m| m.start()).collect();
+    if starts.is_empty() {
+        return xml.to_string();
     }
-    cls.ends_with("SoundEffect") && cls[..cls.len() - 11].chars().all(|c| c.is_ascii_alphabetic())
+    let mut out = String::with_capacity(xml.len());
+    let mut pos = 0usize;
+    for start in starts {
+        if start < pos {
+            continue;
+        }
+        let mut depth = 1;
+        let mut i = start + 5;
+        while depth > 0 {
+            let o = xml[i..].find("<Item ").map(|x| x + i);
+            let c = xml[i..].find("</Item>").map(|x| x + i);
+            let c = match c {
+                Some(c) => c,
+                None => break,
+            };
+            match o {
+                Some(o) if o < c => {
+                    depth += 1;
+                    i = o + 6;
+                }
+                _ => {
+                    depth -= 1;
+                    i = c + 7;
+                }
+            }
+        }
+        if depth > 0 {
+            break;
+        }
+        out.push_str(&xml[pos..start]);
+        pos = i;
+    }
+    out.push_str(&xml[pos..]);
+    out
 }
 
-fn drop_items(list: &mut Vec<Inst>) {
-    list.retain(|x| !dropped(&x.cls));
-    for x in list.iter_mut() {
-        drop_items(&mut x.children);
+fn strip_text(bytes: &[u8]) -> String {
+    let src = String::from_utf8_lossy(bytes).to_string();
+    let n = src.len();
+    let mut out = String::with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        let a = src[i..].find("<ProtectedString").map(|x| x + i);
+        let b = src[i..].find("<BinaryString").map(|x| x + i);
+        let s = match (a, b) {
+            (None, None) => {
+                out.push_str(&src[i..]);
+                break;
+            }
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (Some(a), Some(b)) => a.min(b),
+        };
+        let close = if src.as_bytes()[s + 1] == b'P' { "</ProtectedString>" } else { "</BinaryString>" };
+        let e = match src[s..].find(close) {
+            Some(e) => e + s,
+            None => {
+                out.push_str(&src[i..]);
+                break;
+            }
+        };
+        out.push_str(&src[i..s]);
+        i = e + close.len();
     }
+    let re1 = regex::Regex::new(r#"<token name="(?:Back|Bottom|Front|Left|Right|Top)Surface">0</token>\s*"#).unwrap();
+    let out = re1.replace_all(&out, "").to_string();
+    let unused = r"(?:Back|Bottom|Front|Left|Right|Top)(?:ParamA|ParamB|SurfaceInput)|Anchored|Archivable|CanCollide|CollisionGroupId|Locked|Elasticity|Friction|formFactorRaw|FormFactor|ControllerFlagShown|DraggingV1|PrimaryPart|LinkedSource|Disabled|ClassName";
+    let re2 = regex::Regex::new(&format!(r#"<([A-Za-z0-9]+) name="(?:{})">[^<]*</([A-Za-z0-9]+)>\s*"#, unused)).unwrap();
+    let out = re2.replace_all(&out, |c: &regex::Captures| if c[1] == c[2] { String::new() } else { c[0].to_string() }).to_string();
+    let re3 = regex::Regex::new(r#"(?s)<Vector3 name="(?:Velocity|RotVelocity)">.*?</Vector3>\s*"#).unwrap();
+    let out = re3.replace_all(&out, "").to_string();
+    drop_items_text(&out)
 }
 
 #[derive(Clone)]
@@ -1053,15 +1113,7 @@ fn load_img_file(path: &str) -> Option<Img> {
     Img::decode_cap(&b, 512, 2048)
 }
 
-fn mesh_bytes_scene(ctx: &Ctx, content_dir: &Option<String>, r: &str) -> Option<Vec<u8>> {
-    let low = r.to_ascii_lowercase();
-    if low.starts_with("rbxasset://solarterrain/") {
-        let rel = &r[11..];
-        if rel.contains("..") {
-            return None;
-        }
-        return std::fs::read(format!("{}/{}", content_dir.as_ref()?, rel)).ok();
-    }
+fn mesh_bytes_scene(ctx: &Ctx, _content_dir: &Option<String>, r: &str) -> Option<Vec<u8>> {
     crate::items::mesh_bytes_pub(ctx, r)
 }
 
@@ -1084,10 +1136,14 @@ pub fn render_scene(ctx: &Ctx, base: &Base, req: &SceneReq) -> Result<(Vec<u8>, 
         let mesh = clean_mesh(&parse_mesh2016(&req.bytes)?);
         items = vec![SItem { cf: CF::identity(), scale: [1.0; 3], off: [0.0; 3], color: [0.64, 0.64, 0.66], alpha: 1.0, tex: None, tex_url: None, smooth: true, size: None, refl: 0.0, mesh: Rc::new(mesh), tiles: None, unlit: false, decal: false }];
     } else {
-        let mut tree = rbx::parse(&req.bytes)?;
-        if !req.bytes.starts_with(b"<roblox!") {
-            drop_items(&mut tree.roots);
-        }
+        let stripped: Vec<u8>;
+        let src: &[u8] = if req.bytes.starts_with(b"<roblox!") {
+            &req.bytes
+        } else {
+            stripped = strip_text(&req.bytes).into_bytes();
+            &stripped
+        };
+        let tree = rbx::parse_limit(src, 67108864)?;
         let mut roots: Vec<Inst> = tree.roots;
         if kind == "place" {
             for r in &roots {

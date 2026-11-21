@@ -234,6 +234,10 @@ pub fn mesh_bytes(ctx: &Ctx, r: &str) -> Option<Vec<u8>> {
             ("fonts/rightleg.mesh", "rightleg.mesh"),
             ("textures/face.png", "face.png"),
         ];
+        if rel.starts_with("solarterrain/") && !rel.contains("..") {
+            let dir = ctx.content_dir.borrow().clone()?;
+            return std::fs::read(format!("{}/{}", dir, rel)).ok();
+        }
         let low = rel.to_lowercase();
         for (k, f) in map {
             if k == low {

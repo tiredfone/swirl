@@ -11,6 +11,7 @@ pub struct Ctx<'a> {
     pub images: RefCell<HashMap<String, Option<Img>>>,
     pub unsupported: std::cell::Cell<bool>,
     pub missing: std::cell::Cell<bool>,
+    pub content_dir: RefCell<Option<String>>,
 }
 
 fn digits_at(s: &str, from: usize) -> Option<String> {
@@ -48,7 +49,7 @@ pub fn asset_id(r: &str) -> Option<String> {
 
 impl<'a> Ctx<'a> {
     pub fn new(src: &'a dyn AssetSource, data: &str) -> Ctx<'a> {
-        Ctx { src, data: data.to_string(), images: RefCell::new(HashMap::new()), unsupported: std::cell::Cell::new(false), missing: std::cell::Cell::new(false) }
+        Ctx { src, data: data.to_string(), images: RefCell::new(HashMap::new()), unsupported: std::cell::Cell::new(false), missing: std::cell::Cell::new(false), content_dir: RefCell::new(None) }
     }
 
     pub fn fetch(&self, id: &str) -> Option<Vec<u8>> {
@@ -64,6 +65,13 @@ impl<'a> Ctx<'a> {
     }
 
     pub fn image_big(&self, r: &str, depth: usize, big: bool) -> Option<Img> {
+        if r.to_ascii_lowercase().starts_with("rbxasset://") {
+            let b = crate::items::mesh_bytes_pub(self, r)?;
+            if !Img::is_image_bytes(&b) {
+                return None;
+            }
+            return if big { Img::decode_hat(&b, 512) } else { Img::decode(&b, 2048) };
+        }
         let id = asset_id(r)?;
         let key = format!("{}{}", id, if big { "h" } else { "" });
         if let Some(c) = self.images.borrow().get(&key) {
