@@ -231,7 +231,7 @@ fn scale_translate(s: f64, tx: f64, ty: f64) -> M4 {
     [s, 0.0, 0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, tx, ty, 0.0, 1.0]
 }
 
-pub fn draw(base: &Base, tex: &crate::body::BodyTex, r15: Option<&R15Draw>, look: &Look, cfs: &Cfs, w: usize, h: usize, ss: usize, view: &str, exact: bool) -> Vec<u8> {
+pub fn draw(base: &Base, tex: &crate::body::BodyTex, r15: Option<&R15Draw>, look: &Look, cfs: &Cfs, w: usize, h: usize, ss: usize, view: &str, exact: bool, cam: [f64; 3]) -> Vec<u8> {
     let head_view = view == "head";
     let items: Vec<&Item> = look.items.iter().collect();
     let n_hats = look.n_hats.min(items.len());
@@ -241,7 +241,7 @@ pub fn draw(base: &Base, tex: &crate::body::BodyTex, r15: Option<&R15Draw>, look
         center = [hp[0], hp[1] + HEAD_AIM, hp[2]];
         let mut fov = HEAD_FOV * std::f64::consts::PI / 180.0;
         let mut dist = HEAD_DIST;
-        let cd = norm(HEAD_DIR);
+        let cd = turn_camera(norm(HEAD_DIR), cam);
         let mut near = f64::INFINITY;
         for it in &items[..n_hats] {
             for p in &it.geom.pos {
@@ -304,7 +304,7 @@ pub fn draw(base: &Base, tex: &crate::body::BodyTex, r15: Option<&R15Draw>, look
         let radius = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt() / 2.0;
         let mut fov = (if only == "items" { CAM_FOV.min(ITEM_THUMB_FOV) } else { CAM_FOV }) * std::f64::consts::PI / 180.0;
         let mut dist = radius / (fov / 2.0).tan();
-        let cd = norm(CAM_DIR);
+        let cd = turn_camera(norm(CAM_DIR), cam);
         let mut eye_ = [center[0] + cd[0] * dist, center[1] + cd[1] * dist, center[2] + cd[2] * dist];
         let mut cam_up = [0.0, 1.0, 0.0];
         if only == "items" && items.len() == 1 {
@@ -398,6 +398,11 @@ pub fn draw(base: &Base, tex: &crate::body::BodyTex, r15: Option<&R15Draw>, look
         vp = vp_;
     }
 
+    let mut vp = vp;
+    if cam[0] != 1.0 {
+        let z = cam[0];
+        vp = mul4(&[z, 0.0, 0.0, 0.0, 0.0, z, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0], &vp);
+    }
     let (up_tex, lo_tex) = paint_sheets(look, &base.inlet);
     let studs = look.shirt.is_none();
     let (hb_lo, hb_hi) = base.head_box;
@@ -496,4 +501,14 @@ fn mk<'a>(geom: &'a Mesh, cf: CF, mode: u8, color: Option<[f64; 3]>, tex: Option
 
 pub fn fx_sparkle(base: &Base) -> Option<crate::img::Img> {
     base.fx_sparkle.clone()
+}
+
+pub fn turn_camera(d: V3, cam: [f64; 3]) -> V3 {
+    if cam[1] == 0.0 && cam[2] == 0.0 {
+        return d;
+    }
+    let az = d[0].atan2(d[2]) + cam[1].to_radians();
+    let lim = 85.0f64.to_radians();
+    let el = (d[1].atan2((d[0] * d[0] + d[2] * d[2]).sqrt()) + cam[2].to_radians()).clamp(-lim, lim);
+    [el.cos() * az.sin(), el.sin(), el.cos() * az.cos()]
 }

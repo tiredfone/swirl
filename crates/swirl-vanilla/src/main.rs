@@ -95,6 +95,13 @@ fn main() {
         return;
     }
     let a = args();
+    let known = ["data", "assets", "out", "size", "view", "colors", "ids", "item", "with", "rig", "scale", "pose", "stance", "straight-legs", "exact", "zoom", "yaw", "pitch", "scene", "scene-file", "scene-size", "out-size", "era", "content-dir"];
+    for k in a.keys() {
+        if !known.contains(&k.as_str()) {
+            eprintln!("error: unknown option {}", k);
+            std::process::exit(2);
+        }
+    }
     let data = a.get("data").cloned().unwrap_or("/var/www/html/core/vanilla-rcc/data".into());
     let root = a.get("assets").cloned().unwrap_or("/var/www/assets".into());
     let out = a.get("out").expect("--out required");
@@ -212,7 +219,7 @@ fn main() {
     for n in &look.notes {
         eprintln!("note: {}", n);
     }
-    let png = draw(&base, &btex, out_b.r15.as_ref(), &look, &cfs, w, h, 4, &view, a.contains_key("exact"));
+    let png = draw(&base, &btex, out_b.r15.as_ref(), &look, &cfs, w, h, 4, &view, a.contains_key("exact"), [a.get("zoom").and_then(|s| s.parse().ok()).unwrap_or(1.0), a.get("yaw").and_then(|s| s.parse().ok()).unwrap_or(0.0), a.get("pitch").and_then(|s| s.parse().ok()).unwrap_or(0.0)]);
     std::fs::write(out, png).unwrap();
 }
 

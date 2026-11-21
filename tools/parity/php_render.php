@@ -1,5 +1,5 @@
 <?php
-$a = getopt('', ['ids::', 'colors::', 'out:', 'size::', 'view::', 'rig::', 'stance::', 'exact::', 'smooth::', 'scale::', 'pose::', 'item::', 'with::']);
+$a = getopt('', ['ids::', 'colors::', 'out:', 'size::', 'view::', 'rig::', 'stance::', 'exact::', 'smooth::', 'scale::', 'pose::', 'item::', 'with::', 'zoom::', 'yaw::', 'pitch::']);
 $vr = getenv('VANILLA_DIR') ?: '/var/www/html/core/vanilla-rcc';
 require_once $vr . '/src/Vanilla.php';
 @ini_set('memory_limit', '1500M');
@@ -33,6 +33,7 @@ if (!empty($a['scale'])) { $sc = []; foreach (explode(',', $a['scale']) as $kv) 
 if (!empty($a['pose'])) $req['pose'] = $a['pose'];
 if (isset($a['stance'])) $req['stance'] = $a['stance'];
 if (isset($a['smooth']) && $a['smooth'] === '0') $req['smooth'] = false;
+foreach (['zoom', 'yaw', 'pitch'] as $k) if (isset($a[$k])) $req[$k] = $a[$k];
 $r = $av->render($req);
 file_put_contents($a['out'], $r['png']);
 foreach ($r['notes'] as $n) fwrite(STDERR, "note: $n\n");

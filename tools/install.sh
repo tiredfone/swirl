@@ -22,6 +22,21 @@ check clothes --ids=1287,1260,1005,1011
 check pkg --ids=1106
 check r15 --rig=R15 --pose=507766388 --ids=1106,1005
 check item --item=1011 --size=512x512
+checkscene() {
+    name=$1
+    shift
+    out=$(tools/parity/scene.sh inst_$name "$@" 2>&1 | tail -1)
+    echo "$name $out"
+    mae=$(echo "$out" | sed -n 's/.*mae_rgba=\[\([0-9.]*\) \([0-9.]*\) \([0-9.]*\).*/\1 \2 \3/p')
+    [ -n "$mae" ] || fail=1
+    for v in $mae; do
+        awk -v v="$v" 'BEGIN{exit !(v > 1.0)}' && fail=1
+    done
+    return 0
+}
+checkscene model model /var/www/assets/assets/1085 1024x1024 512x512
+checkscene place place /var/www/assets/assets/564 1280x720 854x480
+checkscene mesh mesh /var/www/assets/assets/1000 1024x1024 512x512
 if [ "$fail" != 0 ]; then
     echo "parity check failed; binary not installed"
     exit 1
