@@ -1,5 +1,5 @@
-import { CLASSES, ENUMS } from '/var/www/html/chocolate/shared/classes.js';
-import * as M from '/var/www/html/chocolate/shared/classes.js';
+import { CLASSES, ENUMS } from '/var/www/swirl/vendor/chocolate/shared/classes.js';
+import * as M from '/var/www/swirl/vendor/chocolate/shared/classes.js';
 const classes = [];
 for (const c of CLASSES.values()) {
   const own = [];

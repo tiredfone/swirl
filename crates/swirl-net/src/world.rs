@@ -20,6 +20,8 @@ pub struct Part {
     pub shape: u8,
     pub mesh: Option<MeshRef>,
     pub decals: Vec<(u8, String, f32, [f32; 4])>,
+    pub top: u8,
+    pub bottom: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +76,8 @@ pub struct World {
     pub teleport: Option<[f32; 12]>,
     pub t: f32,
     pub pending_own: Option<(u32, [f32; 12], i64)>,
+    pub driven: bool,
+    pub local_t: HashMap<u32, f32>,
 }
 
 pub struct Own {
@@ -186,7 +190,7 @@ impl World {
                         self.apply_op(op);
                     }
                 }
-                if let Some(ph) = m["ph"].as_array() {
+                if let Some(ph) = m["ph"].as_array().filter(|_| !self.driven) {
                     for r in ph {
                         if let Some(a) = r.as_array() {
                             if a.len() >= 13 {
@@ -202,7 +206,7 @@ impl World {
                         }
                     }
                 }
-                if let Some(ch) = m["ch"].as_array() {
+                if let Some(ch) = m["ch"].as_array().filter(|_| !self.driven) {
                     for r in ch {
                         if let Some(a) = r.as_array() {
                             if a.len() >= 13 {
@@ -222,7 +226,7 @@ impl World {
                         }
                     }
                 }
-                if let Some(after) = m["after"].as_array() {
+                if let Some(after) = m["after"].as_array().filter(|_| !self.driven) {
                     for a in after {
                         match a["t"].as_str() {
                             Some("own") => {
@@ -269,6 +273,9 @@ impl World {
         match a[0].as_str().unwrap_or("") {
             "p" if a.len() >= 4 => {
                 let id = a[1].as_u64().unwrap_or(0) as u32;
+                if self.driven && a[2].as_str() == Some("CFrame") {
+                    return;
+                }
                 if let (Some(i), Some(k)) = (self.insts.get_mut(&id), a[2].as_str()) {
                     i.props.insert(k.to_string(), a[3].clone());
                 }
@@ -304,6 +311,18 @@ impl World {
                 self.remove(id);
             }
             _ => {}
+        }
+    }
+
+    pub fn apply_local(&mut self, text: &str) {
+        let ops: J = match serde_json::from_str(text) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        if let Some(a) = ops.as_array() {
+            for op in a {
+                self.apply_op(op);
+            }
         }
     }
 
@@ -607,7 +626,10 @@ impl World {
                     [c[0] as f32, c[1] as f32, c[2] as f32]
                 }
             };
-            let alpha = 1.0 - i.props.get("Transparency").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            let mut alpha = 1.0 - i.props.get("Transparency").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            if let Some(t) = self.local_t.get(&id) {
+                alpha *= 1.0 - t;
+            }
             let mut shape = i.props.get("shape").or(i.props.get("Shape")).and_then(|v| v.as_i64()).unwrap_or(1) as u8;
             if i.class == "WedgePart" {
                 shape = 3;
@@ -695,7 +717,9 @@ impl World {
                     }
                 }
             }
-            out.push(Part { id, cf, size, color, alpha, shape, mesh, decals });
+            let surf = |k: &str, d: u8| i.props.get(k).and_then(|v| v.as_i64()).map(|v| v as u8).unwrap_or(d);
+            let (top, bottom) = (surf("TopSurface", 3), surf("BottomSurface", 4));
+            out.push(Part { id, cf, size, color, alpha, shape, mesh, decals, top, bottom });
         }
         out
     }

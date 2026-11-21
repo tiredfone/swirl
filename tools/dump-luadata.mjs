@@ -1,5 +1,5 @@
-import { ENUMS } from '/var/www/html/chocolate/shared/classes.js';
-import { BRICK, brickPalette } from '/var/www/html/chocolate/shared/brickcolor.js';
+import { ENUMS } from '/var/www/swirl/vendor/chocolate/shared/classes.js';
+import { BRICK, brickPalette } from '/var/www/swirl/vendor/chocolate/shared/brickcolor.js';
 const luaStr = (s) => '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n') + '"';
 const b = [];
 for (const c of BRICK.values()) b.push(`[${c.n}]={name=${luaStr(c.name)},r=${c.r},g=${c.g},b=${c.b}}`);

@@ -24,7 +24,7 @@ async fn main() {
         std::process::exit(2);
     }
     let era: i32 = arg("era").and_then(|s| s.parse().ok()).unwrap_or(2012);
-    character::set_content_dir(&arg("chocolate").unwrap_or("/var/www/html/chocolate".into()));
+    character::set_content_dir(&arg("chocolate").unwrap_or("/var/www/swirl/vendor/chocolate".into()));
     let assets = arg("assets").unwrap_or("/var/www/assets".into());
     let redeemer: Option<Rc<Redeemer>> = match (arg("redeem-url"), arg("redeem-key-file")) {
         (Some(u), Some(f)) => {

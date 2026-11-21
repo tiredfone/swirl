@@ -1,6 +1,6 @@
-const trim = (p) => String(p || '/chocolate').replace(/\/+$/, '');
+import { mapUrl } from './urlmap.js';
 
-function addImportMap(pub) {
+const addImportMap = (pub) => {
   const map = {
     imports: {
       three: pub + '/client/vendor/three.module.js',
@@ -13,23 +13,28 @@ function addImportMap(pub) {
   s.type = 'importmap';
   s.textContent = JSON.stringify(map);
   document.head.appendChild(s);
-}
+};
 
-function addStyle(pub) {
+const addStyle = (pub) => {
   if (document.getElementById('swirl-gui-style')) return;
   const l = document.createElement('link');
   l.id = 'swirl-gui-style';
   l.rel = 'stylesheet';
   l.href = pub + '/client/style.css';
   document.head.appendChild(l);
-}
+};
+
+const wid = (id) => (id == null ? null : id > 0 ? id : 0x40000000 + -id);
 
 export async function startLua(opts) {
-  const { client, cfg, canvas } = opts;
-  const pub = trim(cfg.publicPath);
+  const { client, canvas } = opts;
+  const pub = new URL('./chocolate', import.meta.url).href;
+  const cfg = Object.assign({}, opts.cfg, { publicPath: pub });
+  const realFetch = window.fetch.bind(window);
+  window.fetch = (input, init) => (typeof input === 'string' ? realFetch(mapUrl(input, pub), init) : realFetch(input, init));
   addImportMap(pub);
   addStyle(pub);
-  const [THREE, assets, worldMod, guiMod, inputMod, luahost, C, wasmoon] = await Promise.all([
+  const [THREE, assets, worldMod, guiMod, inputMod, luahost, C, wasmoon, rapierMod, cameraMod, codec, cursorMod, renderMod] = await Promise.all([
     import('three'),
     import(pub + '/client/assets.js'),
     import(pub + '/client/world.js'),
@@ -38,21 +43,33 @@ export async function startLua(opts) {
     import(pub + '/shared/luahost.js'),
     import(pub + '/shared/cframe.js'),
     import('wasmoon-lua5.1'),
+    import('@dimforge/rapier3d-compat'),
+    import(pub + '/client/camera.js'),
+    import(pub + '/shared/codec.js'),
+    import(pub + '/client/cursor.js'),
+    import(pub + '/client/render.js'),
   ]);
-  const { ClientWorld, prefetch2018 } = worldMod;
+  void C;
+  const { ClientWorld } = worldMod;
   const { Gui } = guiMod;
   const { Input2018 } = inputMod;
   const { T } = luahost;
   const { Lua } = wasmoon;
+  const RAPIER = rapierMod.default || rapierMod;
+  const { CameraController } = cameraMod;
+  const { CursorLayer, CURSORS } = cursorMod;
   assets.configure(cfg);
-  assets.loadContentIndex();
+  const indexReady = assets.loadContentIndex();
+  
   const runtimeSrc = fetch(pub + '/shared/runtime.lua?v=' + (cfg.version || '')).then((r) => r.text());
+  const rapierReady = RAPIER.init();
 
   const root = document.createElement('div');
   root.id = 'chocolate';
   root.className = 'swirl-gui-root';
   root.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:5';
   document.body.appendChild(root);
+  const cursor = new CursorLayer(canvas);
 
   const errors = [];
   const gameErrors = [];
@@ -60,199 +77,141 @@ export async function startLua(opts) {
   const send = (o) => client.send(JSON.stringify(o));
   const net = { send, bytesIn: 0, bytesOut: 0, close() {} };
 
-  const cam3 = new THREE.PerspectiveCamera(57.3, 1, 0.5, 20000);
-  const rendererStub = { camera: cam3 };
-
-  const noHit = (o, d) => ({ part: null, point: [o[0] + d[0], o[1] + d[1], o[2] + d[2]], normal: [0, 1, 0] });
-
-  class SwirlWorld extends ClientWorld {
-    constructor(n, hooks) {
-      super(n, hooks);
-      this.partCache = null;
-      this.partDirty = true;
-      this.physics = {
-        attachWorkspace() {},
-        setTerrain() {},
-        removePart() {},
-        enter() {},
-        raycast: (o, d, ig) => this.rayCast(o, d, ig),
-        touchingParts: () => [],
-      };
+  class RustRenderer {
+    constructor(world) {
+      this.world = world;
+      this.camera = new THREE.PerspectiveCamera(70, 1, 0.5, 20000);
+      this.touch = false;
+      this.targetMs = 1000 / 60;
+      this.ops = [];
+      this.cfs = new Map();
+      this.known = new Set();
+      this.dm = world.dm;
+      this.ws = this.dm.services.get('Workspace');
+      this.lt = this.dm.services.get('Lighting');
+      this.dm.observe({
+        changed: (inst, name, old, o) => this.changed(inst, name, o),
+        reparented: (inst, old, o) => this.reparented(inst, o),
+        destroyed: (inst) => this.destroyed(inst),
+      });
     }
 
-    trackChar() {
-      return null;
+    inWorld(inst) {
+      let p = inst;
+      while (p) {
+        if (p === this.ws || p === this.lt) return true;
+        p = p.parent;
+      }
+      return false;
     }
 
-    dropChar() {}
+    live(inst) {
+      return inst.id > 0 || this.known.has(inst.id);
+    }
 
-    charDied() {}
+    encode(inst) {
+      const rec = codec.encodeInst(inst);
+      rec[0] = wid(rec[0]);
+      rec[2] = wid(rec[2]);
+      const props = rec[3];
+      for (let i = 0; i < props.length; i += 2) {
+        const p = inst.info.all.get(props[i]);
+        if (p && p.type === 'Ref' && props[i + 1] != null) props[i + 1] = wid(props[i + 1]);
+      }
+      return rec;
+    }
 
-    takeOwnership(m) {
-      const model = this.dm.byId.get(m.id);
-      if (!model) {
-        this.pendingOwn = m;
+    changed(inst, name, o) {
+      if (!this.live(inst)) return;
+      if (name === 'CFrame') {
+        const cf = inst.props.get('CFrame');
+        if (cf && cf.length >= 12) this.cfs.set(wid(inst.id), cf);
         return;
       }
-      this.pendingOwn = null;
-      const hum = model.findChildOfClass('Humanoid');
-      const cf = Array.isArray(m.c) ? m.c.slice() : [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1];
-      this.own = { model, hum, ctrl: { teleport() {}, vel: [0, 0, 0] }, rec: { cf, model, hum }, moveTo: null };
-      this.ownModel = model;
-      this.tpSeq = m.s;
-      const held = model.children.find((c) => c.ClassName === 'Tool');
-      if (held && this.equippedTool !== held) {
-        this.equippedTool = held;
-        this.dm.emit(held, 'Equipped', this.openToolMouse());
-      }
-      if (this.hooks.ownCharacter) this.hooks.ownCharacter(model);
+      if (o && o.remote) return;
+      const p = inst.info.all.get(name);
+      if (!p || p.type === 'any') return;
+      if (!this.inWorld(inst)) return;
+      let v = codec.encodeValue(p.type, inst.props.get(name));
+      if (p.type === 'Ref' && v != null) v = wid(v);
+      this.ops.push(['p', wid(inst.id), name, v]);
     }
 
-    applyOp(op) {
-      super.applyOp(op);
-      if (op[0] === 'n' || op[0] === 'm' || op[0] === 'd') {
-        this.partDirty = true;
-        if (this.pendingOwn) this.takeOwnership(this.pendingOwn);
+    mark(inst, on) {
+      for (const d of [inst, ...inst.descendants()]) if (d.id <= 0) on ? this.known.add(d.id) : this.known.delete(d.id);
+    }
+
+    reparented(inst, o) {
+      if (o && o.remote) return;
+      if (inst.id > 0) {
+        const par = inst.parent;
+        this.ops.push(['m', inst.id, par && (par.id > 0 || this.known.has(par.id)) ? wid(par.id) : null]);
+        return;
+      }
+      const inW = inst.parent && this.inWorld(inst.parent) && (inst.parent.id > 0 || this.known.has(inst.parent.id));
+      const known = this.known.has(inst.id);
+      if (inW && !known) {
+        const recs = [];
+        const walk = (x) => {
+          recs.push(this.encode(x));
+          for (const c of x.children) walk(c);
+        };
+        walk(inst);
+        this.mark(inst, true);
+        this.ops.push(['n', recs]);
+      } else if (!inW && known) {
+        this.ops.push(['d', wid(inst.id)]);
+        this.mark(inst, false);
+      } else if (known) this.ops.push(['m', wid(inst.id), wid(inst.parent.id)]);
+    }
+
+    destroyed(inst) {
+      if (inst.id > 0) this.ops.push(['d', inst.id]);
+      else if (this.known.has(inst.id)) {
+        this.ops.push(['d', wid(inst.id)]);
+        this.known.delete(inst.id);
       }
     }
 
-    parts() {
-      if (this.partDirty || !this.partCache) {
-        this.partDirty = false;
-        const ws = this.dm.services.get('Workspace');
-        this.partCache = ws ? ws.descendants().filter((d) => d.isA('BasePart') && d.ClassName !== 'Terrain') : [];
-      }
-      return this.partCache;
+    setQuality() {}
+
+    setAssemblies() {}
+
+    attach() {}
+
+    setLocalTransparency(part, t) {
+      client.set_local_alpha(wid(part.id), t == null ? NaN : t);
     }
 
-    rayCast(o, d, ignore) {
-      const ig = (ignore || []).filter(Boolean);
-      let best = Infinity;
-      let hitPart = null;
-      let hitN = [0, 1, 0];
-      for (const p of this.parts()) {
-        if (p.destroyed) continue;
-        if (ig.length && ig.some((x) => p === x || p.isDescendantOf(x))) continue;
-        const cf = p.props.get('CFrame');
-        const sz = p.props.get('Size');
-        if (!cf || !sz) continue;
-        const rx = o[0] - cf[0], ry = o[1] - cf[1], rz = o[2] - cf[2];
-        const lo = [cf[3] * rx + cf[6] * ry + cf[9] * rz, cf[4] * rx + cf[7] * ry + cf[10] * rz, cf[5] * rx + cf[8] * ry + cf[11] * rz];
-        const ld = [cf[3] * d[0] + cf[6] * d[1] + cf[9] * d[2], cf[4] * d[0] + cf[7] * d[1] + cf[10] * d[2], cf[5] * d[0] + cf[8] * d[1] + cf[11] * d[2]];
-        let t0 = 0, t1 = best, axis = -1, sign = 1;
-        let ok = true;
-        for (let i = 0; i < 3; i++) {
-          const h = sz[i] / 2;
-          if (Math.abs(ld[i]) < 1e-9) {
-            if (lo[i] < -h || lo[i] > h) {
-              ok = false;
-              break;
-            }
-          } else {
-            let a = (-h - lo[i]) / ld[i], b = (h - lo[i]) / ld[i];
-            let s = -1;
-            if (a > b) {
-              const tmp = a;
-              a = b;
-              b = tmp;
-              s = 1;
-            }
-            if (a > t0) {
-              t0 = a;
-              axis = i;
-              sign = s;
-            }
-            if (b < t1) t1 = b;
-            if (t0 > t1) {
-              ok = false;
-              break;
-            }
-          }
+    pick(ndcX, ndcY) {
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(new THREE.Vector2(ndcX, ndcY), this.camera);
+      return { origin: ray.ray.origin.toArray(), dir: ray.ray.direction.toArray() };
+    }
+
+    frame() {
+      if (this.ops.length) {
+        client.apply_local(JSON.stringify(this.ops));
+        this.ops.length = 0;
+      }
+      if (this.cfs.size) {
+        const a = new Float64Array(this.cfs.size * 13);
+        let i = 0;
+        for (const [id, cf] of this.cfs) {
+          a[i++] = id;
+          for (let k = 0; k < 12; k++) a[i++] = cf[k];
         }
-        if (!ok || t0 >= best || t0 <= 0) continue;
-        best = t0;
-        hitPart = p;
-        const nl = [0, 0, 0];
-        if (axis >= 0) nl[axis] = sign;
-        hitN = [cf[3] * nl[0] + cf[4] * nl[1] + cf[5] * nl[2], cf[6] * nl[0] + cf[7] * nl[1] + cf[8] * nl[2], cf[9] * nl[0] + cf[10] * nl[1] + cf[11] * nl[2]];
+        this.cfs.clear();
+        client.set_cfs(a);
       }
-      if (!hitPart) return noHit(o, d);
-      return { part: hitPart, point: [o[0] + d[0] * best, o[1] + d[1] * best, o[2] + d[2] * best], normal: hitN };
-    }
-
-    async initSwirl(msg, luaFactory, runtimeText) {
-      const { applyRecords } = await import(pub + '/shared/codec.js');
-      const { ScriptHost } = await import(pub + '/shared/luahost.js');
-      const { Core2018 } = await import(pub + '/shared/core2018.js');
-      const { FLAGS_2018 } = await import(pub + '/shared/api2018.js');
-      const { Animations } = await import(pub + '/shared/animator.js');
-      const { parsePlace } = await import(pub + '/shared/rbxl.js');
-      const dm = this.dm;
-      this.era = msg.era === 2018 ? 2018 : 2012;
-      dm.era = this.era;
-      const pack = this.era === 2018 ? await prefetch2018(cfg.version) : null;
-      applyRecords(dm, msg.snap);
-      for (const s of ['Workspace', 'Players', 'Lighting', 'StarterGui', 'StarterPack', 'Teams', 'SoundService', 'Debris', 'ReplicatedStorage', 'ReplicatedFirst', 'RunService', 'UserInputService', 'ContentProvider', 'GuiService', 'Chat']) dm.service(s);
-      this.player = dm.byId.get(msg.you);
-      this.user = msg.user;
-      const players = dm.services.get('Players');
-      players.props.set('LocalPlayer', this.player);
-      this.mouse = dm.create('PlayerMouse', null);
-      this.mouse.props.set('Name', 'Mouse');
-      const ws = dm.services.get('Workspace');
-      this.camera = dm.create('Camera', null);
-      this.camera.props.set('Name', 'Camera');
-      this.camera.props.set('CameraType', 5);
-      this.camera.props.set('FieldOfView', 57.3);
-      for (const o of dm.observers) if (o.created) o.created(this.camera);
-      dm.setParent(this.camera, ws);
-      ws.props.set('CurrentCamera', this.camera);
-      dm.observe({
-        reparented: (inst, old, o) => this.onReparent(inst, old, o),
-        destroyed: (inst) => {
-          if (this.sounds.has(inst)) this.stopSound(inst);
-        },
-        changed: (inst, name, old, o) => this.onChange(inst, name, old, o),
-      });
-      this.coreSources = pack ? new Map() : await assets.loadCoreSources([worldMod.STARTER_SCRIPT]).catch(() => new Map());
-      const coreGui = dm.service('CoreGui');
-      this.robloxGui = dm.create('ScreenGui', null);
-      this.robloxGui.props.set('Name', 'RobloxGui');
-      this.robloxGui.props.set('AbsoluteSize', this.guiArea().size);
-      for (const o of dm.observers) if (o.created) o.created(this.robloxGui);
-      dm.setParent(this.robloxGui, coreGui);
-      if (pack) {
-        for (const s of ['StarterPlayer', 'TweenService', 'TextService', 'LocalizationService', 'VRService', 'RobloxReplicatedStorage']) dm.service(s);
-        this.core = new Core2018(dm, pack.bundle);
-        this.core.buildModules(this.robloxGui);
-        const cf = this.gui('Frame', 'ControlFrame', this.robloxGui, { BackgroundTransparency: 1, Size: [1, 0, 1, 0] });
-        this.gui('Frame', 'BottomLeftControl', cf, { BackgroundTransparency: 1, Position: [0, 0, 1, -50], Size: [0, 130, 0, 50] });
-      } else this.buildControlFrame();
-      for (const s of ['ScriptContext', 'GuiService', 'LogService', 'MarketplaceService', 'TeleportService', 'InsertService', 'ChangeHistoryService', 'PersonalServerService', 'PointsService', 'HttpService', 'ContextActionService', 'NetworkClient', 'CollectionService', 'LocalBackpack']) dm.service(s);
-      const uis = dm.services.get('UserInputService');
-      uis.props.set('TouchEnabled', false);
-      uis.props.set('MouseEnabled', true);
-      uis.props.set('KeyboardEnabled', true);
-      this.host = new ScriptHost(dm, this.env());
-      this.anims = new Animations(dm, async (id) => {
-        const bytes = await assets.animationBytes(id);
-        if (!new TextDecoder().decode(bytes.subarray(0, 8)).startsWith('<roblox')) throw new Error('asset ' + id + ' is not a model');
-        const model = dm.create('Model', null);
-        model.props.set('Name', 'Model');
-        dm.load(parsePlace(bytes), model);
-        return model;
-      });
-      if (pack) this.host.flags = FLAGS_2018;
-      await this.host.init(luaFactory, runtimeText, pack && pack.runtime ? [{ source: pack.runtime, name: 'runtime2018' }] : []);
-      if (pack) {
-        dm.root.props.set('PlaceId', msg.place | 0);
-        this.core.coreScript('LoadingScript', this.robloxGui);
-        this.core.starterScript(dm.services.get('ScriptContext'), false);
-      } else if (this.coreSources.get(worldMod.STARTER_SCRIPT)) this.addCoreScript(worldMod.STARTER_SCRIPT, dm.services.get('ScriptContext'), 'StarterScript');
+      const cam = this.camera;
+      cam.updateMatrixWorld(true);
+      const e = cam.matrixWorld.elements;
+      client.set_camera(Float32Array.of(e[12], e[13], e[14], e[0], e[4], e[8], e[1], e[5], e[9], e[2], e[6], e[10]), cam.fov);
     }
   }
 
-  const state = { world: null, gui: null, input: null, pending: [], ready: false, last: 0, mouseAcc: 0 };
+  const state = { world: null, gui: null, input: null, renderer: null, camera: null, pending: [], ready: false, last: 0, due: 0, held: new Set(), codes: new Set(), jumpQueued: false };
   const hooks = {
     touch: false,
     version: cfg.version,
@@ -267,22 +226,23 @@ export async function startLua(opts) {
     screenRay: (x, y) => {
       const k = state.world.guiScale();
       const rc = new THREE.Raycaster();
-      rc.setFromCamera(new THREE.Vector2((x / k / root.clientWidth) * 2 - 1, -(y / k / root.clientHeight) * 2 + 1), cam3);
+      rc.setFromCamera(new THREE.Vector2((x / k / root.clientWidth) * 2 - 1, -(y / k / root.clientHeight) * 2 + 1), state.renderer.camera);
       return { o: rc.ray.origin.toArray(), d: rc.ray.direction.toArray() };
     },
     worldToScreen: (p) => {
+      const cam = state.renderer.camera;
       const v = new THREE.Vector3(p[0], p[1], p[2]);
-      const depth = v.clone().applyMatrix4(cam3.matrixWorldInverse).z;
-      v.project(cam3);
+      const depth = v.clone().applyMatrix4(cam.matrixWorldInverse).z;
+      v.project(cam);
       const k = state.world.guiScale();
       return [((v.x + 1) / 2) * root.clientWidth * k, ((1 - v.y) / 2) * root.clientHeight * k, -depth, depth < 0 && Math.abs(v.x) <= 1 && Math.abs(v.y) <= 1];
     },
     measureText: (text, size, font, frame) => (state.gui && state.gui.measureText ? state.gui.measureText(text, size, font, frame) : null),
     screenSize: () => [root.clientWidth || window.innerWidth, root.clientHeight || window.innerHeight],
-    rotateCamera: () => {},
-    zoomCamera: () => {},
-    cameraTilt: () => {},
-    cameraZoom: () => {},
+    rotateCamera: (dx, dy) => state.camera && state.camera.rotateBy(dx, dy),
+    zoomCamera: (d) => state.camera && state.camera.zoomBy(Math.exp(-d * 0.15)),
+    cameraTilt: (dir) => state.camera && state.camera.rotateBy(0, dir * 0.1745),
+    cameraZoom: (dir) => state.camera && state.camera.stepZoom(dir > 0 ? 1 : -1),
     toggleFullscreen: () => {
       if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
       else document.documentElement.requestFullscreen().catch(() => {});
@@ -318,14 +278,41 @@ export async function startLua(opts) {
     },
   };
 
-  const world = new SwirlWorld(net, hooks);
+  const world = new ClientWorld(net, hooks);
   state.world = world;
+
+  const applyFs = (m) => {
+    if (!m.s) return;
+    for (const [id, st] of Object.entries(m.s)) {
+      const other = world.dm.byId.get(+id);
+      const prev = world.friendStatus.get(+id) || 1;
+      world.friendStatus.set(+id, st | 0);
+      if (other && world.player && prev !== (st | 0)) world.dm.emit(world.player, 'FriendStatusChanged', other, T.e('FriendStatus', st | 0));
+    }
+  };
+  const applyFre = (m) => {
+    const a = world.dm.byId.get(m.a | 0), b = world.dm.byId.get(m.b | 0);
+    const players = world.dm.services.get('Players');
+    if (a && b && players) world.dm.emit(players, 'FriendRequestEvent', a, b, T.e('FriendRequestEvent', m.e | 0));
+  };
 
   const route = (m) => {
     const dm = world.dm;
     switch (m.t) {
       case 'rep':
         world.applyRep(m);
+        break;
+      case 'anim':
+        world.remoteAnim(m);
+        break;
+      case 'terrain':
+        world.applyTerrain(m);
+        break;
+      case 'fs':
+        applyFs(m);
+        break;
+      case 'fre':
+        applyFre(m);
         break;
       case 're':
       case 'rfc':
@@ -341,12 +328,16 @@ export async function startLua(opts) {
           dm.emit(players, 'PlayerChatted', T.e('PlayerChatType', kind), speaker, m.m, to);
           dm.emit(speaker, 'Chatted', m.m, to);
         }
+        const head = m.h && dm.byId.get(m.h);
+        if (head && state.gui && kind !== 2 && world.era !== 2018) state.gui.bubble(head, m.m);
         world.runSoon();
         break;
       }
       case 'bubble': {
         const p = dm.byId.get(m.id);
-        if (p && world.era === 2018) dm.emit(dm.services.get('Chat'), 'Chatted', p, m.m, T.e('ChatColor', (m.c | 0) || 0));
+        if (!p) break;
+        if (world.era === 2018) dm.emit(dm.services.get('Chat'), 'Chatted', p, m.m, T.e('ChatColor', (m.c | 0) || 0));
+        else if (state.gui) state.gui.bubble(p, m.m);
         break;
       }
       case 'msg':
@@ -363,9 +354,27 @@ export async function startLua(opts) {
   let booting = false;
   const boot = async (m) => {
     booting = true;
+    client.set_driven(true);
     const text = await runtimeSrc;
-    await world.initSwirl(m, () => Lua.create({ customWasmUri: pub + '/client/vendor/liblua5.1.wasm' }), text);
-    const gui = new Gui(root, world, rendererStub, {
+    await Promise.all([rapierReady, indexReady]);
+    await world.init(m, RAPIER, () => Lua.create({ customWasmUri: pub + '/client/vendor/liblua5.1.wasm' }), text);
+    let renderer;
+    if (opts.reference) {
+      const c2 = document.createElement('canvas');
+      c2.id = 'swirl-reference-canvas';
+      c2.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;z-index:1';
+      canvas.style.visibility = 'hidden';
+      canvas.parentNode.insertBefore(c2, canvas.nextSibling);
+      renderer = new renderMod.Renderer(c2, world);
+      renderer.setQuality(0);
+      renderer.attach();
+      state.reference = true;
+    } else renderer = new RustRenderer(world);
+    state.renderer = renderer;
+    world.renderer = renderer;
+    const camera = new CameraController(world, renderer, canvas);
+    state.camera = camera;
+    const gui = new Gui(root, world, renderer, {
       leave: () => hooks.leave(),
       sendChat: (msg) => send({ t: 'chat', m: msg }),
       send,
@@ -377,8 +386,10 @@ export async function startLua(opts) {
     if (world.era === 2018) {
       state.input = new Input2018(world, gui, canvas, root);
       world.input2018 = state.input;
+      camera.luaDriven = true;
     }
-    wire(gui);
+    world.bindSettings(renderer);
+    wire(gui, camera);
     world.ready = true;
     for (const p of state.pending.splice(0)) route(p);
     world.markLoaded();
@@ -386,113 +397,152 @@ export async function startLua(opts) {
   };
 
   const ms = world.mouseState;
-  const wire = (gui) => {
-    const rectOf = () => canvas.getBoundingClientRect();
-    canvas.addEventListener('pointermove', (e) => {
-      const r = rectOf();
-      ms.x = e.clientX - r.left;
-      ms.y = e.clientY - r.top;
-      ms.ndc = [(ms.x / r.width) * 2 - 1, -(ms.y / r.height) * 2 + 1];
-      state.moved = true;
-      world.emitMouse('Move');
-    });
-    window.addEventListener('pointermove', (e) => {
-      if (!state.input) return;
-      const over = e.target !== canvas && root.contains(e.target);
-      if (over) {
-        const r = rectOf();
-        ms.x = e.clientX - r.left;
-        ms.y = e.clientY - r.top;
-      }
-      const locked = document.pointerLockElement === canvas;
-      if (locked || e.target === canvas) state.input.mouseMove(e.movementX || 0, e.movementY || 0, false, locked ? null : [e.clientX, e.clientY]);
-      else if (over) state.input.mouseMove(e.movementX || 0, e.movementY || 0, true, [e.clientX, e.clientY]);
-    });
-    canvas.addEventListener('pointerdown', (e) => {
-      if (gui.isTyping()) document.activeElement.blur();
-      if (state.input) state.input.buttonDown(e.button, false, [e.clientX, e.clientY]);
-      if (e.button === 0) world.mouseDown(0);
-    });
-    root.addEventListener('pointerdown', (e) => {
-      if (!state.input || e.target === canvas) return;
-      state.input.buttonDown(e.button, true, [e.clientX, e.clientY]);
-    }, true);
-    window.addEventListener('pointerup', (e) => {
-      const over = e.target !== canvas && root.contains(e.target);
-      if (state.input) state.input.buttonUp(e.button, over, [e.clientX, e.clientY]);
-      if (e.button === 0 && ms.down) world.mouseUp(0);
-    }, true);
-    canvas.addEventListener('wheel', (e) => {
-      world.emitMouse(e.deltaY > 0 ? 'WheelBackward' : 'WheelForward');
-      if (state.input) state.input.wheel(e.deltaY > 0 ? -1 : 1, false);
-    }, { passive: true });
+  const wire = (gui, camera) => {
+    const held = state.held;
+    const codes = state.codes;
+    const relock = () => {
+      const in18 = world.input2018;
+      if (in18 && in18.behavior !== 0 && document.pointerLockElement !== canvas && !gui.isTyping()) in18.setBehavior(in18.behavior);
+    };
+    const overGuiTarget = (e) => e.target !== canvas && root.contains(e.target);
     window.addEventListener('keydown', (e) => {
-      if (state.input) state.input.keyDown(e, gui.isTyping());
-      if (gui.isTyping() || e.repeat) return;
-      const k = e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase();
+      if (e.key !== 'Escape') relock();
+      const in18 = world.input2018;
+      if (in18) {
+        in18.keyDown(e, gui.isTyping());
+        if (e.key === 'Tab' || e.key === ' ' || e.key.startsWith('Arrow')) e.preventDefault();
+        if (gui.isTyping() || e.repeat) return;
+        if (e.key === 'Enter') {
+          const gs = world.dm.services.get('GuiService');
+          const pg = world.player && world.player.findChildOfClass('PlayerGui');
+          const sel = (gs && gs.props.get('SelectedCoreObject')) || (pg && pg.props.get('SelectedObject'));
+          if (sel && !sel.destroyed && sel.isA('GuiButton') && sel.props.get('Visible') !== false) {
+            e.preventDefault();
+            world.dm.emit(sel, 'MouseButton1Click');
+            world.dm.emit(sel, 'Activated');
+            return;
+          }
+        }
+        if (e.key === '/' && world.host.guiKeys && world.host.guiKeys.has('special:5')) {
+          e.preventDefault();
+          world.dm.emit(world.dm.services.get('GuiService'), 'SpecialKeyPressed', T.e('SpecialKey', 5));
+          return;
+        }
+        world.ensureAudio();
+        held.add(e.key.toLowerCase());
+        if (e.code) codes.add(e.code);
+        const lk = e.key.length === 1 ? e.key.toLowerCase() : e.key === 'Enter' ? '\r' : null;
+        if (lk) world.keyDown(lk);
+        return;
+      }
+      if (gui.isTyping()) return;
+      const k = e.key.toLowerCase();
       const dm = world.dm;
       const gs = dm.services.get('GuiService');
       const keys = world.host.guiKeys;
-      if (k === 'escape') dm.emit(gs, 'EscapeKeyPressed');
-      const claimed = k.length === 1 && keys && keys.has(k);
-      if (k === '/' && keys && keys.has('special:5')) {
+      if (k === '/' && keys.has('special:5')) {
         e.preventDefault();
         dm.emit(gs, 'SpecialKeyPressed', T.e('SpecialKey', 5));
         return;
       }
-      if (claimed) dm.emit(gs, 'KeyPressed', k);
-      if (world.era !== 2018 && /^[0-9]$/.test(k) && !claimed) {
+      if (k === 'escape') dm.emit(gs, 'EscapeKeyPressed');
+      const special = { insert: 0, home: 1, end: 2, pageup: 3, pagedown: 4 }[k];
+      if (special !== undefined && keys.has('special:' + special)) dm.emit(gs, 'SpecialKeyPressed', T.e('SpecialKey', special));
+      const claimed = k.length === 1 && keys.has(k);
+      if (claimed && !e.repeat) dm.emit(gs, 'KeyPressed', k);
+      if (k === 'tab') e.preventDefault();
+      if (e.repeat) return;
+      world.ensureAudio();
+      held.add(k);
+      if (e.code) codes.add(e.code);
+      if (k === ' ') {
+        state.jumpQueued = true;
+        e.preventDefault();
+      }
+      if (k === 'shift' && world.era !== 2018) camera.toggleShiftLock();
+      if (k === 'arrowleft') camera.keyYaw = 1;
+      if (k === 'arrowright') camera.keyYaw = -1;
+      if (k === 'i') camera.stepZoom(1);
+      if (k === 'o') camera.stepZoom(-1);
+      if (k === 'backspace') {
+        e.preventDefault();
+        world.dropTool();
+      }
+      if (/^[0-9]$/.test(k) && !claimed) {
         const items = world.backpackItems();
         const idx = k === '0' ? 9 : +k - 1;
         if (items[idx]) world.toggleSlot(items[idx]);
       }
-      if (world.era !== 2018 && k === 'backspace') world.dropTool();
-      const lua = k === ' ' ? ' ' : k === 'enter' ? '\r' : k === 'backspace' ? '\b' : k === 'tab' ? '\t' : k.length === 1 ? k : null;
+      const lua = k === ' ' ? ' ' : k === 'enter' ? '\r' : k === 'backspace' ? '\b' : k === 'tab' ? '\t' : k === 'shift' ? String.fromCharCode(48) : k.length === 1 ? k : null;
       if (lua) world.keyDown(lua);
     });
     window.addEventListener('keyup', (e) => {
-      if (state.input) state.input.keyUp(e, gui.isTyping());
-      const k = e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase();
-      const lua = k === ' ' ? ' ' : k === 'enter' ? '\r' : k.length === 1 ? k : null;
+      if (world.input2018) world.input2018.keyUp(e, gui.isTyping());
+      const k = e.key.toLowerCase();
+      held.delete(k);
+      if (e.code) codes.delete(e.code);
+      if (k === 'arrowleft' || k === 'arrowright') camera.keyYaw = 0;
+      const lua = k === ' ' ? ' ' : k === 'enter' ? '\r' : k === 'shift' ? String.fromCharCode(48) : k.length === 1 ? k : null;
       if (lua) world.keyUp(lua);
     });
     window.addEventListener('blur', () => {
-      if (state.input) state.input.blur();
+      if (world.input2018) world.input2018.blur();
+      held.clear();
+      codes.clear();
+      camera.keyYaw = 0;
     });
-  };
-
-  const syncCamera = () => {
-    let pose;
-    try {
-      pose = JSON.parse(client.camera_pose());
-    } catch (e) {
-      return;
-    }
-    const cf = C.lookAt(pose[0], pose[1], pose[2], pose[3], pose[4], pose[5]);
-    world.camera.props.set('CFrame', cf);
-    const w = canvas.clientWidth || 1;
-    const h = canvas.clientHeight || 1;
-    cam3.aspect = w / h;
-    cam3.fov = (pose[6] * 180) / Math.PI;
-    cam3.updateProjectionMatrix();
-    cam3.position.set(cf[0], cf[1], cf[2]);
-    const m = new THREE.Matrix4().set(cf[3], cf[4], cf[5], cf[0], cf[6], cf[7], cf[8], cf[1], cf[9], cf[10], cf[11], cf[2], 0, 0, 0, 1);
-    m.decompose(cam3.position, cam3.quaternion, cam3.scale);
-    cam3.updateMatrixWorld(true);
-    cam3.matrixWorldInverse.copy(cam3.matrixWorld).invert();
-    world.camera.props.set('ViewportSize', [w, h]);
-  };
-
-  const syncOwn = () => {
-    if (!world.own) return;
-    try {
-      const p = JSON.parse(client.own_pos());
-      if (!p) return;
-      const cf = world.own.rec.cf;
-      cf[0] = p[0];
-      cf[1] = p[1];
-      cf[2] = p[2];
-    } catch (e) {}
+    canvas.addEventListener('pointermove', (e) => {
+      const r = canvas.getBoundingClientRect();
+      const centered = camera.aimCentered();
+      ms.x = centered ? r.width / 2 : e.clientX - r.left;
+      ms.y = centered ? r.height / 2 : e.clientY - r.top;
+      ms.ndc = [(ms.x / r.width) * 2 - 1, -(ms.y / r.height) * 2 + 1];
+      world.emitMouse('Move');
+    });
+    window.addEventListener('pointermove', (e) => {
+      if (!world.input2018) return;
+      const locked = document.pointerLockElement === canvas;
+      if (!locked && overGuiTarget(e)) {
+        const r = canvas.getBoundingClientRect();
+        ms.x = e.clientX - r.left;
+        ms.y = e.clientY - r.top;
+      }
+      const at = locked ? null : [e.clientX, e.clientY];
+      if (locked || e.target === canvas) world.input2018.mouseMove(e.movementX || 0, e.movementY || 0, false, at);
+      else if (overGuiTarget(e)) world.input2018.mouseMove(e.movementX || 0, e.movementY || 0, true, at);
+    });
+    canvas.addEventListener('pointerdown', (e) => {
+      world.ensureAudio();
+      if (gui.isTyping()) document.activeElement.blur();
+      relock();
+      if (world.input2018) world.input2018.buttonDown(e.button, false, document.pointerLockElement === canvas ? null : [e.clientX, e.clientY]);
+      if (e.button === 0) world.mouseDown(0);
+    });
+    root.addEventListener('pointerdown', (e) => {
+      if (!world.input2018 || !overGuiTarget(e)) return;
+      world.ensureAudio();
+      const r = canvas.getBoundingClientRect();
+      ms.x = e.clientX - r.left;
+      ms.y = e.clientY - r.top;
+      world.input2018.buttonDown(e.button, true, [e.clientX, e.clientY]);
+    }, true);
+    window.addEventListener('pointerup', (e) => {
+      if (world.input2018) world.input2018.buttonUp(e.button, overGuiTarget(e), document.pointerLockElement === canvas ? null : [e.clientX, e.clientY]);
+      if (e.button === 0 && ms.down) world.mouseUp(0);
+    }, true);
+    let wheelAcc = 0;
+    canvas.addEventListener('wheel', (e) => {
+      const unit = e.deltaMode === 1 ? 3 : e.deltaMode === 2 ? 1 : 100;
+      if (Math.sign(e.deltaY) !== Math.sign(wheelAcc)) wheelAcc = 0;
+      wheelAcc += e.deltaY / unit;
+      while (Math.abs(wheelAcc) >= 1) {
+        wheelAcc -= Math.sign(wheelAcc);
+        world.emitMouse(e.deltaY > 0 ? 'WheelBackward' : 'WheelForward');
+        if (world.input2018) world.input2018.wheel(e.deltaY > 0 ? -1 : 1, false);
+      }
+      if (world.input2018) e.preventDefault();
+      if (Math.abs(e.deltaY) >= unit * 0.99) wheelAcc = 0;
+    }, { passive: false });
   };
 
   const frame = (now) => {
@@ -508,35 +558,50 @@ export async function startLua(opts) {
           errors.push('boot: ' + (e && e.stack ? e.stack : e));
           console.error(e);
         });
-      } else if (world.ready) route(m);
-      else if (booting) state.pending.push(m);
+      } else if (world.ready) {
+        try {
+          route(m);
+        } catch (e) {
+          errors.push('route: ' + (e && e.stack ? e.stack : e));
+        }
+      } else if (booting) state.pending.push(m);
     }
     if (!state.ready) return;
+    const frameMs = 1000 / 60;
+    if (now < state.due - 1) return;
+    state.due = state.due + frameMs < now ? now + frameMs : state.due + frameMs;
     const dt = state.last ? Math.min(0.1, (now - state.last) / 1000) : 0;
     state.last = now;
-    state.mouseAcc += dt;
-    world.t += dt;
-    world.mouseSendAcc += dt;
-    syncCamera();
-    syncOwn();
-    const dm = world.dm;
+    const camera = state.camera;
+    const f = camera.forwardFlat(), rt = camera.rightFlat();
+    const held = state.held, codes = state.codes;
+    const key = (code, letter) => (codes.size || !held.has(letter) ? codes.has(code) : true);
+    const fw = (key('KeyW', 'w') || held.has('arrowup') ? 1 : 0) - (key('KeyS', 's') || held.has('arrowdown') ? 1 : 0);
+    const sd = (key('KeyD', 'd') ? 1 : 0) - (key('KeyA', 'a') ? 1 : 0);
+    const move = [f[0] * fw + rt[0] * sd, 0, f[2] * fw + rt[2] * sd];
+    const input = { move, face: camera.faceDir(), jump: held.has(' ') || state.jumpQueued, dismount: held.has('backspace'), forward: fw > 0.3, back: fw < -0.3, left: sd < -0.3, right: sd > 0.3 };
+    state.jumpQueued = false;
     try {
-      world.host.tick(world.t);
-      const rs = dm.services.get('RunService');
-      if (rs && dm.hasListener(rs, 'Stepped')) dm.emit(rs, 'Stepped', world.t, dt);
-      if (rs && dm.hasListener(rs, 'Heartbeat')) dm.emit(rs, 'Heartbeat', dt);
-      if (rs && dm.hasListener(rs, 'RenderStepped')) dm.emit(rs, 'RenderStepped', dt);
-      world.host.renderStep(dt);
-      if (state.moved || state.mouseAcc > 0.15) {
-        state.moved = false;
-        state.mouseAcc = 0;
-        const k = world.guiScale();
-        const rc = new THREE.Raycaster();
-        rc.setFromCamera(new THREE.Vector2(ms.ndc ? ms.ndc[0] : 0, ms.ndc ? ms.ndc[1] : 0), cam3);
-        world.updateMouse({ origin: rc.ray.origin.toArray(), dir: rc.ray.direction.toArray() }, rendererStub);
-        void k;
+      const w = canvas.clientWidth || 1;
+      const h = canvas.clientHeight || 1;
+      state.renderer.camera.aspect = w / h;
+      state.renderer.camera.updateProjectionMatrix();
+      world.camera.props.set('ViewportSize', [w, h]);
+      world.update(dt, input);
+      camera.update(dt);
+      if (camera.aimCentered()) {
+        const cr = canvas.getBoundingClientRect();
+        ms.x = cr.width / 2;
+        ms.y = cr.height / 2;
+        ms.ndc = [0, 0];
       }
-      world.sendMouse(false);
+      const ray = state.renderer.pick(ms.ndc[0], ms.ndc[1]);
+      ms.overGui = false;
+      const cd = world.updateMouse(ray, state.renderer);
+      const icon = (world.toolMouse && world.toolMouse.props.get('Icon')) || world.mouse.props.get('Icon');
+      cursor.set(camera.shiftLock && camera.mouseLocked() && !camera.firstPerson ? CURSORS.mouseLock : icon || (cd ? CURSORS.hand : world.mouseHit && world.mouseHit.part ? CURSORS.arrow : CURSORS.far));
+      if (document.pointerLockElement === canvas || camera.aimCentered()) cursor.place(camera.aimCentered(), true);
+      state.renderer.frame(dt);
       state.gui.frame();
     } catch (e) {
       errors.push('frame: ' + (e && e.stack ? e.stack : e));
@@ -544,7 +609,14 @@ export async function startLua(opts) {
     }
   };
 
-  const api = { world, state, errors, gameErrors, logs, frame, root, ready: () => state.ready };
+  const ownPos = () => {
+    const o = world.own;
+    if (!o) return null;
+    const cf = o.rec.cf;
+    return [cf[0], cf[1], cf[2]];
+  };
+
+  const api = { world, state, errors, gameErrors, logs, frame, root, ownPos, ready: () => state.ready };
   window.solarLua = api;
   return api;
 }

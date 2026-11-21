@@ -1,3 +1,5 @@
+import { safeName } from './urlmap.js';
+import './pack.js';
 import init, { Client, client_version } from './swirl_client.js';
 
 const byId = (id) => document.getElementById(id);
@@ -39,7 +41,7 @@ export async function start(opts = {}) {
     setStatus('Joining');
     client.connect(base + '?ticket=' + encodeURIComponent(t.ticket));
     setInterval(() => client.ping(), 5000);
-    const assetUrl = (id) => (id.startsWith('c:') ? (cfg.publicPath || '/chocolate') + '/content/' + id.slice(2) : ((cfg.endpoints && cfg.endpoints.asset) || '/asset/?id={id}').replace('{id}', id));
+    const assetUrl = (id) => (id.startsWith('c:') ? new URL('./chocolate/' + safeName('content/' + id.slice(2)).split('/').map(encodeURIComponent).join('/'), import.meta.url).href : ((cfg.endpoints && cfg.endpoints.asset) || '/asset/?id={id}').replace('{id}', id));
     let inflight = 0;
     const fetchAsset = async (r) => {
       inflight++;
@@ -63,7 +65,7 @@ export async function start(opts = {}) {
       while (inflight < 6 && pending.length) fetchAsset(pending.shift());
     }, 80);
     let lua = null;
-    const luaStart = import('./lua.js').then((m) => m.startLua({ client, cfg, canvas })).then((l) => { lua = l; }).catch((e) => {
+    const luaStart = import('./lua.js').then((m) => m.startLua({ client, cfg, canvas, reference: new URLSearchParams(location.search).get('swirlref') === 'three' })).then((l) => { lua = l; }).catch((e) => {
       window.solarLuaFailed = String(e && e.stack ? e.stack : e);
       console.error(e);
     });
@@ -71,8 +73,8 @@ export async function start(opts = {}) {
     let shown = false;
     const loop = () => {
       const now = performance.now();
-      client.frame(now);
       if (lua) lua.frame(now);
+      client.frame(now);
       if (client.ready() && !shown) {
         shown = true;
         setStatus('');

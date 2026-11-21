@@ -1,6 +1,6 @@
 import path from 'path';
 import { createRequire } from 'module';
-const CH = '/var/www/html/chocolate';
+const CH = '/var/www/swirl/vendor/chocolate';
 const require = createRequire(CH + '/package.json');
 const WebSocket = require('ws');
 const { DataModel } = await import(CH + '/shared/instance.js');

@@ -11,6 +11,7 @@ pub struct Char {
     pub vel: [f64; 3],
     pub state: u8,
     pub seq: i64,
+    pub j: Option<[f64; 4]>,
 }
 
 fn id12(p: [f64; 3]) -> [f64; 12] {
@@ -39,7 +40,68 @@ fn make_part(dm: &mut DataModel, parent: InstId, name: &str, size: [f64; 3], off
     Ok((id, id12(offset)))
 }
 
-pub fn build(dm: &mut DataModel, workspace: InstId, player: InstId, name: &str, origin: [f64; 3], look: Option<&crate::appearance::Look>) -> Result<Char, String> {
+fn rx(a: f64) -> [f64; 12] {
+    let (s, c) = a.sin_cos();
+    [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, c, -s, 0.0, s, c]
+}
+
+fn ry(a: f64) -> [f64; 12] {
+    let (s, c) = a.sin_cos();
+    [0.0, 0.0, 0.0, c, 0.0, s, 0.0, 1.0, 0.0, -s, 0.0, c]
+}
+
+fn rz(a: f64) -> [f64; 12] {
+    let (s, c) = a.sin_cos();
+    [0.0, 0.0, 0.0, c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0]
+}
+
+fn ang(x: f64, y: f64, z: f64, a: f64, b: f64, c: f64) -> [f64; 12] {
+    let mut t = id12([x, y, z]);
+    t = mul12(&t, &rx(a));
+    t = mul12(&t, &ry(b));
+    mul12(&t, &rz(c))
+}
+
+fn add_joints(dm: &mut DataModel, model: InstId, torso: InstId, era: i32, parts: &mut Vec<(InstId, [f64; 12])>, origin: [f64; 3]) -> Result<(), String> {
+    use std::f64::consts::PI;
+    let joints: [(&str, &str, [f64; 12], [f64; 12]); 5] = [
+        ("Neck", "Head", ang(0.0, 1.0, 0.0, -PI / 2.0, 0.0, PI), ang(0.0, -0.5, 0.0, -PI / 2.0, 0.0, PI)),
+        ("Right Shoulder", "Right Arm", ang(1.0, 0.5, 0.0, 0.0, PI / 2.0, 0.0), ang(-0.5, 0.5, 0.0, 0.0, PI / 2.0, 0.0)),
+        ("Left Shoulder", "Left Arm", ang(-1.0, 0.5, 0.0, 0.0, -PI / 2.0, 0.0), ang(0.5, 0.5, 0.0, 0.0, -PI / 2.0, 0.0)),
+        ("Right Hip", "Right Leg", ang(1.0, -1.0, 0.0, 0.0, PI / 2.0, 0.0), ang(0.5, 1.0, 0.0, 0.0, PI / 2.0, 0.0)),
+        ("Left Hip", "Left Leg", ang(-1.0, -1.0, 0.0, 0.0, -PI / 2.0, 0.0), ang(-0.5, 1.0, 0.0, 0.0, -PI / 2.0, 0.0)),
+    ];
+    for (name, p1, c0, c1) in joints {
+        let part = dm.find_child(model, p1, false).ok_or("missing part")?;
+        let j = dm.create_any("Motor6D", Some(torso))?;
+        dm.set_prop_quiet(j, "Name", Val::Str(name.to_string()));
+        dm.get_mut_name(j, name);
+        dm.set_prop_quiet(j, "Part0", Val::Ref(Some(torso)));
+        dm.set_prop_quiet(j, "Part1", Val::Ref(Some(part)));
+        dm.set_prop_quiet(j, "C0", Val::Arr(c0.to_vec()));
+        dm.set_prop_quiet(j, "C1", Val::Arr(c1.to_vec()));
+        dm.set_prop_quiet(j, "MaxVelocity", Val::Num(0.1));
+    }
+    if era == 2018 {
+        let (root, off) = make_part(dm, model, "HumanoidRootPart", [2.0, 2.0, 1.0], [0.0, 0.0, 0.0], origin, 194)?;
+        dm.set_prop_quiet(root, "Transparency", Val::Num(1.0));
+        dm.set_prop_quiet(root, "CanCollide", Val::Bool(false));
+        let r = [0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0];
+        let j = dm.create_any("Motor6D", Some(root))?;
+        dm.set_prop_quiet(j, "Name", Val::Str("RootJoint".into()));
+        dm.get_mut_name(j, "RootJoint");
+        dm.set_prop_quiet(j, "Part0", Val::Ref(Some(root)));
+        dm.set_prop_quiet(j, "Part1", Val::Ref(Some(torso)));
+        dm.set_prop_quiet(j, "C0", Val::Arr(r.to_vec()));
+        dm.set_prop_quiet(j, "C1", Val::Arr(r.to_vec()));
+        dm.set_prop_quiet(j, "MaxVelocity", Val::Num(0.1));
+        dm.set_prop_quiet(model, "PrimaryPart", Val::Ref(Some(root)));
+        parts.push((root, off));
+    }
+    Ok(())
+}
+
+pub fn build(dm: &mut DataModel, workspace: InstId, player: InstId, name: &str, origin: [f64; 3], look: Option<&crate::appearance::Look>, era: i32) -> Result<Char, String> {
     let model = dm.create_any("Model", None)?;
     dm.set_prop_quiet(model, "Name", Val::Str(name.to_string()));
     dm.get_mut_name(model, name);
@@ -69,6 +131,7 @@ pub fn build(dm: &mut DataModel, workspace: InstId, player: InstId, name: &str, 
         }
     }
     dm.set_prop_quiet(model, "PrimaryPart", Val::Ref(Some(torso)));
+    add_joints(dm, model, torso, era, &mut parts, origin)?;
     if let Some(l) = look {
         if let Some(c) = l.colors {
             let order = ["Head", "Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg"];
@@ -87,7 +150,7 @@ pub fn build(dm: &mut DataModel, workspace: InstId, player: InstId, name: &str, 
     }
     dm.set_parent(model, Some(workspace))?;
     dm.set_prop(player, "Character", Val::Ref(Some(model)))?;
-    Ok(Char { player, model, torso, parts, cf: id12(origin), vel: [0.0; 3], state: 7, seq: 1 })
+    Ok(Char { player, model, torso, parts, cf: id12(origin), vel: [0.0; 3], state: 7, seq: 1, j: None })
 }
 
 pub fn assign_team(dm: &mut DataModel, player: InstId) {
@@ -243,12 +306,8 @@ pub fn set_content_dir(dir: &str) {
     let _ = CONTENT_DIR.set(dir.to_string());
 }
 
-pub fn add_scripts(dm: &mut DataModel, model: InstId, era: i32) {
-    let dir = match CONTENT_DIR.get() {
-        Some(d) => d,
-        None => return,
-    };
-    let bytes = match std::fs::read(format!("{}/content/fonts/humanoidHealth.rbxm", dir)) {
+fn load_scripts(dm: &mut DataModel, model: InstId, path: &str, only: Option<&str>) {
+    let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(_) => return,
     };
@@ -259,14 +318,31 @@ pub fn add_scripts(dm: &mut DataModel, model: InstId, era: i32) {
     let made = dm.load_tree(&tree, model);
     for m in made {
         let name = dm.get(m).map(|i| i.name.clone()).unwrap_or_default();
-        if era == 2018 && name != "Health" {
-            dm.destroy(m);
-            continue;
+        if let Some(o) = only {
+            if name != o {
+                dm.destroy(m);
+                continue;
+            }
         }
         if let Some(gui) = dm.find_child(m, "HealthGUI", false) {
             if let Some(tray) = dm.find_child(gui, "Tray", false) {
                 let _ = dm.set_prop(tray, "Visible", Val::Bool(false));
             }
+        }
+    }
+}
+
+pub fn add_scripts(dm: &mut DataModel, model: InstId, era: i32) {
+    let dir = match CONTENT_DIR.get() {
+        Some(d) => d.clone(),
+        None => return,
+    };
+    if era == 2018 {
+        load_scripts(dm, model, &format!("{}/content2018/avatar/scripts/humanoidAnimateLocalKeyframe.rbxm", dir), None);
+        load_scripts(dm, model, &format!("{}/content/fonts/humanoidHealth.rbxm", dir), Some("Health"));
+    } else {
+        for f in ["humanoidAnimateLocal", "humanoidSound", "humanoidHealth"] {
+            load_scripts(dm, model, &format!("{}/content/fonts/{}.rbxm", dir, f), None);
         }
     }
 }

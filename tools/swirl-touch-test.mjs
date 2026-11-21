@@ -1,4 +1,4 @@
-const WS = (await import('/var/www/html/chocolate/node_modules/ws/wrapper.mjs')).default;
+const WS = (await import('/var/www/swirl/vendor/chocolate/node_modules/ws/wrapper.mjs')).default;
 const port = +process.argv[2];
 const ws = new WS('ws://127.0.0.1:' + port + '/ws?ticket=dev');
 const st = { owns: [], hp: [], models: [] };

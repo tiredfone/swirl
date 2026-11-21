@@ -1,4 +1,4 @@
-const CH = '/var/www/html/chocolate';
+const CH = '/var/www/swirl/vendor/chocolate';
 const placeId = +process.argv[2];
 const era = +(process.argv[3] || 2012);
 const { Game } = await import(CH + '/server/game.js');

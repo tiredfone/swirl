@@ -15,7 +15,8 @@ const pass = acct.password || acct.Password;
   const b = await p.launch({ executablePath: '/usr/bin/chromium', headless: 'new', args: ['--no-sandbox', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] });
   const pg = await b.newPage();
   await pg.setViewport({ width: 1100, height: 700 });
-  const log = { console: [], pageErrors: [], failed: [], ws: [], assets: { ok: 0, bad: 0 } };
+  const log = { console: [], pageErrors: [], failed: [], ws: [], assets: { ok: 0, bad: 0 }, chocolateRequests: [] };
+  pg.on('request', (r) => { try { if (new URL(r.url()).pathname.startsWith('/chocolate/')) log.chocolateRequests.push(r.url().slice(0, 160)); } catch (e) {} });
   pg.on('console', (m) => log.console.push(m.type() + ': ' + m.text().slice(0, 300)));
   pg.on('pageerror', (e) => log.pageErrors.push(String(e).slice(0, 400)));
   pg.on('requestfailed', (r) => log.failed.push(r.url().slice(0, 200) + ' ' + (r.failure() && r.failure().errorText)));
@@ -59,16 +60,21 @@ const pass = acct.password || acct.Password;
     focus = await pg.evaluate(() => ({ parts: window.solarClient.debug_parts(), dbg: window.solarClient.debug(), pos: window.solarClient.own_pos(), meshes: window.solarClient.loaded_meshes(), textures: window.solarClient.loaded_textures() }));
   }
   let walk = null;
+  let animSwing = 0;
+  let animInfo = null;
   if (process.env.WALK) {
-    const pos = () => pg.evaluate(() => (window.solarClient ? JSON.parse(window.solarClient.own_pos()) : null));
+    const pos = () => pg.evaluate(() => (window.solarLua && window.solarLua.ownPos ? window.solarLua.ownPos() : null));
+    const limbs = () => pg.evaluate(() => { const w = window.solarLua.world; const m = w.own && w.own.model; if (!m) return null; const t = m.findChild('Torso') || m.findChild('HumanoidRootPart'); const tc = t.props.get('CFrame'); const rel = (n) => { const q = m.findChild(n); if (!q) return null; const c = q.props.get('CFrame'); const d = [c[0] - tc[0], c[1] - tc[1], c[2] - tc[2]]; return [tc[3] * d[0] + tc[6] * d[1] + tc[9] * d[2], tc[4] * d[0] + tc[7] * d[1] + tc[10] * d[2], tc[5] * d[0] + tc[8] * d[1] + tc[11] * d[2]]; }; let tracks = 0; try { tracks = (w.anims.playing(w.own.hum) || []).length; } catch (e) {} return { ll: rel('Left Leg') || rel('LeftUpperLeg'), rl: rel('Right Leg') || rel('RightUpperLeg'), animate: !!m.findChild('Animate'), tracks }; });
     await pg.focus('#swirl-canvas').catch(() => {});
     const a = await pos();
     await pg.keyboard.down('w');
-    await new Promise((r) => setTimeout(r, 150));
+    const swing = [];
+    for (let i = 0; i < 8; i++) { await new Promise((r) => setTimeout(r, 120)); const l = await limbs(); if (l && l.ll && l.rl) swing.push(l.ll[2] - l.rl[2]); animInfo = l; }
     await pg.keyboard.up('w');
+    animSwing = swing.length ? Math.max(...swing) - Math.min(...swing) : 0;
     const b2 = await pos();
     await pg.keyboard.down(' ');
-    await new Promise((r) => setTimeout(r, 150));
+    await new Promise((r) => setTimeout(r, 300));
     await pg.keyboard.up(' ');
     const c2 = await pos();
     if (shot) {
@@ -77,7 +83,7 @@ const pass = acct.password || acct.Password;
       fs.writeFileSync(shot.replace(/\.png$/, '') + '.walk.jpg', await pg.screenshot({ type: 'jpeg', quality: 40 }));
       await pg.keyboard.up('s');
     }
-    walk = { start: a, afterW: b2, afterJump: c2, moved: a && b2 ? Math.hypot(b2[0] - a[0], b2[2] - a[2]) : 0, jumped: a && c2 ? c2[1] - b2[1] : 0 };
+    walk = { animSwing, animate: animInfo && animInfo.animate, start: a, afterW: b2, afterJump: c2, moved: a && b2 ? Math.hypot(b2[0] - a[0], b2[2] - a[2]) : 0, jumped: a && c2 ? c2[1] - b2[1] : 0 };
   }
   const b64 = (await pg.screenshot({ encoding: 'base64' }));
   if (shot) fs.writeFileSync(shot, Buffer.from(b64, 'base64'));
@@ -97,8 +103,10 @@ const pass = acct.password || acct.Password;
   console.log(JSON.stringify({ lua, focus, walk, login: ok, url: url.replace(/\?.*/, '?swirl=' + version), state, distinctColors: drawn, ...log }, null, 1));
   await b.close();
   const meshOk = !process.env.MIN_MESHES || (focus && focus.meshes >= Number(process.env.MIN_MESHES) && focus.textures >= 1);
-  const walkOk = !process.env.WALK || (walk && walk.moved > 1.5 && walk.afterW[1] > -5 && walk.jumped > 1);
+  const walkOk = !process.env.WALK || (walk && walk.moved > 3 && walk.afterW[1] > -5 && walk.jumped > 1 && walk.animSwing > 0.3 && walk.animate);
+  const noChoc = log.chocolateRequests.length === 0;
+  if (!noChoc) console.log('requests to /chocolate/ seen');
   const luaOk = !!(lua && lua.present && lua.ready && lua.playerList && lua.hotbarOrTopbar && lua.errors.length === 0);
   if (!luaOk) console.log('lua gate failed');
-  process.exit(luaOk && state.hasSwirlPage && state.statusHidden === true && state.fatalHidden === true && drawn > 3 && walkOk && meshOk ? 0 : 1);
+  process.exit(luaOk && state.hasSwirlPage && state.statusHidden === true && state.fatalHidden === true && drawn > 3 && walkOk && meshOk && noChoc ? 0 : 1);
 })();

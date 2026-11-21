@@ -1,4 +1,4 @@
-const WS = (await import('/var/www/html/chocolate/node_modules/ws/wrapper.mjs')).default;
+const WS = (await import('/var/www/swirl/vendor/chocolate/node_modules/ws/wrapper.mjs')).default;
 const port = +process.argv[2];
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 function client() {

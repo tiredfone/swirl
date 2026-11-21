@@ -35,6 +35,7 @@ pub struct Game {
     invokes: HashMap<u32, (InstId, i64)>,
     invoke_seq: u32,
     pub remote_out: Vec<(Vec<InstId>, J)>,
+    pub anim_state: HashMap<(InstId, String), J>,
     last_chat: HashMap<InstId, f64>,
 }
 
@@ -94,7 +95,7 @@ impl Game {
                 host.scan_subtree(id);
             }
         }
-        Ok(Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], last_chat: HashMap::new() })
+        Ok(Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], anim_state: HashMap::new(), last_chat: HashMap::new() })
     }
 
     pub fn join(&mut self, name: &str, user: Option<i64>, look: crate::appearance::Look) -> (J, InstId) {
@@ -131,6 +132,9 @@ impl Game {
             (player, snap)
         };
         self.looks.insert(player, look);
+        for ((_, _), m) in self.anim_state.iter() {
+            self.remote_out.push((vec![player], m.clone()));
+        }
         let players = self.dm.borrow().services["Players"];
         self.host.fire(players, "PlayerAdded", vec![swirl_lua::host::Wire::I(player)]);
         self.spawn_character(player, name);
@@ -147,7 +151,7 @@ impl Game {
             let ws = dm.services["Workspace"];
             let origin = character::spawn_origin(&dm, ws, player);
             let look = self.looks.get(&player);
-            match character::build(&mut dm, ws, player, name, origin, look) {
+            match character::build(&mut dm, ws, player, name, origin, look, self.era) {
                 Ok(ch) => {
                     character::add_scripts(&mut dm, ch.model, self.era);
                     if self.era == 2018 {
@@ -346,6 +350,7 @@ impl Game {
     }
 
     pub fn leave(&mut self, player: InstId) {
+        self.anim_state.retain(|(p, _), _| *p != player);
         let models: Vec<InstId> = self.chars.iter().filter(|(_, c)| c.player == player).map(|(m, _)| *m).collect();
         let mut dm = self.dm.borrow_mut();
         for m in models {
@@ -364,6 +369,36 @@ impl Game {
         };
         let tool = v["id"].as_u64().map(|x| x as InstId);
         match v["t"].as_str().unwrap_or("") {
+            "anim" => {
+                let model = match self.chars.iter().find(|(_, c)| c.player == player) {
+                    Some((m, _)) => *m,
+                    None => return,
+                };
+                let hum = self.dm.borrow().find_child_of_class(model, "Humanoid");
+                let h = v["h"].as_u64().map(|x| x as InstId);
+                if hum.is_none() || h != hum {
+                    return;
+                }
+                let op = v["op"].as_str().unwrap_or("");
+                if !["play", "stop", "speed", "weight", "time"].contains(&op) {
+                    return;
+                }
+                let key = format!("p{}:{}", player, v["k"].as_i64().unwrap_or(0));
+                let mut m = v.clone();
+                m["k"] = json!(key);
+                self.anim_state.retain(|(p, k), _| !(*p == player && *k == key && op == "stop"));
+                if op == "play" {
+                    self.anim_state.insert((player, key.clone()), m.clone());
+                }
+                let ps = {
+                    let dm = self.dm.borrow();
+                    dm.services.get("Players").and_then(|p| dm.get(*p)).map(|p| p.children.clone()).unwrap_or_default()
+                };
+                let others: Vec<InstId> = ps.into_iter().filter(|p| *p != player).collect();
+                if !others.is_empty() {
+                    self.remote_out.push((others, m));
+                }
+            }
             "re" | "rf" if self.era == 2018 => {
                 let id = match tool {
                     Some(i) => i,
@@ -509,6 +544,7 @@ impl Game {
             character::apply_cf(&mut dm, ch, c12);
             ch.vel = [vel[0], vel[1], vel[2]];
             ch.state = state;
+            ch.j = arr("j", 4).map(|a| [a[0].clamp(-7.0, 7.0), a[1].clamp(-7.0, 7.0), a[2].clamp(-7.0, 7.0), a[3].clamp(-7.0, 7.0)]);
             self.dirty.insert(model);
         }
     }
@@ -779,6 +815,9 @@ impl Game {
                     rec.extend(c.cf.iter().map(|x| json!(r(*x))));
                     rec.extend(c.vel.iter().map(|x| json!((x * 100.0).round() / 100.0)));
                     rec.push(json!(c.state));
+                    if let Some(j) = c.j {
+                        rec.extend(j.iter().map(|x| json!((x * 1000.0).round() / 1000.0)));
+                    }
                     J::Array(rec)
                 })
                 .collect();

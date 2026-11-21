@@ -1,0 +1,10 @@
+import path from 'path';
+import { createRequire } from 'module';
+import { runAll } from './movement-scenarios.mjs';
+const root = process.argv[2];
+const out = process.argv[3];
+const require = createRequire('/var/www/html/chocolate/package.json');
+const RAPIER = require('@dimforge/rapier3d-compat');
+const traces = await runAll((p) => import(path.join(root, p)), RAPIER);
+(await import('fs')).writeFileSync(out, JSON.stringify(traces));
+process.exit(0);

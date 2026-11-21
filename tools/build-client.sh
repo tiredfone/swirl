@@ -6,6 +6,7 @@ profile=${PROFILE:-client}
 out=${1:-/var/www/swirl/dist/client}
 version=$(grep -m1 "^version" crates/swirl-client/Cargo.toml | sed "s/.*\"\([0-9]*\.[0-9]*\)\.[0-9]*\".*/\1/")
 short=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+sh tools/check-chocolate-drift.sh >&2 || echo "warning: vendor/chocolate has drifted from Chocolate" >&2
 cargo build --target wasm32-unknown-unknown --profile $profile -p swirl-client
 rm -rf "$out.tmp"
 mkdir -p "$out.tmp"
@@ -15,6 +16,8 @@ if [ -n "$WASM_OPT" ] && command -v wasm-opt >/dev/null 2>&1; then
 fi
 cp crates/swirl-client/entry.js "$out.tmp/entry.js"
 cp crates/swirl-client/lua.js "$out.tmp/lua.js"
+cp crates/swirl-client/pack.js "$out.tmp/pack.js"
+node tools/pack-vendor.mjs vendor/chocolate "$out.tmp/chocolate"
 cat > "$out.tmp/manifest.json" <<JSON
 {"version":"$version","era":[2012,2018],"entry":"entry.js","build":"$short","profile":"$profile"}
 JSON

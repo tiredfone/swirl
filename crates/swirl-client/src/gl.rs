@@ -11,13 +11,13 @@ use web_sys::{HtmlCanvasElement, WebGl2RenderingContext as G, WebGlProgram, WebG
 const VS: &str = "#version 300 es
 in vec3 p; in vec3 n; in vec2 uv;
 uniform mat4 vp; uniform mat4 m; uniform vec4 uvr;
-out vec3 vn; out vec2 vuv;
-void main(){ vn = mat3(m) * n; vuv = uv * uvr.zw + uvr.xy; gl_Position = vp * m * vec4(p,1.0); }";
+out vec3 vn; out vec2 vuv; out vec3 lp; out vec3 ln;
+void main(){ lp = p; ln = n; vn = mat3(m) * n; vuv = uv * uvr.zw + uvr.xy; gl_Position = vp * m * vec4(p,1.0); }";
 const FS: &str = "#version 300 es
 precision mediump float;
-in vec3 vn; in vec2 vuv; uniform vec4 col; uniform sampler2D tex; uniform float useTex; uniform vec4 lt; uniform vec3 tint; out vec4 o;
+in vec3 vn; in vec2 vuv; in vec3 lp; in vec3 ln; uniform vec3 psz; uniform vec2 surf; uniform vec4 col; uniform sampler2D tex; uniform float useTex; uniform vec4 lt; uniform vec3 tint; out vec4 o;
 void main(){ vec3 N = normalize(vn); float d = max(dot(N, normalize(vec3(0.45,0.8,-0.4))), 0.0); float f = max(dot(N, normalize(vec3(-0.5,0.2,0.6))), 0.0);
-float l = min(1.17, lt.x + lt.y*d + lt.z*f); vec4 c = col; if (useTex > 0.5) { vec4 t = texture(tex, vuv); if (useTex > 1.5) { c = vec4(t.rgb, t.a * col.a); } else { c = vec4(mix(col.rgb, t.rgb, t.a), col.a); } } o = vec4(min(c.rgb * l * tint, vec3(1.0)), c.a); }";
+float l = min(1.17, lt.x + lt.y*d + lt.z*f); float ty = 0.0; if (ln.y > 0.9) ty = surf.x; else if (ln.y < -0.9) ty = surf.y; if (ty > 2.5 && ty < 4.5) { vec2 fc = fract((lp.xz + 0.5) * psz.xz) - 0.5; float r = length(fc); if (ty < 3.5) { if (r < 0.28) l *= 1.04; else if (r < 0.36) l *= 0.93; } else { if (r < 0.28) l *= 0.95; else if (r < 0.36) l *= 1.04; } } vec4 c = col; if (useTex > 0.5) { vec4 t = texture(tex, vuv); if (useTex > 1.5) { c = vec4(t.rgb, t.a * col.a); } else { c = vec4(mix(col.rgb, t.rgb, t.a), col.a); } } o = vec4(min(c.rgb * l * tint, vec3(1.0)), c.a); }";
 
 const SKY_VS: &str = "#version 300 es
 out vec2 q;
@@ -46,6 +46,8 @@ struct State {
     sky_vao: Option<web_sys::WebGlVertexArrayObject>,
     u_lt: Option<WebGlUniformLocation>,
     u_tint: Option<WebGlUniformLocation>,
+    u_psz: Option<WebGlUniformLocation>,
+    u_surf: Option<WebGlUniformLocation>,
     world: World,
     gl: G,
     prog: WebGlProgram,
@@ -83,6 +85,10 @@ struct State {
     tap: Vec<String>,
     eye: [f32; 3],
     view_fov: f32,
+    driven: bool,
+    has_cam: bool,
+    cam_cf: [f32; 12],
+    cam_fov: f32,
     queue: Vec<(String, String)>,
 }
 
@@ -294,6 +300,8 @@ impl Client {
             sky_vao,
             u_lt,
             u_tint,
+            u_psz: gl.get_uniform_location(&prog, "psz"),
+            u_surf: gl.get_uniform_location(&prog, "surf"),
             u_vp: gl.get_uniform_location(&prog, "vp"),
             u_m: gl.get_uniform_location(&prog, "m"),
             u_col: gl.get_uniform_location(&prog, "col"),
@@ -331,6 +339,10 @@ impl Client {
             tap: vec![],
             eye: [0.0, 0.0, 0.0],
             view_fov: 1.0,
+            driven: false,
+            has_cam: false,
+            cam_cf: mat::CF_ID,
+            cam_fov: 1.0,
             queue: vec![],
         }));
         let s2 = st.clone();
@@ -471,6 +483,48 @@ impl Client {
         }
     }
 
+    pub fn set_driven(&self, on: bool) {
+        self.st.borrow_mut().driven = on;
+        self.st.borrow_mut().world.driven = on;
+    }
+
+    pub fn set_camera(&self, cf: &[f32], fov_deg: f32) {
+        let mut st = self.st.borrow_mut();
+        if cf.len() >= 12 {
+            st.cam_cf.copy_from_slice(&cf[..12]);
+            st.cam_fov = (fov_deg.clamp(1.0, 120.0)).to_radians();
+            st.has_cam = true;
+        }
+    }
+
+    pub fn set_cfs(&self, data: &[f64]) {
+        let mut st = self.st.borrow_mut();
+        for c in data.chunks_exact(13) {
+            let mut cf = [0.0f32; 12];
+            for k in 0..12 {
+                cf[k] = c[1 + k] as f32;
+            }
+            st.world.set_cf(c[0] as u32, &cf);
+        }
+    }
+
+    pub fn apply_local(&self, text: &str) {
+        self.st.borrow_mut().world.apply_local(text);
+    }
+
+    pub fn set_local_alpha(&self, id: u32, t: f32) {
+        let mut st = self.st.borrow_mut();
+        if t.is_nan() {
+            st.world.local_t.remove(&id);
+        } else {
+            st.world.local_t.insert(id, t);
+        }
+    }
+
+    pub fn clear_focus(&self) {
+        self.st.borrow_mut().focus = None;
+    }
+
     pub fn focus(&self, x: f32, y: f32, z: f32, dist: f32) {
         let mut st = self.st.borrow_mut();
         st.focus = Some([x, y, z]);
@@ -574,7 +628,7 @@ impl Client {
         let dt = if st.last_t > 0.0 { ((now - st.last_t) / 1000.0).clamp(0.0, 0.1) as f32 } else { 0.0 };
         st.last_t = now;
         st.world.t = (now / 1000.0) as f32;
-        if st.world.own.is_some() {
+        if st.world.own.is_some() && !st.driven {
             if let Some(cf) = st.world.teleport.take() {
                 let (ws, jp) = st.world.humanoid_of(st.world.own.as_ref().unwrap().model);
                 let mut c = Controller::new([cf[0], cf[1], cf[2]]);
@@ -635,20 +689,37 @@ impl Client {
                 }
             }
         }
-        if !st.fitted {
+        let use_cam = st.driven && st.has_cam && st.focus.is_none();
+        if !st.fitted && !use_cam {
             let (c, r) = st.world.bounds();
             st.target = c;
             st.dist = r * 1.6;
             st.fitted = true;
         }
-        let eye = [
-            st.target[0] + st.dist * st.pitch.cos() * st.yaw.sin(),
-            st.target[1] + st.dist * st.pitch.sin(),
-            st.target[2] + st.dist * st.pitch.cos() * st.yaw.cos(),
-        ];
+        let (eye, dirv, rightv, upv, fov, view) = if use_cam {
+            let c = st.cam_cf;
+            let eye = [c[0], c[1], c[2]];
+            let dirv = [-c[5], -c[8], -c[11]];
+            let rightv = [c[3], c[6], c[9]];
+            let upv = [c[4], c[7], c[10]];
+            let tgt = [eye[0] + dirv[0], eye[1] + dirv[1], eye[2] + dirv[2]];
+            st.target = tgt;
+            (eye, dirv, rightv, upv, st.cam_fov, mat::look_at(eye, tgt, upv))
+        } else {
+            let eye = [
+                st.target[0] + st.dist * st.pitch.cos() * st.yaw.sin(),
+                st.target[1] + st.dist * st.pitch.sin(),
+                st.target[2] + st.dist * st.pitch.cos() * st.yaw.cos(),
+            ];
+            let dirv = norm3(target_minus(st.target, eye));
+            let up_ref = if dirv[1].abs() > 0.99 { [0.0, 0.0, 1.0] } else { [0.0, 1.0, 0.0] };
+            let rightv = norm3(cross3(dirv, up_ref));
+            let upv = cross3(rightv, dirv);
+            (eye, dirv, rightv, upv, 1.0, mat::look_at(eye, st.target, [0.0, 1.0, 0.0]))
+        };
         st.eye = eye;
-        let proj = mat::perspective(1.0, w as f32 / h as f32, 0.5, 20000.0);
-        let view = mat::look_at(eye, st.target, [0.0, 1.0, 0.0]);
+        st.view_fov = fov;
+        let proj = mat::perspective(fov, w as f32 / h as f32, 0.5, 20000.0);
         let vp = mat::mul(&proj, &view);
         let faces = st.world.sky_faces();
         let mut sky_ready = true;
@@ -670,12 +741,7 @@ impl Client {
             }
         }
         if sky_ready {
-            let d = [target_minus(st.target, eye)];
-            let dirv = norm3(d[0]);
-            let up_ref = if dirv[1].abs() > 0.99 { [0.0, 0.0, 1.0] } else { [0.0, 1.0, 0.0] };
-            let rightv = norm3(cross3(dirv, up_ref));
-            let upv = cross3(rightv, dirv);
-            let tan_y = (0.5f32).tan();
+            let tan_y = (fov / 2.0).tan();
             gl.use_program(Some(&st.sky_prog));
             gl.depth_mask(false);
             gl.disable(G::DEPTH_TEST);
@@ -745,6 +811,7 @@ impl Client {
                         }
                     }
                     gl.uniform1f(st.u_tex_on.as_ref(), tex_on);
+                    gl.uniform2f(st.u_surf.as_ref(), 0.0, 0.0);
                     gl.disable(G::CULL_FACE);
                     gl.bind_vertex_array(mesh.vao.as_ref());
                     gl.draw_arrays(G::TRIANGLES, 0, mesh.count);
@@ -762,6 +829,12 @@ impl Client {
             gl.uniform_matrix4fv_with_f32_array(st.u_m.as_ref(), false, &m);
             gl.uniform4f(st.u_col.as_ref(), p.color[0], p.color[1], p.color[2], p.alpha);
             gl.uniform1f(st.u_tex_on.as_ref(), 0.0);
+            if p.shape == 1 {
+                gl.uniform3f(st.u_psz.as_ref(), p.size[0], p.size[1], p.size[2]);
+                gl.uniform2f(st.u_surf.as_ref(), p.top as f32, p.bottom as f32);
+            } else {
+                gl.uniform2f(st.u_surf.as_ref(), 0.0, 0.0);
+            }
             let mesh = match p.shape {
                 0 => &st.sphere,
                 2 => &st.cyl,
@@ -773,6 +846,7 @@ impl Client {
             gl.draw_arrays(G::TRIANGLES, 0, mesh.count);
         }
         gl.depth_mask(false);
+        gl.uniform2f(st.u_surf.as_ref(), 0.0, 0.0);
         gl.uniform4f(st.u_lt.as_ref(), 1.0, 0.0, 0.0, 0.0);
         gl.uniform3f(st.u_tint.as_ref(), 1.0, 1.0, 1.0);
         for p in parts.iter().filter(|p| !p.decals.is_empty()) {

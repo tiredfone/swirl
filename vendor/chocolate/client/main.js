@@ -1,0 +1,638 @@
+import RAPIER from '@dimforge/rapier3d-compat';
+import { Lua } from 'wasmoon-lua5.1';
+import { Net } from './net.js';
+import { ClientWorld, prefetch2018 } from './world.js';
+import { Renderer } from './render.js';
+import { CameraController } from './camera.js';
+import { Gui } from './gui.js';
+import { TouchInput, detectTouch } from './touch.js';
+import { T } from '../shared/luahost.js';
+import { configure, publicPath, endpointUrl, loadContentIndex, contentUrl, animationBytes } from './assets.js';
+import { CursorLayer, CURSORS } from './cursor.js';
+import { DevConsole } from './devconsole.js';
+import { Input2018 } from './input2018.js';
+import { GameRecorder } from './recorder.js';
+import * as THREE from 'three';
+
+const cfg = JSON.parse(document.getElementById('chocolate-config').textContent);
+configure(cfg);
+const pageUrl = (name, id) => endpointUrl(name, id) || '/';
+const root = document.getElementById('chocolate');
+const devConsole = new DevConsole(root);
+const canvas = document.getElementById('chocolate-canvas');
+const cursor = new CursorLayer(canvas);
+const loading = document.getElementById('chocolate-loading');
+const status = document.getElementById('chocolate-status');
+const fatal = document.getElementById('chocolate-fatal');
+const touch = detectTouch();
+
+function setStatus(t) {
+  status.textContent = t;
+}
+
+const bricksEl = document.getElementById('chocolate-bricks');
+const connectorsEl = document.getElementById('chocolate-connectors');
+if (cfg.clientVersion === 2018) loading.classList.add('ch-boot-2018');
+else loading.style.backgroundImage = `url("${contentUrl('sky/null_plainsky512_ft.jpg')}")`;
+
+function finishLoading(world) {
+  if (world.era === 2018) {
+    loading.hidden = true;
+    return Promise.resolve();
+  }
+  const ws = world.dm.services.get('Workspace');
+  let bricks = 0, connectors = 0;
+  for (const d of ws ? ws.descendants() : []) {
+    if (d.isA('BasePart')) bricks++;
+    else if (d.isA('JointInstance')) connectors++;
+  }
+  const total = bricks + connectors;
+  const ms = Math.min(2200, 350 + total * 1.5);
+  const t0 = performance.now();
+  return new Promise((resolve) => {
+    const step = (now) => {
+      const k = Math.min(1, (now - t0) / ms);
+      if (bricksEl) bricksEl.textContent = String(Math.round(bricks * k));
+      if (connectorsEl) connectorsEl.textContent = String(Math.round(connectors * k));
+      if (k < 1) requestAnimationFrame(step);
+      else setTimeout(() => {
+        loading.classList.add('ch-boot-done');
+        setTimeout(() => {
+          loading.hidden = true;
+          resolve();
+        }, 450);
+      }, 250);
+    };
+    requestAnimationFrame(step);
+  });
+}
+
+function showFatal(title, detail) {
+  loading.hidden = true;
+  fatal.hidden = false;
+  fatal.querySelector('h2').textContent = title;
+  fatal.querySelector('p').textContent = detail || '';
+}
+
+async function ticket() {
+  const r = await fetch(endpointUrl('ticket'), {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': cfg.csrf },
+    body: JSON.stringify(cfg.server ? { placeId: cfg.placeId, server: cfg.server } : { placeId: cfg.placeId }),
+  });
+  const j = await r.json().catch(() => null);
+  if (!r.ok || !j || !j.ticket) throw new Error((j && j.error) || 'Could not get a join ticket');
+  return j;
+}
+
+function wsUrl(path) {
+  if (/^wss?:\/\//.test(path)) return path;
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${location.host}${path}`;
+}
+
+async function boot() {
+  setStatus('Requesting a server');
+  if (cfg.clientVersion === 2018) {
+    prefetch2018(cfg.version);
+    fetch(publicPath('/client/vendor/liblua5.1.wasm')).catch(() => {});
+  }
+  const [t, src] = await Promise.all([ticket(), fetch(publicPath('/shared/runtime.lua?v=') + cfg.version).then((r) => r.text()), RAPIER.init(), loadContentIndex()]);
+  setStatus('Connecting');
+  const net = new Net();
+  let world = null, renderer = null, camera = null, gui = null, recorder = null;
+  const pending = [];
+  let kicked = false;
+  net.on('kick', (m) => {
+    kicked = true;
+    showFatal('Disconnected', m.m || 'You were disconnected from the game.');
+  });
+  net.on('close', (ev) => {
+    if (kicked) return;
+    const reasons = {
+      4001: 'This game could not be started.',
+      4002: 'The game server stopped.',
+      4003: 'Your join ticket was not accepted. Reload the page to try again.',
+      4005: 'You were disconnected for sending too much data.',
+      4006: 'Your connection could not keep up with the game.',
+      4007: 'Too many connections from your network. Try again in a minute.',
+      4010: 'The server is busy. Try again in a moment.',
+      1006: 'The connection to the game server dropped (network problem or timeout).',
+      1012: 'The game server is restarting. Reload in a few seconds.',
+    };
+    const detail = (reasons[ev.code] || 'The connection to the game server was closed.') + ' (code ' + ev.code + ')';
+    if (!world || !world.ready || ![1001, 1005, 1006].includes(ev.code)) {
+      showFatal('Connection lost', detail);
+      return;
+    }
+    let tries = 0;
+    try {
+      const rec = JSON.parse(sessionStorage.getItem('chocolate-reconnect') || 'null');
+      if (rec && Date.now() - rec.t < 120000) tries = rec.n;
+    } catch {}
+    if (tries >= 3) {
+      showFatal('Connection lost', detail);
+      return;
+    }
+    try {
+      sessionStorage.setItem('chocolate-reconnect', JSON.stringify({ t: Date.now(), n: tries + 1 }));
+    } catch {}
+    showFatal('Reconnecting...', 'The connection dropped. Trying to rejoin the game.');
+    setTimeout(() => {
+      ticket().then(() => { window.chocolateLeaving = true; location.reload(); }).catch((e) => showFatal('Connection lost', (e && e.message ? e.message + '. ' : '') + 'The game server is no longer available. Leave the game and join again.'));
+    }, 1500 + tries * 2500);
+  });
+  net.on('anim', (m) => {
+    if (world && world.ready) world.remoteAnim(m);
+    else pending.push(m);
+  });
+  net.on('terrain', (m) => {
+    if (world && world.ready) world.applyTerrain(m);
+    else pending.push(m);
+  });
+  net.on('rep', (m) => {
+    if (world && world.ready) world.applyRep(m);
+    else pending.push(m);
+  });
+  net.on('chat', (m) => {
+    if (!world || !world.ready) return;
+    const dm = world.dm;
+    const players = dm.services.get('Players');
+    const speaker = m.p ? dm.byId.get(m.p) : players.children.find((c) => c.ClassName === 'Player' && c.props.get('userId') === m.u);
+    const kind = m.k === 'team' ? 1 : m.k === 'whisper' ? 2 : 0;
+    const to = m.to ? dm.byId.get(m.to) || null : null;
+    if (speaker) {
+      dm.emit(players, 'PlayerChatted', T.e('PlayerChatType', kind), speaker, m.m, to);
+      dm.emit(speaker, 'Chatted', m.m, to);
+    }
+    const head = m.h && dm.byId.get(m.h);
+    if (head && gui && kind !== 2 && world.era !== 2018) gui.bubble(head, m.m);
+  });
+  net.on('bubble', (m) => {
+    const p = world && world.dm.byId.get(m.id);
+    if (!p) return;
+    if (world.era === 2018) world.dm.emit(world.dm.services.get('Chat'), 'Chatted', p, m.m, T.e('ChatColor', (m.c | 0) || 0));
+    else if (gui) gui.bubble(p, m.m);
+  });
+  net.on('msg', (m) => gui && gui.setHint(m.m));
+  for (const t of ['re', 'rfc', 'rfr']) net.on(t, (m) => {
+    if (world && world.ready) world.onRemote(m);
+    else pending.push(m);
+  });
+  const applyFs = (m) => {
+    if (!m.s) return;
+    for (const [id, st] of Object.entries(m.s)) {
+      const other = world.dm.byId.get(+id);
+      const prev = world.friendStatus.get(+id) || 1;
+      world.friendStatus.set(+id, st | 0);
+      if (other && world.player && prev !== (st | 0)) world.dm.emit(world.player, 'FriendStatusChanged', other, T.e('FriendStatus', st | 0));
+      if ((st | 0) !== 1) for (const delay of [700, 2500, 6000]) setTimeout(() => {
+        const o2 = world.dm.byId.get(+id);
+        if (o2 && !o2.destroyed && world.player && world.friendStatus.get(+id) === (st | 0)) world.dm.emit(world.player, 'FriendStatusChanged', o2, T.e('FriendStatus', st | 0));
+      }, delay);
+    }
+  };
+  const applyFre = (m) => {
+    const a = world.dm.byId.get(m.a | 0), b = world.dm.byId.get(m.b | 0);
+    const players = world.dm.services.get('Players');
+    if (a && b && players) world.dm.emit(players, 'FriendRequestEvent', a, b, T.e('FriendRequestEvent', m.e | 0));
+  };
+  net.on('mktr', (m) => { if (world) world.onMarket(m); });
+  net.on('prompt', (m) => { if (world && world.ready) world.promptPurchase(m.kind, m.id | 0, !!m.equip); });
+  net.on('pver', (m) => { if (world && world.ready) world.purchaseVerified(m); });
+  net.on('fs', (m) => {
+    if (world && world.ready) applyFs(m);
+    else pending.push(m);
+  });
+  net.on('fre', (m) => {
+    if (world && world.ready) applyFre(m);
+    else pending.push(m);
+  });
+  net.on('out', (m) => {
+    devConsole.add('server', m.k, m.m);
+    if (!world) return;
+    world.isDev = true;
+    const mt = m.k === 'error' ? 3 : m.k === 'warn' ? 2 : 0;
+    if (world.era === 2018) {
+      if (!world.serverLog) world.serverLog = [];
+      const entry = { m: String(m.m), k: mt, t: Math.floor(Date.now() / 1000) };
+      world.serverLog.push(entry);
+      if (world.serverLog.length > 500) world.serverLog.shift();
+      if (!world.ready) return;
+      const ls2 = world.dm.services.get('LogService');
+      if (ls2) world.dm.emit(ls2, 'ServerMessageOut', entry.m, T.e('MessageType', mt), entry.t);
+      return;
+    }
+    if (!world.ready) return;
+    const ls = world.dm.services.get('LogService');
+    if (ls) world.dm.emit(ls, 'MessageOut', '[server] ' + m.m, T.e('MessageType', mt));
+  });
+  net.on('teleport', (m) => {
+    if ((m.place | 0) > 0) { window.chocolateLeaving = true; location.href = pageUrl('play', m.place); }
+  });
+  net.on('init', async (m) => {
+    setStatus('Loading the world');
+    if (m.era === 2018 && Array.isArray(m.anims)) for (const id of m.anims) animationBytes(id).catch(() => {});
+    let input2018 = null;
+    try {
+      world = new ClientWorld(net, {
+        touch,
+        version: cfg.version,
+        placeInfo: () => ({ name: cfg.placeName || '', creator: cfg.creatorName || '' }),
+        mouseBehavior: (v) => input2018 && input2018.setBehavior(v),
+        mouseDelta: () => (input2018 ? input2018.takeDelta() : [0, 0]),
+        mouseButtonDown: (t) => !!(input2018 && input2018.buttons.has(t)),
+        isKeyCodeDown: (k) => !!(input2018 && input2018.isKeyDown(k)),
+        mouseIconEnabled: (on) => { canvas.style.cursor = on ? '' : 'none'; },
+        screenRay: (x, y) => {
+          if (!renderer) return null;
+          const k = world.guiScale();
+          const rc = new THREE.Raycaster();
+          rc.setFromCamera(new THREE.Vector2((x / k / root.clientWidth) * 2 - 1, -(y / k / root.clientHeight) * 2 + 1), renderer.camera);
+          return { o: rc.ray.origin.toArray(), d: rc.ray.direction.toArray() };
+        },
+        worldToScreen: (p) => {
+          if (!renderer) return null;
+          const v = new THREE.Vector3(p[0], p[1], p[2]);
+          const depth = v.clone().applyMatrix4(renderer.camera.matrixWorldInverse).z;
+          v.project(renderer.camera);
+          const k = world.guiScale();
+          const sx = (v.x + 1) / 2 * root.clientWidth * k, sy = (1 - v.y) / 2 * root.clientHeight * k;
+          return [sx, sy, -depth, depth < 0 && Math.abs(v.x) <= 1 && Math.abs(v.y) <= 1];
+        },
+        measureText: (text, size, font, frame) => (gui && gui.measureText ? gui.measureText(text, size, font, frame) : null),
+        screenSize: () => [root.clientWidth, root.clientHeight],
+        rotateCamera: (dx, dy) => camera && camera.rotateBy(dx, dy),
+        cameraTilt: (dir) => camera && camera.rotateBy(0, dir * 0.1745),
+        cameraZoom: (dir) => camera && camera.stepZoom(dir > 0 ? 1 : -1),
+        toggleFullscreen: () => {
+          if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+          else if (root.requestFullscreen) root.requestFullscreen().catch(() => {});
+        },
+        inFullscreen: () => !!document.fullscreenElement,
+        recordToggle: () => {
+          if (!recorder) recorder = new GameRecorder({ root, canvas, world, uploadUrl: endpointUrl('videoUpload'), csrf: cfg.csrf, title: cfg.placeName || 'Solar recording', onChange: (on) => world && world.recordingChanged(on) });
+          recorder.toggle();
+        },
+        screenshot: () => {
+          if (!renderer) return;
+          renderer.frame(0);
+          const a = document.createElement('a');
+          a.download = `${cfg.placeName || 'Screenshot'}.png`.replace(/[\\/:*?"<>|]/g, '_');
+          a.href = canvas.toDataURL('image/png');
+          a.click();
+        },
+        message: () => status.textContent,
+        animProgress: (done, total) => setStatus(`Loading animations (${done}/${total})`),
+        zoomCamera: (d) => camera && camera.zoomBy(Math.exp(-d * 0.15)),
+        log: (k, msg, where) => {
+          const line = where ? `${where}: ${msg}` : msg;
+          devConsole.add('client', k, line);
+          if (window.parent !== window) {
+            try {
+              window.parent.postMessage({ chocolateDbg: { side: 'client', out: `[${k}] ${line}`.slice(0, 2000) } }, location.origin);
+            } catch {}
+          }
+          if (k === 'error') console.error(line);
+          else console.log(line);
+        },
+        kicked: (msg) => {
+          kicked = true;
+          net.close();
+          showFatal('Disconnected', msg);
+        },
+        focusTextBox: (inst, on) => gui && gui.focusTextBox(inst, on),
+        focusedTextBox: () => (gui && gui.focused) || null,
+        setMessage: (msg) => gui && gui.setHint(msg),
+        bubble: (part, msg) => gui && gui.bubble(part, msg),
+        ownCharacter: (model) => {
+          const hum = model.findChildOfClass('Humanoid');
+          world.dm.setProp(world.camera, 'CameraSubject', hum);
+        },
+        died: () => {},
+        leave: () => {
+          net.close();
+          window.chocolateLeaving = true;
+          location.href = pageUrl('gamePage', cfg.placeId);
+        },
+      });
+      await world.init(m, RAPIER, () => Lua.create({ customWasmUri: publicPath('/client/vendor/liblua5.1.wasm') }), src);
+      renderer = new Renderer(canvas, world);
+      world.renderer = renderer;
+      renderer.setQuality(0);
+      if (renderer.setAssemblies) renderer.setAssemblies(m.asm || [], []);
+      renderer.attach();
+      camera = new CameraController(world, renderer, canvas);
+      gui = new Gui(root, world, renderer, {
+        leave: () => {
+          net.close();
+          window.chocolateLeaving = true;
+          location.href = pageUrl('gamePage', cfg.placeId);
+        },
+        sendChat: (msg) => net.send({ t: 'chat', m: msg }),
+        send: (o) => net.send(o),
+        flush: () => world.host.tick(world.t),
+      });
+      if (world.host && world.host.env) world.host.env.textBounds = (inst) => gui.textBounds(inst);
+      if (world.host && world.host.env) world.host.env.absoluteSize = (inst) => gui.absoluteSize(inst);
+      if (touch) new TouchInput(world, renderer, gui, root, canvas);
+      if (world.era === 2018) {
+        input2018 = new Input2018(world, gui, canvas, root);
+        camera.luaDriven = true;
+      }
+      world.input2018 = input2018;
+      world.bindSettings(renderer);
+      window.addEventListener('message', (e) => {
+        if (e.origin !== location.origin || !e.data || e.data.chocolate !== 'mute') return;
+        world.muted = !!e.data.on;
+        world.setVolume(world.muted ? 0 : 1);
+      });
+      world.ready = true;
+      for (const p of pending.splice(0)) if (p.t === 'anim') world.remoteAnim(p); else if (p.t === 'fs') applyFs(p); else if (p.t === 'fre') applyFre(p); else if (p.t === 're' || p.t === 'rfc' || p.t === 'rfr') world.onRemote(p); else if (p.t === 'terrain') world.applyTerrain(p); else world.applyRep(p);
+      const animsReady = world.era === 2018 && Array.isArray(m.anims) && m.anims.length
+        ? Promise.race([
+          world.animsReady || world.anims.preload(m.anims, (done, total) => setStatus(`Loading animations (${done}/${total})`)),
+          new Promise((r) => setTimeout(r, 20000)),
+        ])
+        : Promise.resolve();
+      const characterReady = () => new Promise((resolve) => {
+        const players = world.dm.services.get('Players');
+        if (!players || !players.props.get('CharacterAutoLoads')) return resolve();
+        const t0 = performance.now();
+        const check = () => {
+          const ch = world.player && world.player.props.get('Character');
+          if ((ch && world.own && world.own.model === ch) || performance.now() - t0 > 30000) return resolve();
+          setTimeout(check, 100);
+        };
+        check();
+      });
+      animsReady.then(() => {
+        const ch = world.player && world.player.props.get('Character');
+        if (!ch) setStatus('Loading character');
+        return characterReady();
+      }).then(() => {
+        setStatus('Starting');
+        finishLoading(world);
+      });
+      document.addEventListener('fullscreenchange', () => {
+        const us = world.host._userSettings;
+        const gs = us && us.findChild('GameSettings');
+        if (gs) world.dm.emit(gs, 'FullscreenChanged', !!document.fullscreenElement);
+      });
+      world.markLoaded();
+      start(world, renderer, camera, gui, net);
+    } catch (e) {
+      console.error(e);
+      showFatal('Something went wrong', e.message);
+    }
+  });
+  await net.connect(wsUrl(t.ws || cfg.websocketPath || publicPath('/ws')) + '?ticket=' + encodeURIComponent(t.ticket));
+  setStatus('Joining');
+}
+
+function start(world, renderer, camera, gui, net) {
+  const held = new Set();
+  const codes = new Set();
+  let jumpQueued = false;
+  const KEYMAP = { w: 'forward', arrowup: 'forward', s: 'back', arrowdown: 'back', a: 'left', d: 'right' };
+  const relock = () => {
+    const in18 = world.input2018;
+    if (in18 && in18.behavior !== 0 && document.pointerLockElement !== canvas && !gui.isTyping()) in18.setBehavior(in18.behavior);
+  };
+  window.addEventListener('beforeunload', (e) => {
+    if (window.chocolateLeaving) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
+  document.addEventListener('fullscreenchange', () => {
+    const kb = navigator.keyboard;
+    if (!kb || !kb.lock) return;
+    if (document.fullscreenElement) kb.lock(['KeyW', 'KeyT', 'KeyN', 'KeyQ', 'KeyR', 'KeyD', 'KeyS', 'KeyF', 'KeyP', 'KeyH', 'KeyJ', 'KeyL', 'KeyU']).catch(() => {});
+    else if (kb.unlock) kb.unlock();
+  });
+  window.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key && e.key.length === 1 && !gui.isTyping() && !'cvxaz'.includes(e.key.toLowerCase())) e.preventDefault();
+    if (e.key === 'F12' && world && world.hooks && world.hooks.recordToggle) {
+      e.preventDefault();
+      if (!e.repeat) world.hooks.recordToggle();
+      return;
+    }
+    if (e.key === 'F9' && !world.input2018) {
+      e.preventDefault();
+      if (!e.repeat) devConsole.toggle();
+      return;
+    }
+    if (e.key !== 'Escape') relock();
+    const in18 = world.input2018;
+    if (in18) {
+      in18.keyDown(e, gui.isTyping());
+      if (e.key === 'Tab' || e.key === ' ' || e.key.startsWith('Arrow')) e.preventDefault();
+      if (gui.isTyping() || e.repeat) return;
+      if (e.key === 'Enter') {
+        const gs = world.dm.services.get('GuiService');
+        const pg = world.player && world.player.findChildOfClass('PlayerGui');
+        const sel = (gs && gs.props.get('SelectedCoreObject')) || (pg && pg.props.get('SelectedObject'));
+        if (sel && !sel.destroyed && sel.isA('GuiButton') && sel.props.get('Visible') !== false) {
+          e.preventDefault();
+          world.dm.emit(sel, 'MouseButton1Click');
+          world.dm.emit(sel, 'Activated');
+          return;
+        }
+      }
+      if (e.key === '/' && world.host.guiKeys && world.host.guiKeys.has('special:5')) {
+        e.preventDefault();
+        world.dm.emit(world.dm.services.get('GuiService'), 'SpecialKeyPressed', T.e('SpecialKey', 5));
+        return;
+      }
+      world.ensureAudio();
+      held.add(e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase());
+      if (e.code) codes.add(e.code);
+      const lk = e.key.length === 1 ? e.key.toLowerCase() : e.key === 'Enter' ? '\r' : null;
+      if (lk) world.keyDown(lk);
+      return;
+    }
+    if (gui.isTyping()) return;
+    const k = e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase();
+    const dm = world.dm;
+    const gs = dm.services.get('GuiService');
+    const keys = world.host.guiKeys;
+    if (k === '/' && keys.has('special:5')) {
+      e.preventDefault();
+      dm.emit(gs, 'SpecialKeyPressed', T.e('SpecialKey', 5));
+      return;
+    }
+    if (k === 'escape') dm.emit(gs, 'EscapeKeyPressed');
+    const special = { insert: 0, home: 1, end: 2, pageup: 3, pagedown: 4 }[k];
+    if (special !== undefined && keys.has('special:' + special)) dm.emit(gs, 'SpecialKeyPressed', T.e('SpecialKey', special));
+    const claimed = k.length === 1 && keys.has(k);
+    if (claimed && !e.repeat) dm.emit(gs, 'KeyPressed', k);
+    if (k === 'tab') e.preventDefault();
+    if (e.repeat) return;
+    world.ensureAudio();
+    held.add(k);
+    if (e.code) codes.add(e.code);
+    if (k === ' ') {
+      jumpQueued = true;
+      e.preventDefault();
+    }
+    if (k === 'shift' && world.era !== 2018) camera.toggleShiftLock();
+    if (k === 'arrowleft') camera.keyYaw = 1;
+    if (k === 'arrowright') camera.keyYaw = -1;
+    if (k === 'i') camera.stepZoom(1);
+    if (k === 'o') camera.stepZoom(-1);
+    if (k === 'backspace') {
+      e.preventDefault();
+      world.dropTool();
+    }
+    if (/^[0-9]$/.test(k) && !claimed) {
+      const items = world.backpackItems();
+      const idx = k === '0' ? 9 : +k - 1;
+      if (items[idx]) world.toggleSlot(items[idx]);
+    }
+    const lua = k === ' ' ? ' ' : k === 'enter' ? '\r' : k === 'backspace' ? '\b' : k === 'tab' ? '\t' : k === 'shift' ? String.fromCharCode(48) : k.length === 1 ? k : null;
+    if (lua) world.keyDown(lua);
+  });
+  window.addEventListener('keyup', (e) => {
+    if (world.input2018) world.input2018.keyUp(e, gui.isTyping());
+    const k = e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase();
+    held.delete(k);
+    if (e.code) codes.delete(e.code);
+    if (k === 'arrowleft' || k === 'arrowright') camera.keyYaw = 0;
+    const lua = k === ' ' ? ' ' : k === 'enter' ? '\r' : k === 'shift' ? String.fromCharCode(48) : k.length === 1 ? k : null;
+    if (lua) world.keyUp(lua);
+  });
+  window.addEventListener('blur', () => {
+    if (world.input2018) world.input2018.blur();
+    held.clear();
+    codes.clear();
+    camera.keyYaw = 0;
+  });
+  const ms = world.mouseState;
+  canvas.addEventListener('pointermove', (e) => {
+    if (e.pointerType === 'touch') return;
+    const r = canvas.getBoundingClientRect();
+    const centered = camera.aimCentered();
+    ms.x = centered ? r.width / 2 : e.clientX - r.left;
+    ms.y = centered ? r.height / 2 : e.clientY - r.top;
+    ms.ndc = [(ms.x / r.width) * 2 - 1, -(ms.y / r.height) * 2 + 1];
+    world.emitMouse('Move');
+  });
+  const overGuiTarget = (e) => e.target !== canvas && root.contains(e.target);
+  window.addEventListener('pointermove', (e) => {
+    if (e.pointerType === 'touch' || !world.input2018) return;
+    const locked = document.pointerLockElement === canvas;
+    if (!locked && overGuiTarget(e)) {
+      const r = canvas.getBoundingClientRect();
+      ms.x = e.clientX - r.left;
+      ms.y = e.clientY - r.top;
+    }
+    const at = locked ? null : [e.clientX, e.clientY];
+    if (locked || e.target === canvas) world.input2018.mouseMove(e.movementX || 0, e.movementY || 0, false, at);
+    else if (overGuiTarget(e)) world.input2018.mouseMove(e.movementX || 0, e.movementY || 0, true, at);
+  });
+  canvas.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'touch') return;
+    world.ensureAudio();
+    if (gui.isTyping()) document.activeElement.blur();
+    relock();
+    if (world.input2018) world.input2018.buttonDown(e.button, false, document.pointerLockElement === canvas ? null : [e.clientX, e.clientY]);
+    if (e.button === 0) world.mouseDown(0);
+  });
+  root.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'touch' || !world.input2018 || !overGuiTarget(e)) return;
+    world.ensureAudio();
+    const r = canvas.getBoundingClientRect();
+    ms.x = e.clientX - r.left;
+    ms.y = e.clientY - r.top;
+    world.input2018.buttonDown(e.button, true, [e.clientX, e.clientY]);
+  }, true);
+  window.addEventListener('pointerup', (e) => {
+    if (e.pointerType === 'touch') return;
+    if (world.input2018) world.input2018.buttonUp(e.button, overGuiTarget(e), document.pointerLockElement === canvas ? null : [e.clientX, e.clientY]);
+    if (e.button === 0 && ms.down) world.mouseUp(0);
+  }, true);
+  let wheelAcc = 0;
+  canvas.addEventListener('wheel', (e) => {
+    const unit = e.deltaMode === 1 ? 3 : e.deltaMode === 2 ? 1 : 100;
+    if (Math.sign(e.deltaY) !== Math.sign(wheelAcc)) wheelAcc = 0;
+    wheelAcc += e.deltaY / unit;
+    while (Math.abs(wheelAcc) >= 1) {
+      wheelAcc -= Math.sign(wheelAcc);
+      world.emitMouse(e.deltaY > 0 ? 'WheelBackward' : 'WheelForward');
+      if (world.input2018) world.input2018.wheel(e.deltaY > 0 ? -1 : 1, false);
+    }
+    if (world.input2018) e.preventDefault();
+    if (Math.abs(e.deltaY) >= unit * 0.99) wheelAcc = 0;
+  }, { passive: false });
+  let last = performance.now();
+  let pingT = 0;
+  let frameMs = 1000 / (renderer.touch ? 30 : 60);
+  renderer.targetMs = frameMs;
+  if (world.era === 2018 && world.host) {
+    const gs = world.host.userSettings().findChild('GameSettings');
+    if (gs) {
+      const syncCap = () => { frameMs = 1000 / Math.max(15, Math.min(240, +gs.props.get('FramerateCap') || 60)); renderer.targetMs = frameMs; };
+      syncCap();
+      world.dm.observe({ changed: (inst, name) => { if (inst === gs && name === 'FramerateCap') syncCap(); } });
+    }
+  }
+  let due = last;
+  const loop = (now) => {
+    if (now < due - 1) {
+      requestAnimationFrame(loop);
+      return;
+    }
+    due = due + frameMs < now ? now + frameMs : due + frameMs;
+    const dt = Math.min(0.1, (now - last) / 1000);
+    last = now;
+    const f = camera.forwardFlat(), rt = camera.rightFlat();
+    const key = (code, letter) => (codes.size || !held.has(letter) ? codes.has(code) : true);
+    let fw = (key('KeyW', 'w') || held.has('arrowup') ? 1 : 0) - (key('KeyS', 's') || held.has('arrowdown') ? 1 : 0);
+    let sd = (key('KeyD', 'd') ? 1 : 0) - (key('KeyA', 'a') ? 1 : 0);
+    const tm = world.touchMove;
+    if (tm && !fw && !sd) {
+      fw = -tm[1];
+      sd = tm[0];
+    }
+    const move = [f[0] * fw + rt[0] * sd, 0, f[2] * fw + rt[2] * sd];
+    const input = { move, face: camera.faceDir(), jump: held.has(' ') || jumpQueued || world.touchJump, dismount: held.has('backspace'), forward: fw > 0.3, back: fw < -0.3, left: sd < -0.3, right: sd > 0.3 };
+    jumpQueued = false;
+    world.touchJump = false;
+    try {
+      const tCpu = performance.now();
+      world.update(dt, input);
+      camera.update(dt);
+      if (camera.aimCentered()) {
+        const cr = canvas.getBoundingClientRect();
+        ms.x = cr.width / 2;
+        ms.y = cr.height / 2;
+        ms.ndc = [0, 0];
+      }
+      const ray = renderer.pick(ms.ndc[0], ms.ndc[1]);
+      ms.overGui = false;
+      const cd = world.updateMouse(ray, renderer);
+      const icon = (world.toolMouse && world.toolMouse.props.get('Icon')) || world.mouse.props.get('Icon');
+      cursor.set(camera.shiftLock && camera.mouseLocked() && !camera.firstPerson ? CURSORS.mouseLock : icon || (cd ? CURSORS.hand : world.mouseHit && world.mouseHit.part ? CURSORS.arrow : CURSORS.far));
+      if (document.pointerLockElement === canvas || camera.aimCentered()) cursor.place(camera.aimCentered(), true);
+      const tGpu = performance.now();
+      renderer.frame(dt);
+      gui.frame();
+      if (world.era === 2018) world.updatePerfStats(dt, tGpu - tCpu, performance.now() - tGpu);
+    } catch (e) {
+      console.error(e);
+    }
+    pingT += dt;
+    if (pingT > 5) {
+      pingT = 0;
+      net.send({ t: 'ping', x: Date.now() });
+    }
+    requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
+}
+
+boot().catch((e) => {
+  console.error(e);
+  showFatal('Could not join', e.message);
+});
