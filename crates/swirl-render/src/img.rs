@@ -71,6 +71,25 @@ impl Img {
         Some(Img { w, h, px })
     }
 
+    pub fn decode_hat(b: &[u8], cap: usize) -> Option<Img> {
+        let im = Img::decode(b, 4096)?;
+        let mut tw = 1;
+        while tw < im.w {
+            tw *= 2;
+        }
+        let mut th = 1;
+        while th < im.h {
+            th *= 2;
+        }
+        tw = tw.min(cap);
+        th = th.min(cap);
+        if tw != im.w || th != im.h {
+            Some(im.resized(tw, th))
+        } else {
+            Some(im)
+        }
+    }
+
     pub fn fill_rect(&mut self, x: i64, y: i64, w: i64, h: i64, rgb: [u32; 3]) {
         let v = (255u32 << 24) | (rgb[0] << 16) | (rgb[1] << 8) | rgb[2];
         let x0 = x.max(0);

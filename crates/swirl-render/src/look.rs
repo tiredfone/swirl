@@ -54,13 +54,22 @@ impl<'a> Ctx<'a> {
     }
 
     pub fn image(&self, r: &str, depth: usize) -> Option<Img> {
+        self.image_big(r, depth, false)
+    }
+
+    pub fn image_big(&self, r: &str, depth: usize, big: bool) -> Option<Img> {
         let id = asset_id(r)?;
-        if let Some(c) = self.images.borrow().get(&id) {
+        let key = format!("{}{}", id, if big { "h" } else { "" });
+        if let Some(c) = self.images.borrow().get(&key) {
             return c.clone();
         }
         let b = self.fetch(&id)?;
         let res = if Img::is_image_bytes(&b) {
-            Img::decode(&b, 2048)
+            if big {
+                Img::decode_hat(&b, 512)
+            } else {
+                Img::decode(&b, 2048)
+            }
         } else if depth > 2 {
             None
         } else {
@@ -86,11 +95,11 @@ impl<'a> Ctx<'a> {
                 walk(r, &id, &mut found);
             }
             match found {
-                Some(u) => self.image(&u, depth + 1),
+                Some(u) => self.image_big(&u, depth + 1, big),
                 None => None,
             }
         };
-        self.images.borrow_mut().insert(id, res.clone());
+        self.images.borrow_mut().insert(key, res.clone());
         res
     }
 }
@@ -214,14 +223,4 @@ pub fn add_asset(ctx: &Ctx, look: &mut Look, id: &str, face_set: &mut bool, accs
         return;
     }
     absorb(ctx, look, &tree.roots, id, face_set, accs, tool);
-}
-
-pub fn build_look(ctx: &Ctx, _base: &Base, look: &mut Look, ids: &[String], view: &str) {
-    let mut face_set = false;
-    let mut accs: Vec<Inst> = vec![];
-    let mut tool: Option<Inst> = None;
-    for id in ids {
-        add_asset(ctx, look, id, &mut face_set, &mut accs, &mut tool);
-    }
-    let _ = (accs, tool, view);
 }

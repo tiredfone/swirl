@@ -107,11 +107,10 @@ fn main() {
             }
         }
     }
-    build_look(&ctx, &base, &mut look, &ids, &view);
+    let cfs = swirl_render::items::build_look(&ctx, &base, &mut look, &ids, &view);
     for n in &look.notes {
         eprintln!("note: {}", n);
     }
-    let cfs = part_cfs(look.tool, std::f64::consts::PI / 2.0);
     let png = draw(&base, &look, &cfs, w, h, 4, &view);
     std::fs::write(out, png).unwrap();
 }
