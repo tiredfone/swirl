@@ -17,7 +17,9 @@ export async function start(opts = {}) {
     await init({ module_or_path: new URL('./swirl_client_bg.wasm', import.meta.url) });
     setStatus('Swirl ' + client_version());
     setStatus('Requesting a server');
+    const override = new URLSearchParams(location.search).get('swirlws');
     let t = opts.ticket;
+    if (override && /^wss?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(override)) t = { ws: override, ticket: 'dev' };
     if (!t) {
       const endpoint = cfg.endpoints && cfg.endpoints.ticket;
       const r = await fetch(endpoint, {

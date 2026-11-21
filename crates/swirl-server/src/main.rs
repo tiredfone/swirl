@@ -23,7 +23,7 @@ async fn main() {
     let assets = arg("assets").unwrap_or("/var/www/assets".into());
     let bytes = std::fs::read(format!("{}/assets/{}", assets, place)).expect("place file");
     let game = Rc::new(RefCell::new(Game::load(place, &bytes, era).unwrap_or_else(|e| panic!("{}", e))));
-    let clients: Rc<RefCell<HashMap<u32, UnboundedSender<String>>>> = Rc::new(RefCell::new(HashMap::new()));
+    let clients: Rc<RefCell<HashMap<u32, (u32, UnboundedSender<String>)>>> = Rc::new(RefCell::new(HashMap::new()));
     let local = tokio::task::LocalSet::new();
     local.run_until(async move {
     let listener = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
@@ -39,10 +39,13 @@ async fn main() {
                 for l in logs {
                     eprintln!("[{}] {}", l.kind, l.msg);
                 }
-                let msg = game.borrow_mut().flush();
-                if let Some(m) = msg {
-                    for tx in clients.borrow().values() {
-                        let _ = tx.send(m.clone());
+                let players: Vec<u32> = clients.borrow().values().map(|(p, _)| *p).collect();
+                let outs = game.borrow_mut().flush_all(&players);
+                for (p, m) in outs {
+                    for (pl, tx) in clients.borrow().values() {
+                        if *pl == p {
+                            let _ = tx.send(m.clone());
+                        }
                     }
                 }
             }
@@ -63,7 +66,7 @@ async fn main() {
             let (mut tx, mut rx) = ws.split();
             let (init, player) = game.borrow_mut().join(&format!("Player{}", n));
             let (otx, mut orx) = unbounded_channel::<String>();
-            clients.borrow_mut().insert(n, otx);
+            clients.borrow_mut().insert(n, (player, otx));
             if tx.send(Message::Text(init.to_string())).await.is_err() {
                 return;
             }
@@ -74,6 +77,9 @@ async fn main() {
                         match m {
                             Some(Ok(Message::Text(t))) => {
                                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {
+                                    if v["t"] == "char" {
+                                        game.borrow_mut().message(player, &t);
+                                    }
                                     if v["t"] == "ping" {
                                         let _ = tx.send(Message::Text(serde_json::json!({"t": "pong", "x": v["x"]}).to_string())).await;
                                     }

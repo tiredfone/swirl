@@ -1,4 +1,6 @@
+use crate::character::{self, Char};
 use crate::codec;
+use std::collections::{HashMap, HashSet};
 use serde_json::{json, Value as J};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -14,6 +16,9 @@ pub struct Game {
     pub host: Host,
     next_user: i64,
     pub t: f64,
+    pub chars: HashMap<InstId, Char>,
+    pending: HashMap<InstId, Vec<J>>,
+    dirty: HashSet<InstId>,
 }
 
 impl Game {
@@ -62,7 +67,7 @@ impl Game {
         let dm = Rc::new(RefCell::new(dm));
         let mut host = Host::new(dm.clone()).map_err(|e| e.to_string())?;
         host.scan_scripts();
-        Ok(Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0 })
+        Ok(Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new() })
     }
 
     pub fn join(&mut self, name: &str) -> (J, InstId) {
@@ -91,6 +96,7 @@ impl Game {
         };
         let players = self.dm.borrow().services["Players"];
         self.host.fire(players, "PlayerAdded", vec![swirl_lua::host::Wire::I(player)]);
+        self.spawn_character(player, name);
         let msg = json!({
             "t": "init", "place": self.place_id, "era": self.era, "you": player,
             "user": { "id": uid, "name": name }, "snap": snap, "asm": [], "anims": [], "terrain": J::Null
@@ -98,14 +104,121 @@ impl Game {
         (msg, player)
     }
 
+    pub fn spawn_character(&mut self, player: InstId, name: &str) {
+        let mut dm = self.dm.borrow_mut();
+        let ws = dm.services["Workspace"];
+        let origin = character::spawn_origin(&dm, ws);
+        match character::build(&mut dm, ws, player, name, origin) {
+            Ok(ch) => {
+                let own = json!({"t": "own", "id": ch.model, "s": ch.seq, "c": ch.cf});
+                self.pending.entry(player).or_default().push(own);
+                self.chars.insert(ch.model, ch);
+            }
+            Err(e) => eprintln!("character spawn failed: {}", e),
+        }
+    }
+
     pub fn leave(&mut self, player: InstId) {
-        self.dm.borrow_mut().destroy(player);
+        let models: Vec<InstId> = self.chars.iter().filter(|(_, c)| c.player == player).map(|(m, _)| *m).collect();
+        let mut dm = self.dm.borrow_mut();
+        for m in models {
+            dm.destroy(m);
+            self.chars.remove(&m);
+        }
+        dm.destroy(player);
+        self.pending.remove(&player);
+    }
+
+    pub fn message(&mut self, player: InstId, text: &str) {
+        let v: J = match serde_json::from_str(text) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        if v["t"] == "char" {
+            let arr = |k: &str, n: usize| -> Option<Vec<f64>> {
+                let a = v[k].as_array()?;
+                if a.len() < n {
+                    return None;
+                }
+                let o: Vec<f64> = a.iter().take(n).map(|x| x.as_f64().unwrap_or(f64::NAN)).collect();
+                if o.iter().all(|x| x.is_finite()) {
+                    Some(o)
+                } else {
+                    None
+                }
+            };
+            let (cf, vel) = match (arr("c", 12), arr("v", 3)) {
+                (Some(c), Some(vv)) => (c, vv),
+                _ => return,
+            };
+            let seq = v["s"].as_i64().unwrap_or(0);
+            let state = v["st"].as_u64().unwrap_or(7) as u8;
+            let model = match self.chars.iter().find(|(_, c)| c.player == player) {
+                Some((m, _)) => *m,
+                None => return,
+            };
+            let mut dm = self.dm.borrow_mut();
+            let ch = self.chars.get_mut(&model).unwrap();
+            if seq < ch.seq {
+                return;
+            }
+            let mut c12 = [0.0; 12];
+            c12.copy_from_slice(&cf);
+            character::apply_cf(&mut dm, ch, c12);
+            ch.vel = [vel[0], vel[1], vel[2]];
+            ch.state = state;
+            self.dirty.insert(model);
+        }
     }
 
     pub fn tick(&mut self, dt: f64) -> Vec<LogLine> {
         self.t += dt;
         self.host.tick(self.t);
         self.host.take_logs()
+    }
+
+    pub fn flush_all(&mut self, players: &[InstId]) -> Vec<(InstId, String)> {
+        let ops: Vec<J> = {
+            let mut dm = self.dm.borrow_mut();
+            if dm.journal.is_empty() {
+                vec![]
+            } else {
+                let journal = std::mem::take(&mut dm.journal);
+                codec::ops_for(&dm, &self.roots, &journal)
+            }
+        };
+        let dirty: Vec<InstId> = self.dirty.drain().collect();
+        let mut out = vec![];
+        for &p in players {
+            let mut msg = serde_json::Map::new();
+            msg.insert("t".into(), json!("rep"));
+            msg.insert("o".into(), J::Array(ops.clone()));
+            let ch: Vec<J> = dirty
+                .iter()
+                .filter_map(|m| self.chars.get(m))
+                .filter(|c| c.player != p)
+                .map(|c| {
+                    let r = |x: f64| (x * 10000.0).round() / 10000.0;
+                    let mut rec: Vec<J> = vec![json!(c.model)];
+                    rec.extend(c.cf.iter().map(|x| json!(r(*x))));
+                    rec.extend(c.vel.iter().map(|x| json!((x * 100.0).round() / 100.0)));
+                    rec.push(json!(c.state));
+                    J::Array(rec)
+                })
+                .collect();
+            if !ch.is_empty() {
+                msg.insert("ch".into(), J::Array(ch));
+            }
+            if let Some(after) = self.pending.remove(&p) {
+                if !after.is_empty() {
+                    msg.insert("after".into(), J::Array(after));
+                }
+            }
+            if msg.len() > 2 || !ops.is_empty() {
+                out.push((p, J::Object(msg).to_string()));
+            }
+        }
+        out
     }
 
     pub fn flush(&mut self) -> Option<String> {

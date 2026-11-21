@@ -31,7 +31,7 @@ const pass = acct.password || acct.Password;
     const r = await fetch('/api/login', { method: 'POST', body: new URLSearchParams({ _csrf: t, Username: u, Password: pw }), credentials: 'same-origin' });
     return r.status;
   }, user, pass);
-  const url = 'http://127.0.0.1/play/' + place + (version ? '?swirl=' + version : '');
+  const url = 'http://127.0.0.1/play/' + place + (version ? '?swirl=' + version : '') + (process.env.SWIRLWS ? '&swirlws=' + encodeURIComponent(process.env.SWIRLWS) : '');
   await pg.evaluateOnNewDocument(() => { window.__ready = false; });
   await pg.goto(url, { waitUntil: 'domcontentloaded' });
   await new Promise((r) => setTimeout(r, 10000));

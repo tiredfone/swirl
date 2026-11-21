@@ -2026,7 +2026,7 @@ dependencies = [
 
 [[package]]
 name = "swirl-client"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "swirl-net",
  "wasm-bindgen",
@@ -2035,7 +2035,7 @@ dependencies = [
 
 [[package]]
 name = "swirl-core"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "ruzstd",
  "serde_json",
@@ -2059,7 +2059,7 @@ dependencies = [
 
 [[package]]
 name = "swirl-lua"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "mlua",
  "swirl-core",
@@ -2067,7 +2067,7 @@ dependencies = [
 
 [[package]]
 name = "swirl-net"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "serde_json",
  "swirl-core",
@@ -2075,14 +2075,14 @@ dependencies = [
 
 [[package]]
 name = "swirl-physics"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "swirl-core",
 ]
 
 [[package]]
 name = "swirl-render"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "jpeg-decoder",
  "png",
@@ -2093,7 +2093,7 @@ dependencies = [
 
 [[package]]
 name = "swirl-server"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "futures-util",
  "serde_json",
@@ -2105,7 +2105,7 @@ dependencies = [
 
 [[package]]
 name = "swirl-vanilla"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "png",
  "swirl-core",

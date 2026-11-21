@@ -182,6 +182,18 @@ impl DataModel {
         Ok(())
     }
 
+    pub fn get_mut_name(&mut self, id: InstId, name: &str) {
+        if let Some(i) = self.get_mut(id) {
+            i.name = name.to_string();
+        }
+    }
+
+    pub fn set_prop_quiet(&mut self, id: InstId, name: &str, value: Val) {
+        if let Some(i) = self.get_mut(id) {
+            i.props.insert(name.to_string(), value);
+        }
+    }
+
     pub fn get_prop(&self, id: InstId, name: &str) -> Option<&Val> {
         let i = self.get(id)?;
         let canon = classes::canonical_prop(&i.class, name)?;
