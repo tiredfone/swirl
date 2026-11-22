@@ -271,7 +271,7 @@ impl DataModel {
             let i = self.get(id)?;
             (i.class.clone(), i.name.clone(), i.props.clone(), i.tags.clone(), i.children.clone())
         };
-        if !classes::is_creatable(&class) {
+        if classes::is_service(&class) {
             return None;
         }
         let n = self.alloc(&class, &name);
@@ -314,7 +314,7 @@ impl DataModel {
         use crate::rbx::Value;
         let id = if classes::is_service(&x.cls) {
             self.service(&x.cls).ok()?
-        } else if classes::is_creatable(&x.cls) {
+        } else if classes::class_info(&x.cls).is_none() || classes::is_creatable(&x.cls) {
             let id = self.alloc(&x.cls, &x.name);
             self.set_parent(id, Some(parent)).ok()?;
             id

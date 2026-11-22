@@ -20,14 +20,19 @@ const game = new Game(placeId, {
 await game.start();
 await game.join(1, { id: 132, name: 'TestingAccount', membership: 0, age: 100, dev: true, perks: null, avatarType: 'R6', scale: null, animations: [] });
 await new Promise((r) => setTimeout(r, ms));
+if (process.env.FINDCOIN) { const w = game.dm.root; const cs = w.descendants().filter((d) => d.props.get('Name') === 'Coin'); console.log('coins', cs.length, cs.slice(0,3).map((c) => { const p = []; for (let x = c; x; x = x.parent) p.push(x.props.get('Name')); return c.ClassName + ' ' + p.join('<'); }).join(' ; ')); }
 game.stop();
 const out = process.argv[5] || `/tmp/swirl/par/${placeId}.choc.log`;
 const fs = await import('fs');
 fs.writeFileSync(out, lines.join('\n') + '\n');
 const kinds = {};
+const repKeys = {};
 for (const s of sent) {
-  const t = JSON.parse(s).t;
-  kinds[t] = (kinds[t] || 0) + 1;
+  const m = JSON.parse(s);
+  kinds[m.t] = (kinds[m.t] || 0) + 1;
+  if (m.t === 'rep') for (const k of Object.keys(m)) if (k !== 't') repKeys[k] = (repKeys[k] || 0) + 1;
 }
+if (process.env.REPKEYS) console.log('rep keys', JSON.stringify(repKeys));
+if (process.env.REPOPS) { const sig = {}; for (const s of sent) { const m = JSON.parse(s); if (m.t === 'rep' && m.o) for (const o of m.o) { const k = o[0] + ':' + (o[0] === 'p' ? o[2] : ''); sig[k] = (sig[k] || 0) + 1; } } console.log('ops', JSON.stringify(sig)); const ns = []; for (const s of sent) { const m = JSON.parse(s); if (m.t === 'rep' && m.o) for (const o of m.o) if (o[0] === 'n') ns.push(o[1][0].slice(0, 4).join('|')); } console.log('n ops', JSON.stringify(ns.slice(0, 12))); const ids = {}; for (const s of sent) { const m = JSON.parse(s); if (m.t === 'rep' && m.o) for (const o of m.o) if (o[0] === 'p' && o[2] === 'CFrame') ids[o[1]] = (ids[o[1]] || 0) + 1; } const names = Object.entries(ids).map(([id, n]) => [game.dm.byId.get(+id) ? game.dm.byId.get(+id).getFullName ? game.dm.byId.get(+id).getFullName() : game.dm.byId.get(+id).props.get('Name') : id, n]); console.log('cframe ops', JSON.stringify(names).slice(0, 500)); }
 console.log(JSON.stringify(kinds));
 process.exit(0);

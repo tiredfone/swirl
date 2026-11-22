@@ -56,7 +56,7 @@ pub struct Game {
     pub(crate) last_chat: HashMap<InstId, f64>,
     pub api: crate::api::Shared,
     pub physics: Rc<RefCell<swirl_physics::Physics>>,
-    pub(crate) npcs: crate::npc::Npcs,
+    pub npcs: crate::npc::Npcs,
     pub(crate) frame: u64,
     pub(crate) ph_cache: Vec<[f64; 16]>,
     pub(crate) asm_sent: HashMap<InstId, Vec<i64>>,
@@ -252,6 +252,7 @@ impl Game {
         if let Some(m) = spawned {
             self.physics.borrow_mut().exclude_model(&self.dm.borrow(), m);
             self.host.scan_subtree(m);
+            self.host.scan_subtree(player);
         }
         self.fill_backpack(player);
     }
@@ -722,6 +723,7 @@ impl Game {
 
     pub fn tick(&mut self, dt: f64) -> Vec<LogLine> {
         self.t += dt;
+        self.api.borrow_mut().now_ms = self.t * 1000.0;
         self.host.tick(self.t);
         {
             let mut a = self.api.borrow_mut();

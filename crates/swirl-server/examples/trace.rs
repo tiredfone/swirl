@@ -8,8 +8,11 @@ fn main() {
     let ticks: usize = a[3].parse().unwrap();
     let model = a.get(5).cloned().unwrap_or("Dummy".into());
     swirl_server::character::set_content_dir(&swirl_server::config::default_data_dir());
-    let bytes = std::fs::read(format!("/tmp/swirl/fakeassets/assets/{}", place)).unwrap();
-    let mut g = Game::load_with(place, &bytes, era, "/tmp/swirl/fakeassets", "/tmp/swirl/trace-store").unwrap();
+    let bytes = std::fs::read(format!("{}/assets/{}", std::env::var("ASSETS").unwrap_or("/tmp/swirl/fakeassets".into()), place)).unwrap();
+    let mut g = Game::load_with(place, &bytes, era, &std::env::var("ASSETS").unwrap_or("/tmp/swirl/fakeassets".into()), "/tmp/swirl/trace-store").unwrap();
+    if let Ok(src) = std::env::var("RUN") {
+        g.run_code(&src, "trace");
+    }
     let mut trace: Vec<serde_json::Value> = vec![];
     let mut lines = String::new();
     for _ in 0..ticks {
@@ -40,6 +43,34 @@ fn main() {
             }
         }
         trace.push(serde_json::Value::Array(row));
+    }
+    if std::env::var("COUNT").is_ok() {
+        let dm = g.dm.borrow();
+        let ws = dm.services["Workspace"];
+        let mut all = vec![];
+        dm.descendants(ws, &mut all);
+        let mut cnt: std::collections::BTreeMap<String, usize> = Default::default();
+        for i in all {
+            *cnt.entry(dm.get(i).unwrap().class.clone()).or_default() += 1;
+        }
+        eprintln!("{:?}", cnt);
+    }
+    if std::env::var("NPCS").is_ok() {
+        let dm = g.dm.borrow();
+        eprintln!("tracked npcs: {}", g.npcs.len());
+        let ws = dm.services["Workspace"];
+        let mut all = vec![];
+        dm.descendants(ws, &mut all);
+        for m in all {
+            if dm.get(m).map(|i| i.class == "Model").unwrap_or(false) {
+                if let Some(h) = dm.find_child_of_class(m, "Humanoid") {
+                    let torso = swirl_physics::humanoid::root_of(&dm, m);
+                    let anch = torso.map(|t| matches!(dm.get_prop(t, "Anchored"), Some(Val::Bool(true))));
+                    let hp = dm.get_prop(h, "Health");
+                    eprintln!("humanoid model {} torso {:?} anchored {:?} head {} tracked {} health {:?}", dm.full_name(m), torso.map(|t| dm.name(t).to_string()), anch, dm.find_child(m, "Head", false).is_some(), g.npcs.contains_key(&m), hp);
+                }
+            }
+        }
     }
     if std::env::var("DBG").is_ok() {
         let dm = g.dm.borrow();

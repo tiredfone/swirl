@@ -5,6 +5,8 @@ process.env.CHOCOLATE_DATA_DIR = process.env.CHOCOLATE_DATA_DIR || '/tmp/claude-
 process.env.CHOCOLATE_KEY = 'parity-dummy';
 const { Game } = await import(CH + '/server/game.js');
 const lines = [];
+let simNow = 0;
+Date.now = () => simNow;
 const origTick = Game.prototype.tick;
 Game.prototype.tick = function () {};
 const game = new Game(+placeId, { jobId: 'trace', kind: 'public', privateId: 0, allowGear: true, era: +era, send: () => {}, kick: () => {}, log: (l) => lines.push(l.replace(/^\[place [^\]]+\] /, '')) });
@@ -12,6 +14,7 @@ await game.start();
 const trace = [];
 const ws = game.dm.services.get('Workspace');
 for (let i = 0; i < +ticks; i++) {
+  simNow = (i + 1) * (1000 / 30);
   origTick.call(game);
   const row = [];
   const m = ws.children.find((c) => c.props.get('Name') === (model || 'Dummy'));

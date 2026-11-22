@@ -46,7 +46,8 @@ pub struct ApiState {
     pub social: Vec<SocialReq>,
     pub directed: Vec<(InstId, J)>,
     pub assets_wanted: Vec<(u32, u64)>,
-    pub path_cache: HashMap<String, (std::time::Instant, (i32, Vec<([f64; 3], bool)>))>,
+    pub path_cache: HashMap<String, (f64, (i32, Vec<([f64; 3], bool)>))>,
+    pub now_ms: f64,
     pub info_cache: HashMap<String, (std::time::Instant, Option<J>)>,
 }
 
@@ -107,6 +108,7 @@ pub fn new_state(assets_dir: &str, data_dir: &str, place_id: u64, era: i32) -> S
         directed: vec![],
         assets_wanted: vec![],
         path_cache: HashMap::new(),
+        now_ms: 0.0,
         info_cache: HashMap::new(),
     }))
 }
@@ -552,9 +554,9 @@ impl ApiHandler for Api {
                 let radius = num(args, 2).filter(|r| *r != 0.0).unwrap_or(2.0);
                 let height = num(args, 3).filter(|r| *r != 0.0).unwrap_or(5.0);
                 let can_jump = !matches!(args.get(4), Some(Wire::B(false)));
-                let key = [start[0] / 4.0, start[2] / 4.0, goal[0] / 4.0, goal[2] / 4.0].iter().map(|v| format!("{}", v.round() as i64)).collect::<Vec<_>>().join(",");
-                let now = std::time::Instant::now();
-                let cached = st.path_cache.get(&key).filter(|(t, _)| now.duration_since(*t).as_millis() < 400).map(|(_, r)| (r.0, r.1.clone()));
+                let key = [start[0] / 4.0, start[2] / 4.0, goal[0] / 4.0, goal[2] / 4.0].iter().map(|v| format!("{}", (v + 0.5).floor() as i64)).collect::<Vec<_>>().join(",");
+                let now = st.now_ms;
+                let cached = st.path_cache.get(&key).filter(|(t, _)| now - *t < 400.0).map(|(_, r)| (r.0, r.1.clone()));
                 let (status, pts) = match cached {
                     Some((s, mut p)) => {
                         if let Some(f) = p.first_mut() {
