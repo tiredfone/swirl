@@ -704,9 +704,9 @@ checksum = "f70749695b063ecbf6b62949ccccde2e733ec3ecbbd71d467dca4e5c6c97cca0"
 
 [[package]]
 name = "glam"
-version = "0.33.12"
+version = "0.33.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37bfe73dc8ec21f54d181e5a60554327ec3f1c600c455a75ccbfc65d2106a6c4"
+checksum = "928452f9c953e142b2f0973e4bd5f34445fcaa8069556ea97a3c9d34d15a4cf8"
 dependencies = [
  "approx",
  "libm",
@@ -719,7 +719,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28d74079318e3a077bd3d15faa90fde24fa37bb9f157f92f853e6019a15fd413"
 dependencies = [
  "approx",
- "glam 0.33.12",
+ "glam 0.33.10",
  "nalgebra",
  "num-traits",
  "simba",
@@ -1297,7 +1297,7 @@ dependencies = [
  "glam 0.30.10",
  "glam 0.31.1",
  "glam 0.32.1",
- "glam 0.33.12",
+ "glam 0.33.10",
  "matrixmultiply",
  "nalgebra-macros",
  "num-complex",
@@ -1942,9 +1942,9 @@ dependencies = [
 
 [[package]]
 name = "rapier3d"
-version = "0.36.0"
+version = "0.36.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2e2b20538584bb3ba5bfe6a66c2d9a242ee17d15e5398be0fa35279c7d73739"
+checksum = "033e2edc815d61ab97bd74ed5d1cbea5ebe575218774a7cfedbd3551f0033317"
 dependencies = [
  "approx",
  "arrayvec",
@@ -2348,9 +2348,9 @@ dependencies = [
 
 [[package]]
 name = "smallvec"
-version = "1.16.6"
+version = "1.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3244542535d5de959d90ec55d1b5ff0fd2bb7b1310223907d5f11932847f7b59"
+checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
 
 [[package]]
 name = "smol_str"

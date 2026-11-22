@@ -41,9 +41,10 @@ async function getTicket() {
     counts[m.t] = (counts[m.t] || 0) + 1;
     if (m.t === 'init') console.log('init', m.snap ? m.snap.length : 0, 'records, era', m.era, 'user', m.user);
     if (m.t === 'kick') console.log('kick', m.m);
+    if (m.t === 'mktr' || m.t === 'pver') console.log(JSON.stringify(m).slice(0, 300));
     if (m.t === 'sys' || m.t === 'out' || m.t === 'log') prints.push(JSON.stringify(m).slice(0, 160));
   });
   ws.on('close', () => console.log('closed'));
-  ws.on('open', () => console.log('open'));
+  ws.on('open', () => { console.log('open'); if (process.env.SEND) setTimeout(() => ws.send(process.env.SEND), 2500); });
   setTimeout(() => { console.log(JSON.stringify(counts)); console.log(prints.slice(0, 15).join('\n')); ws.close(); setTimeout(() => process.exit(0), 300); }, (+secs || 6) * 1000);
 })();

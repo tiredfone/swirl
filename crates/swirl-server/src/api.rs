@@ -45,6 +45,7 @@ pub struct ApiState {
     pub token: u32,
     pub social: Vec<SocialReq>,
     pub directed: Vec<(InstId, J)>,
+    pub receipt_results: Vec<(u32, String)>,
     pub assets_wanted: Vec<(u32, u64)>,
     pub path_cache: HashMap<String, (f64, (i32, Vec<([f64; 3], bool)>))>,
     pub now_ms: f64,
@@ -64,6 +65,9 @@ pub enum SocialKind {
     Bool(&'static str),
     Info,
     Award,
+    Mkt(InstId, i64, u8),
+    Pending(InstId),
+    Grant,
 }
 
 pub struct SocialReq {
@@ -106,6 +110,7 @@ pub fn new_state(assets_dir: &str, data_dir: &str, place_id: u64, era: i32) -> S
         token: 1_000_000,
         social: vec![],
         directed: vec![],
+        receipt_results: vec![],
         assets_wanted: vec![],
         path_cache: HashMap::new(),
         now_ms: 0.0,
@@ -124,7 +129,7 @@ pub const METHODS: &[&str] = &[
     "GetRootPart", "GetTouchingParts", "BreakJoints", "breakJoints", "MakeJoints", "makeJoints", "__ComputePath",
     "MoveTo", "moveTo", "TranslateBy", "GetModelCFrame", "getModelCFrame", "GetModelSize", "getModelSize", "GetExtentsSize", "GetPrimaryPartCFrame", "SetPrimaryPartCFrame",
     "GetPivot", "PivotTo",
-    "GetTeams", "GetMinutesAfterMidnight", "SetMinutesAfterMidnight", "getMinutesAfterMidnight", "setMinutesAfterMidnight",
+    "__receiptResult", "GetTeams", "GetMinutesAfterMidnight", "SetMinutesAfterMidnight", "getMinutesAfterMidnight", "setMinutesAfterMidnight",
 ];
 
 fn user_id_of(d: &DataModel, w: Option<&Wire>) -> i64 {
@@ -200,6 +205,7 @@ impl ApiState {
                 let msg = r.as_ref().and_then(|j| if awarded { j["message"].as_str().map(|m| m.to_string()) } else { None });
                 (Ok(vec![Wire::B(awarded)]), msg)
             }
+            SocialKind::Mkt(..) | SocialKind::Pending(_) | SocialKind::Grant => (Ok(vec![]), None),
             SocialKind::Info => match r.and_then(|j| if j["info"].is_null() { None } else { Some(j["info"].clone()) }) {
                 Some(info) => (Ok(vec![json_wire(&info)]), None),
                 None => (Err("Invalid asset id".into()), None),
@@ -474,6 +480,11 @@ impl ApiHandler for Api {
                 Some(Res::Ok(vec![Wire::List(list)]))
             }
             "GetTranslatorForPlayer" => Some(Res::Ok(vec![Wire::Nil])),
+            "__receiptResult" if class == "MarketplaceService" => {
+                let tok = num(args, 0).map(|n| n as u32).unwrap_or(0);
+                st.receipt_results.push((tok, text(args, 1)));
+                Some(Res::Ok(vec![]))
+            }
             "FindPartOnRay" | "findPartOnRay" | "FindPartOnRayWithIgnoreList" | "findPartOnRayWithIgnoreList" | "FindPartOnRayWithWhitelist" if class == "Workspace" => {
                 let ray = match args.first() {
                     Some(Wire::List(l)) if l.len() == 6 => l.iter().map(|w| if let Wire::N(n) = w { *n } else { 0.0 }).collect::<Vec<f64>>(),

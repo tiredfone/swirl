@@ -55,6 +55,14 @@ pub struct Game {
     pub anim_state: HashMap<(InstId, String), J>,
     pub(crate) last_chat: HashMap<InstId, f64>,
     pub api: crate::api::Shared,
+    pub(crate) mkt_ids: HashMap<u32, i64>,
+    pub(crate) bought: HashMap<InstId, HashSet<String>>,
+    pub(crate) receipt_busy: HashSet<InstId>,
+    pub(crate) receipt_queue: HashMap<InstId, Vec<J>>,
+    pub(crate) receipt_wait: HashMap<u32, (InstId, J)>,
+    pub(crate) receipt_seq: u32,
+    pub(crate) receipt_retry: Vec<(f64, InstId)>,
+    pub(crate) mkt_window: HashMap<InstId, (f64, u32)>,
     pub physics: Rc<RefCell<swirl_physics::Physics>>,
     pub npcs: crate::npc::Npcs,
     pub(crate) frame: u64,
@@ -152,7 +160,7 @@ impl Game {
                 host.scan_subtree(id);
             }
         }
-        let mut g = Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], anim_state: HashMap::new(), last_chat: HashMap::new(), api, physics, npcs: crate::npc::Npcs::new(), frame: 0, ph_cache: vec![], asm_sent: HashMap::new(), asm_seen: 0, asm_diff: None, ph_far: HashMap::new(), ph_n: HashMap::new(), flush_at: 0.0, allow_gear: true, pre_logs: vec![], kicks: vec![] };
+        let mut g = Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], anim_state: HashMap::new(), last_chat: HashMap::new(), api, mkt_ids: HashMap::new(), bought: HashMap::new(), receipt_busy: HashSet::new(), receipt_queue: HashMap::new(), receipt_wait: HashMap::new(), receipt_seq: 0, receipt_retry: vec![], mkt_window: HashMap::new(), physics, npcs: crate::npc::Npcs::new(), frame: 0, ph_cache: vec![], asm_sent: HashMap::new(), asm_seen: 0, asm_diff: None, ph_far: HashMap::new(), ph_n: HashMap::new(), flush_at: 0.0, allow_gear: true, pre_logs: vec![], kicks: vec![] };
         g.scan_npcs_all();
         for _ in 0..3 {
             g.host.tick(0.0);
@@ -225,6 +233,9 @@ impl Game {
             (player, snap)
         };
         self.looks.insert(player, look);
+        if self.era == 2018 {
+            self.receipt_retry.push((self.t + 8.0, player));
+        }
         for ((_, _), m) in self.anim_state.iter() {
             self.remote_out.push((vec![player], m.clone()));
         }
@@ -454,12 +465,98 @@ impl Game {
     }
 
     pub fn social_done(&mut self, token: u32, kind: crate::api::SocialKind, r: Option<J>) {
+        use crate::api::SocialKind;
+        match kind {
+            SocialKind::Mkt(pl, k, op) => {
+                let reply = match op {
+                    0 => json!({"info": r.as_ref().map(|j| j["info"].clone()).unwrap_or(J::Null)}),
+                    1 => json!({"owns": r.as_ref().and_then(|j| j["owns"].as_bool()).unwrap_or(false)}),
+                    2 => json!({"robux": r.as_ref().and_then(|j| j["robux"].as_i64()).unwrap_or(0)}),
+                    _ => {
+                        let success = r.as_ref().and_then(|j| j["success"].as_bool()).unwrap_or(false);
+                        let status = r.as_ref().and_then(|j| j["status"].as_str()).unwrap_or("Error").to_string();
+                        let mut out = json!({"success": success, "status": status});
+                        if success || status == "AlreadyOwned" {
+                            let key = format!("{}:{}", if op == 4 { "product" } else { "asset" }, self.mkt_ids.get(&token).copied().unwrap_or(0));
+                            self.bought.entry(pl).or_default().insert(key);
+                        }
+                        if success && op == 4 {
+                            let receipt = r.as_ref().map(|j| j["receipt"].to_string().trim_matches('"').to_string()).unwrap_or_default();
+                            out["receipt"] = json!(receipt);
+                            self.remote_out.push((vec![pl], json!({"t": "pver", "receipt": receipt, "product": self.mkt_ids.get(&token).copied().unwrap_or(0)})));
+                            self.queue_receipts(pl);
+                        }
+                        out
+                    }
+                };
+                self.mkt_ids.remove(&token);
+                self.remote_out.push((vec![pl], json!({"t": "mktr", "k": k, "r": reply})));
+                return;
+            }
+            SocialKind::Pending(pl) => {
+                let list: Vec<J> = r.as_ref().and_then(|j| j["receipts"].as_array().cloned()).unwrap_or_default();
+                self.receipt_busy.remove(&pl);
+                if !list.is_empty() {
+                    self.receipt_queue.entry(pl).or_default().extend(list);
+                    self.next_receipt(pl);
+                }
+                return;
+            }
+            SocialKind::Grant => return,
+            _ => {}
+        }
         let (res, msg) = self.api.borrow_mut().finish_social(kind, r);
         if let Some(m) = msg {
             let text: String = m.chars().take(200).collect();
             self.remote_out.push((vec![], json!({"t": "sys", "m": text})));
         }
         self.host.resolve(token, res);
+    }
+
+    pub fn queue_receipts(&mut self, pl: InstId) {
+        if self.era != 2018 || self.receipt_busy.contains(&pl) {
+            return;
+        }
+        self.receipt_busy.insert(pl);
+        let uid = match self.dm.borrow().get_prop(pl, "userId") {
+            Some(Val::Num(n)) => *n as i64,
+            _ => 0,
+        };
+        let mut a = self.api.borrow_mut();
+        a.token += 1;
+        let token = a.token;
+        let place = a.place_id;
+        a.social.push(crate::api::SocialReq { token, body: json!({"action": "pendingReceipts", "userId": uid, "placeId": place}), kind: crate::api::SocialKind::Pending(pl) });
+    }
+
+    fn next_receipt(&mut self, pl: InstId) {
+        if self.receipt_wait.values().any(|(p, _)| *p == pl) {
+            return;
+        }
+        let rc = match self.receipt_queue.get_mut(&pl).and_then(|q| if q.is_empty() { None } else { Some(q.remove(0)) }) {
+            Some(r) => r,
+            None => return,
+        };
+        let uid = match self.dm.borrow().get_prop(pl, "userId") {
+            Some(Val::Num(n)) => *n as i64,
+            _ => 0,
+        };
+        self.receipt_seq += 1;
+        let token = 900_000 + self.receipt_seq;
+        self.receipt_wait.insert(token, (pl, rc.clone()));
+        let mps = match self.dm.borrow_mut().service("MarketplaceService") {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        let info = Wire::Dict(vec![
+            ("PlayerId".into(), Wire::N(uid as f64)),
+            ("PlaceIdWherePurchased".into(), Wire::N(self.place_id as f64)),
+            ("PurchaseId".into(), Wire::S(rc["id"].to_string().trim_matches('"').to_string())),
+            ("ProductId".into(), Wire::N(rc["productId"].as_f64().unwrap_or(0.0))),
+            ("CurrencyType".into(), Wire::E("CurrencyType".into(), 1.0)),
+            ("CurrencySpent".into(), Wire::N(rc["robux"].as_f64().unwrap_or(0.0))),
+        ]);
+        self.host.fire(mps, "__Receipt", vec![Wire::N(token as f64), info]);
     }
 
     pub fn asset_requests(&mut self) -> Vec<(u32, u64)> {
@@ -557,6 +654,82 @@ impl Game {
                 let others: Vec<InstId> = ps.into_iter().filter(|p| *p != player).collect();
                 if !others.is_empty() {
                     self.remote_out.push((others, m));
+                }
+            }
+            "mkt" => {
+                let (win, cnt) = self.mkt_window.get(&player).copied().unwrap_or((0.0, 0));
+                let (win, cnt) = if self.t - win > 10.0 { (self.t, 0) } else { (win, cnt) };
+                self.mkt_window.insert(player, (win, cnt + 1));
+                let k = v["k"].as_i64().unwrap_or(0);
+                if cnt + 1 > 30 {
+                    self.remote_out.push((vec![player], json!({"t": "mktr", "k": k, "r": J::Null})));
+                    return;
+                }
+                let uid = match self.dm.borrow().get_prop(player, "userId") {
+                    Some(Val::Num(n)) => *n as i64,
+                    _ => 0,
+                };
+                let id = v["id"].as_f64().unwrap_or(0.0).max(0.0).floor() as i64;
+                let kind_s = v["kind"].as_str().unwrap_or("asset");
+                let mut a = self.api.borrow_mut();
+                a.token += 1;
+                let token = a.token;
+                let place = a.place_id;
+                let (body, op) = match v["op"].as_str().unwrap_or("") {
+                    "info" => (json!({"action": "productInfo", "kind": if ["asset", "gamepass", "product"].contains(&kind_s) { kind_s } else { "asset" }, "id": id}), 0u8),
+                    "owns" => {
+                        let who = v["uid"].as_f64().unwrap_or(0.0).floor() as i64;
+                        if who <= 0 || id <= 0 {
+                            drop(a);
+                            self.remote_out.push((vec![player], json!({"t": "mktr", "k": k, "r": {"owns": false}})));
+                            return;
+                        }
+                        (json!({"action": "ownsAsset", "userId": who, "assetId": id}), 1u8)
+                    }
+                    "balance" => (json!({"action": "balance", "userId": uid}), 2u8),
+                    "buy" => {
+                        let product = kind_s == "product";
+                        let price = v["price"].as_f64().unwrap_or(0.0).floor() as i64;
+                        (json!({"action": "purchase", "userId": uid, "placeId": place, "kind": if product { "product" } else { "asset" }, "id": id, "price": price}), if product { 4u8 } else { 3u8 })
+                    }
+                    _ => {
+                        drop(a);
+                        self.remote_out.push((vec![player], json!({"t": "mktr", "k": k, "r": J::Null})));
+                        return;
+                    }
+                };
+                a.social.push(crate::api::SocialReq { token, body, kind: crate::api::SocialKind::Mkt(player, k, op) });
+                drop(a);
+                self.mkt_ids.insert(token, id);
+            }
+            "pfin" => {
+                let id = v["id"].as_f64().unwrap_or(0.0).max(0.0).floor() as i64;
+                let kind = match v["kind"].as_str() {
+                    Some("product") => "product",
+                    Some("gamepass") => "gamepass",
+                    _ => "asset",
+                };
+                let key = format!("{}:{}", if kind == "product" { "product" } else { "asset" }, id);
+                let ok = v["ok"].as_bool().unwrap_or(false) && self.bought.get(&player).map(|b| b.contains(&key)).unwrap_or(false);
+                if ok {
+                    if let Some(b) = self.bought.get_mut(&player) {
+                        b.remove(&key);
+                    }
+                }
+                let mps = match self.dm.borrow_mut().service("MarketplaceService") {
+                    Ok(m) => m,
+                    Err(_) => return,
+                };
+                match kind {
+                    "gamepass" => self.host.fire(mps, "PromptGamePassPurchaseFinished", vec![Wire::I(player), Wire::N(id as f64), Wire::B(ok)]),
+                    "asset" => self.host.fire(mps, "PromptPurchaseFinished", vec![Wire::I(player), Wire::N(id as f64), Wire::B(ok)]),
+                    _ => {
+                        let uid = match self.dm.borrow().get_prop(player, "userId") {
+                            Some(Val::Num(n)) => *n,
+                            _ => 0.0,
+                        };
+                        self.host.fire(mps, "PromptProductPurchaseFinished", vec![Wire::N(uid), Wire::N(id as f64), Wire::B(ok)]);
+                    }
                 }
             }
             "re" | "rf" if self.era == 2018 => {
@@ -747,6 +920,7 @@ impl Game {
             let casts = std::mem::take(&mut a.broadcasts);
             let directed = std::mem::take(&mut a.directed);
             let done = std::mem::take(&mut a.completions);
+            let rres = std::mem::take(&mut a.receipt_results);
             if self.t >= self.flush_at {
                 self.flush_at = self.t + 2.0;
                 a.flush();
@@ -768,6 +942,31 @@ impl Game {
             }
             for (pl, m) in directed {
                 self.remote_out.push((vec![pl], m));
+            }
+            for (tok, result) in rres {
+                if let Some((pl, rc)) = self.receipt_wait.remove(&tok) {
+                    let _ = rc.clone();
+                    if result.ends_with("PurchaseGranted") {
+                        let uid = match self.dm.borrow().get_prop(pl, "userId") {
+                            Some(Val::Num(n)) => *n as i64,
+                            _ => 0,
+                        };
+                        let mut a = self.api.borrow_mut();
+                        a.token += 1;
+                        let t = a.token;
+                        let place = a.place_id;
+                        a.social.push(crate::api::SocialReq { token: t, body: json!({"action": "grantReceipt", "receiptId": rc["id"], "userId": uid, "placeId": place}), kind: crate::api::SocialKind::Grant });
+                        drop(a);
+                        self.next_receipt(pl);
+                    } else if result != "NoHandler" {
+                        self.receipt_retry.push((self.t + 30.0, pl));
+                    }
+                }
+            }
+            let due: Vec<InstId> = self.receipt_retry.iter().filter(|(t, _)| *t <= self.t).map(|(_, p)| *p).collect();
+            self.receipt_retry.retain(|(t, _)| *t > self.t);
+            for p in due {
+                self.queue_receipts(p);
             }
         }
         for r in self.host.take_requests() {
