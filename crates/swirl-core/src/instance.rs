@@ -84,6 +84,10 @@ impl DataModel {
         self.insts.get(id as usize)?.as_ref()
     }
 
+    pub fn get_mut_inst(&mut self, id: InstId) -> Option<&mut Instance> {
+        self.get_mut(id)
+    }
+
     fn get_mut(&mut self, id: InstId) -> Option<&mut Instance> {
         self.insts.get_mut(id as usize)?.as_mut()
     }

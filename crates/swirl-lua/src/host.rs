@@ -794,6 +794,17 @@ impl Host {
             j.set(
                 "call",
                 lua.create_function(move |lua, (id, method, rest): (u32, String, mlua::Variadic<Value>)| {
+                    let method = match method.as_str() {
+                        "isDescendantOf" => "IsDescendantOf".to_string(),
+                        "isAncestorOf" => "IsAncestorOf".to_string(),
+                        "getFullName" => "GetFullName".to_string(),
+                        "clearAllChildren" => "ClearAllChildren".to_string(),
+                        "takeDamage" => "TakeDamage".to_string(),
+                        "loadCharacter" => "LoadCharacter".to_string(),
+                        "addItem" => "AddItem".to_string(),
+                        "resume" => "Resume".to_string(),
+                        _ => method,
+                    };
                     let args = decode_args(&rest);
                     let mut d = dm.borrow_mut();
                     let err = |m: &str| -> mlua::Result<Value> { Ok(Value::Table(tagged(lua, &[s(lua, "err")?, s(lua, m)?])?)) };

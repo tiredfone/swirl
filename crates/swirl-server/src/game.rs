@@ -427,6 +427,21 @@ impl Game {
         self.host.resolve(token, res);
     }
 
+    pub fn asset_requests(&mut self) -> Vec<(u32, u64)> {
+        std::mem::take(&mut self.api.borrow_mut().assets_wanted)
+    }
+
+    pub fn asset_done(&mut self, token: u32, bytes: Option<Vec<u8>>) {
+        let r = match bytes {
+            Some(b) => {
+                let mut dm = self.dm.borrow_mut();
+                crate::api::make_model(&mut dm, &b).map(|m| vec![Wire::I(m)])
+            }
+            None => Err("asset is not available".to_string()),
+        };
+        self.host.resolve(token, r);
+    }
+
     pub fn run_code(&mut self, source: &str, by: &str) {
         self.host_logs_push(format!("Running server code from {}", by));
         let made = {

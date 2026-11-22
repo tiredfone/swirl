@@ -30,6 +30,7 @@ pub struct Spec {
     pub assets: String,
     pub data_dir: String,
     pub social: Option<(crate::redeem::Redeemer, String)>,
+    pub site: Option<crate::fetch::Site>,
 }
 
 pub struct Handle {
@@ -67,6 +68,8 @@ pub fn spawn(spec: Spec) -> Handle {
                 r2.store(true, Ordering::SeqCst);
                 let (stx, mut srx) = unbounded_channel::<(u32, crate::api::SocialKind, Option<serde_json::Value>)>();
                 let social = spec.social.clone();
+                let (atx, mut arx) = unbounded_channel::<(u32, Option<Vec<u8>>)>();
+                let site = spec.site.clone();
                 let mut clients: HashMap<u32, (InstIdAlias, UnboundedSender<Out>)> = HashMap::new();
                 let mut iv = tokio::time::interval(std::time::Duration::from_millis(33));
                 iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -97,12 +100,27 @@ pub fn spawn(spec: Spec) -> Handle {
                                 }
                             }
                         }
+                        res = arx.recv() => {
+                            if let Some((token, bytes)) = res {
+                                game.asset_done(token, bytes);
+                            }
+                        }
                         res = srx.recv() => {
                             if let Some((token, kind, j)) = res {
                                 game.social_done(token, kind, j);
                             }
                         }
                         _ = iv.tick() => {
+                            for (token, id) in game.asset_requests() {
+                                let (atx, site) = (atx.clone(), site.clone());
+                                tokio::task::spawn_local(async move {
+                                    let bytes = match site {
+                                        Some(s) => s.get(&format!("/asset/?id={}", id)).await,
+                                        None => None,
+                                    };
+                                    let _ = atx.send((token, bytes));
+                                });
+                            }
                             for req in game.social_requests() {
                                 match &social {
                                     Some((r, path)) => {

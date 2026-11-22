@@ -45,6 +45,7 @@ pub struct ApiState {
     pub token: u32,
     pub social: Vec<SocialReq>,
     pub directed: Vec<(InstId, J)>,
+    pub assets_wanted: Vec<(u32, u64)>,
     pub info_cache: HashMap<String, (std::time::Instant, Option<J>)>,
 }
 
@@ -103,6 +104,7 @@ pub fn new_state(assets_dir: &str, data_dir: &str, place_id: u64, era: i32) -> S
         token: 1_000_000,
         social: vec![],
         directed: vec![],
+        assets_wanted: vec![],
         info_cache: HashMap::new(),
     }))
 }
@@ -113,6 +115,8 @@ pub const METHODS: &[&str] = &[
     "SaveInstance", "LoadInstance", "GetPlayerByUserId", "GetPlayerByID", "GetUserIdFromNameAsync", "GetNameFromUserIdAsync",
     "AwardBadge", "UserHasBadge", "PlayerOwnsAsset", "UserOwnsGamePassAsync", "PlayerHasPass", "GetProductInfo", "PlayerCanMakePurchases", "PromptPurchase",
     "PromptProductPurchase", "PromptGamePassPurchase", "Teleport", "TeleportToSpawnByName", "TeleportToPlaceInstance", "GetRobuxBalance", "PerformPurchase",
+    "LoadAsset", "loadAsset", "Insert", "FindFirstAncestor", "FindFirstAncestorOfClass", "GetDebugId", "GetServerTimeNow", "AddTag", "RemoveTag", "HasTag", "GetTags", "GetTagged",
+    "GetTeams", "GetMinutesAfterMidnight", "SetMinutesAfterMidnight", "getMinutesAfterMidnight", "setMinutesAfterMidnight",
 ];
 
 fn user_id_of(d: &DataModel, w: Option<&Wire>) -> i64 {
@@ -168,6 +172,15 @@ fn find_sequence(nodes: &[swirl_core::rbx::Inst]) -> Option<Seq> {
         }
     }
     None
+}
+
+pub fn make_model(d: &mut DataModel, bytes: &[u8]) -> Result<InstId, String> {
+    let tree = swirl_core::rbx::parse_limit(bytes, 64 * 1024 * 1024).map_err(|_| "asset is not a model".to_string())?;
+    let model = d.create_any("Model", None)?;
+    d.set_prop_quiet(model, "Name", Val::Str("Model".into()));
+    d.get_mut_name(model, "Model");
+    d.load_tree(&tree, model);
+    Ok(model)
 }
 
 impl ApiState {
@@ -453,6 +466,100 @@ impl ApiHandler for Api {
                 Some(Res::Ok(vec![Wire::List(list)]))
             }
             "GetTranslatorForPlayer" => Some(Res::Ok(vec![Wire::Nil])),
+            "LoadAsset" | "loadAsset" if class == "InsertService" => {
+                let id = num(args, 0).map(|n| n as u64).unwrap_or(0);
+                if id == 0 {
+                    return Some(Res::Err("InsertService is not available".into()));
+                }
+                match read_asset(&st.assets_dir, id) {
+                    Some(b) => match make_model(d, &b) {
+                        Ok(m) => Some(Res::Ok(vec![Wire::I(m)])),
+                        Err(e) => Some(Res::Err(e)),
+                    },
+                    None => {
+                        st.token += 1;
+                        let token = st.token;
+                        st.assets_wanted.push((token, id));
+                        Some(Res::Async(token))
+                    }
+                }
+            }
+            "Insert" if class == "InsertService" => {
+                if let (Some(Wire::I(m)), Some(ws)) = (args.first(), d.services.get("Workspace").copied()) {
+                    let _ = d.set_parent(*m, Some(ws));
+                }
+                Some(Res::Ok(vec![]))
+            }
+            "FindFirstAncestor" | "FindFirstAncestorOfClass" => {
+                let want = text(args, 0);
+                let mut cur = d.get(id).and_then(|i| i.parent);
+                while let Some(p) = cur {
+                    let i = d.get(p)?;
+                    if (method == "FindFirstAncestor" && i.name == want) || (method != "FindFirstAncestor" && i.class == want) {
+                        return Some(Res::Ok(vec![Wire::I(p)]));
+                    }
+                    cur = i.parent;
+                }
+                Some(Res::Ok(vec![Wire::Nil]))
+            }
+            "GetDebugId" => Some(Res::Ok(vec![Wire::S(format!("{}", id))])),
+            "GetServerTimeNow" => Some(Res::Ok(vec![Wire::N(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0))])),
+            "AddTag" | "RemoveTag" | "HasTag" | "GetTags" => {
+                let tag = text(args, 0);
+                let ok = d.get(id).is_some();
+                if !ok {
+                    return Some(Res::Err("Instance expected".into()));
+                }
+                let target = match args.first() {
+                    Some(Wire::I(t)) if class == "CollectionService" => *t,
+                    _ => id,
+                };
+                let tag = if class == "CollectionService" { text(args, 1) } else { tag };
+                let _ = &tag;
+                let inst = d.get_mut_inst(target)?;
+                match method {
+                    "AddTag" => {
+                        if !inst.tags.contains(&tag) {
+                            inst.tags.push(tag);
+                        }
+                        Some(Res::Ok(vec![]))
+                    }
+                    "RemoveTag" => {
+                        inst.tags.retain(|t| *t != tag);
+                        Some(Res::Ok(vec![]))
+                    }
+                    "HasTag" => Some(Res::Ok(vec![Wire::B(inst.tags.contains(&tag))])),
+                    _ => Some(Res::Ok(vec![Wire::List(inst.tags.iter().map(|t| Wire::S(t.clone())).collect())])),
+                }
+            }
+            "GetTagged" if class == "CollectionService" => {
+                let tag = text(args, 0);
+                let mut all = vec![];
+                let root = d.root;
+                d.descendants(root, &mut all);
+                let list: Vec<Wire> = all.into_iter().filter(|i| d.get(*i).map(|x| x.tags.contains(&tag)).unwrap_or(false)).map(Wire::I).collect();
+                Some(Res::Ok(vec![Wire::List(list)]))
+            }
+            "GetTeams" if class == "Teams" => {
+                let kids: Vec<Wire> = d.get(id)?.children.iter().copied().filter(|c| d.get(*c).map(|x| x.class == "Team").unwrap_or(false)).map(Wire::I).collect();
+                Some(Res::Ok(vec![Wire::List(kids)]))
+            }
+            "GetMinutesAfterMidnight" | "getMinutesAfterMidnight" if class == "Lighting" => {
+                let tod = match d.get_prop(id, "TimeOfDay") {
+                    Some(Val::Str(s)) => s.clone(),
+                    _ => "14:00:00".into(),
+                };
+                let p: Vec<f64> = tod.split(':').map(|x| x.parse().unwrap_or(0.0)).collect();
+                Some(Res::Ok(vec![Wire::N(p.first().copied().unwrap_or(0.0) * 60.0 + p.get(1).copied().unwrap_or(0.0) + p.get(2).copied().unwrap_or(0.0) / 60.0)]))
+            }
+            "SetMinutesAfterMidnight" | "setMinutesAfterMidnight" if class == "Lighting" => {
+                let m = num(args, 0).unwrap_or(0.0).rem_euclid(1440.0);
+                let h = (m / 60.0).floor();
+                let mm = (m % 60.0).floor();
+                let ss = ((m % 1.0) * 60.0).floor();
+                let _ = d.set_prop(id, "TimeOfDay", Val::Str(format!("{:02}:{:02}:{:02}", h as i64, mm as i64, ss as i64)));
+                Some(Res::Ok(vec![]))
+            }
             "AwardBadge" | "UserHasBadge" if class == "BadgeService" => {
                 let uid = num(args, 0).map(|n| n as i64).unwrap_or(0);
                 let bid = num(args, 1).map(|n| n as i64).unwrap_or(0);
