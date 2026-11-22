@@ -43,6 +43,7 @@ const shoot = async (b, port, wsPort, ref, poses) => {
   await pg.waitForFunction('window.solarLua.world.own', { timeout: 30000 });
   await wait(+(process.env.SETTLE || 9000));
   const info = await pg.evaluate(() => { document.getElementById('chocolate').style.display = 'none'; const L = window.solarLua; return { pos: L.ownPos(), era: L.world.era }; });
+  if (process.env.EVAL) { const r = await pg.evaluate(process.env.EVAL); if (process.env.EVALOUT) require('fs').writeFileSync(process.env.EVALOUT, String(r).replace(/^data:image\/png;base64,/, ''), 'base64'); else console.log('eval', JSON.stringify(r)); }
   const shots = [];
   for (let i = 0; i < poses.length; i++) {
     const [dx, dy, dz] = poses[i];
@@ -57,6 +58,7 @@ const shoot = async (b, port, wsPort, ref, poses) => {
     await pg.screenshot({ path: f });
     shots.push(f);
   }
+  if (process.env.FAILS) console.log('failures', JSON.stringify(await pg.evaluate(() => window.solarAssetFailures || [])));
   await pg.close();
   return info;
 };
@@ -68,7 +70,7 @@ const shoot = async (b, port, wsPort, ref, poses) => {
   for (const [place, era] of places) {
     const wsPort = 4500 + (place % 400);
     const args = ['--place=' + place, '--port=' + wsPort, '--site=http://127.0.0.1'].concat(era === 2018 ? ['--era=2018'] : []);
-    const sv = spawn('/var/www/swirl/target/release/swirl-server', args, { stdio: 'ignore' });
+    let sv = spawn('/var/www/swirl/target/release/swirl-server', args, { stdio: 'ignore' });
     await wait(2500);
     const dir = outDir + '/' + place;
     fs.mkdirSync(dir, { recursive: true });
@@ -76,6 +78,8 @@ const shoot = async (b, port, wsPort, ref, poses) => {
     process.env.OUT = dir;
     try {
       const sw = await shoot(b, port, wsPort, false, poses);
+      sv.kill(); await wait(800);
+      sv = spawn('/var/www/swirl/target/release/swirl-server', args, { stdio: 'ignore' }); await wait(2500);
       const ch = await shoot(b, port, wsPort, true, poses);
       console.log(place, JSON.stringify({ swirl: sw, chocolate: ch }));
     } catch (e) {

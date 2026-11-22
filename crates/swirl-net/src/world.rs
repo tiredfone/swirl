@@ -11,6 +11,17 @@ pub struct Inst {
 }
 
 #[derive(Clone, Debug)]
+pub struct DecalRef {
+    pub face: u8,
+    pub tex: String,
+    pub transp: f32,
+    pub color: [f32; 3],
+    pub spec: f32,
+    pub shiny: f32,
+    pub tile: Option<[f32; 2]>,
+}
+
+#[derive(Clone, Debug)]
 pub struct Part {
     pub id: u32,
     pub cf: [f32; 12],
@@ -19,9 +30,38 @@ pub struct Part {
     pub alpha: f32,
     pub shape: u8,
     pub mesh: Option<MeshRef>,
-    pub decals: Vec<(u8, String, f32, [f32; 4])>,
+    pub decals: Vec<DecalRef>,
     pub top: u8,
     pub bottom: u8,
+    pub material: u16,
+    pub refl: f32,
+    pub surf: [u8; 6],
+    pub truss: bool,
+    pub cast: bool,
+    pub limb: u8,
+    pub model: u32,
+    pub head_face: bool,
+    pub dmesh: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct Clothes {
+    pub shirt: Option<String>,
+    pub pants: Option<String>,
+    pub tshirt: Option<String>,
+    pub colors: [[f32; 3]; 5],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Lighting {
+    pub lamp0_dir: [f32; 3],
+    pub lamp0_color: [f32; 3],
+    pub lamp1_dir: [f32; 3],
+    pub lamp1_color: [f32; 3],
+    pub amb: [f32; 3],
+    pub shadow_tint: [f32; 3],
+    pub sun_dir: [f32; 3],
+    pub fog: Option<([f32; 3], f32, f32)>,
 }
 
 #[derive(Clone, Debug)]
@@ -31,6 +71,8 @@ pub struct MeshRef {
     pub scale: [f32; 3],
     pub off: [f32; 3],
     pub fit: bool,
+    pub unit: Option<[f32; 3]>,
+    pub vc: [f32; 3],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -43,6 +85,14 @@ pub struct Light {
 
 pub fn asset_id(s: &str) -> Option<String> {
     let low = s.to_ascii_lowercase();
+    if low.starts_with("rbxasset://") {
+        let p = s[11..].replace('\\', "/");
+        let p = p.trim_start_matches('/');
+        if p.is_empty() || p.contains("..") {
+            return None;
+        }
+        return Some(format!("c:{}", p));
+    }
     let digits = |x: &str| -> Option<String> {
         let d: String = x.chars().take_while(|c| c.is_ascii_digit()).collect();
         if d.is_empty() || d.starts_with('0') || d.len() > 18 {
@@ -601,6 +651,7 @@ impl World {
             Some(w) => w,
             None => return out,
         };
+        let era2018 = self.era == 2018;
         let mut stack = vec![ws];
         while let Some(id) = stack.pop() {
             let i = match self.insts.get(&id) {
@@ -618,39 +669,55 @@ impl World {
                 cf.copy_from_slice(&v);
             }
             let size = arr(i.props.get("Size"), 3).map(|v| [v[0], v[1], v[2]]).unwrap_or([4.0, 1.2, 2.0]);
-            let color = match arr(i.props.get("Color"), 3) {
+            let brick = i.props.get("BrickColor").and_then(|v| v.as_i64()).unwrap_or(194);
+            let color = match arr(i.props.get("Color"), 3).filter(|_| era2018) {
                 Some(c) => [c[0], c[1], c[2]],
                 None => {
-                    let b = i.props.get("BrickColor").and_then(|v| v.as_i64()).unwrap_or(194);
-                    let c = swirl_core::rbx::brick_rgb01(b);
+                    let c = swirl_core::rbx::brick_rgb01(brick);
                     [c[0] as f32, c[1] as f32, c[2] as f32]
                 }
             };
-            let mut alpha = 1.0 - i.props.get("Transparency").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-            if let Some(t) = self.local_t.get(&id) {
-                alpha *= 1.0 - t;
+            let mut transp = i.props.get("Transparency").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            if era2018 {
+                let ltm = i.props.get("LocalTransparencyModifier").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                if ltm > 0.0 {
+                    transp = 1.0 - (1.0 - transp) * (1.0 - ltm);
+                }
             }
+            if let Some(t) = self.local_t.get(&id) {
+                transp = *t;
+            }
+            let alpha = 1.0 - transp;
             let mut shape = i.props.get("shape").or(i.props.get("Shape")).and_then(|v| v.as_i64()).unwrap_or(1) as u8;
             if i.class == "WedgePart" {
                 shape = 3;
+            } else if i.class == "CornerWedgePart" {
+                shape = 5;
             }
+            let name = i.props.get("Name").and_then(|v| v.as_str()).unwrap_or("");
             let mut size = size;
+            let mut head_unit = None;
+            let mut head_vc = [1.0f32; 3];
             for &c in &i.children {
                 if let Some(ci) = self.insts.get(&c) {
                     if matches!(ci.class.as_str(), "SpecialMesh" | "BlockMesh" | "CylinderMesh") {
                         let ty = match ci.class.as_str() {
                             "BlockMesh" => 6,
-                            "CylinderMesh" => 4,
+                            "CylinderMesh" => 100,
                             _ => ci.props.get("MeshType").and_then(|v| v.as_i64()).unwrap_or(6),
                         };
-                        if ty != 5 {
-                            if let Some(sc) = arr(ci.props.get("Scale"), 3) {
-                                size = [size[0] * sc[0], size[1] * sc[1], size[2] * sc[2]];
-                            }
+                        let sc = arr(ci.props.get("Scale"), 3).map(|v| [v[0], v[1], v[2]]).unwrap_or([1.0; 3]);
+                        if ty == 0 {
+                            head_unit = Some([size[2] * sc[0], size[1] * sc[1], size[2] * sc[2]]);
+                            head_vc = arr(ci.props.get("VertexColor"), 3).map(|v| [v[0], v[1], v[2]]).unwrap_or([1.0; 3]);
+                        } else if ty != 5 {
+                            size = [size[0] * sc[0], size[1] * sc[1], size[2] * sc[2]];
                             shape = match ty {
-                                2 => 3,
+                                2 | 9 | 10 => 3,
                                 3 => 0,
-                                4 => 4,
+                                4 => 2,
+                                11 => 5,
+                                100 => 4,
                                 _ => 1,
                             };
                         }
@@ -662,7 +729,7 @@ impl World {
             if i.class == "MeshPart" {
                 if let Some(m) = i.props.get("MeshId").and_then(|v| v.as_str()).and_then(asset_id) {
                     let tex = i.props.get("TextureID").or(i.props.get("TextureId")).and_then(|v| v.as_str()).and_then(asset_id);
-                    mesh = Some(MeshRef { mesh: m, tex, scale: [1.0; 3], off: [0.0; 3], fit: true });
+                    mesh = Some(MeshRef { mesh: m, tex, scale: [1.0; 3], off: [0.0; 3], fit: true, unit: None, vc: [1.0; 3] });
                 }
             } else {
                 for &c in &i.children {
@@ -674,12 +741,21 @@ impl World {
                                     let tex = ci.props.get("TextureId").and_then(|v| v.as_str()).and_then(asset_id);
                                     let sc = arr(ci.props.get("Scale"), 3).map(|v| [v[0], v[1], v[2]]).unwrap_or([1.0; 3]);
                                     let of = arr(ci.props.get("Offset"), 3).map(|v| [v[0], v[1], v[2]]).unwrap_or([0.0; 3]);
-                                    mesh = Some(MeshRef { mesh: m, tex, scale: sc, off: of, fit: false });
+                                    let vc = arr(ci.props.get("VertexColor"), 3).map(|v| [v[0], v[1], v[2]]).unwrap_or([1.0; 3]);
+                                    mesh = Some(MeshRef { mesh: m, tex, scale: sc, off: of, fit: false, unit: None, vc });
                                 }
                             }
                             break;
                         }
                     }
+                }
+            }
+            let dmesh = i.children.iter().filter_map(|c| self.insts.get(c)).any(|c| classes::is_a(&c.class, "DataModelMesh"));
+            let mut head_face = false;
+            if mesh.is_none() {
+                if let Some(u) = head_unit {
+                    mesh = Some(MeshRef { mesh: "c:fonts/head.mesh".into(), tex: None, scale: [1.0; 3], off: [0.0; 3], fit: false, unit: Some(u), vc: head_vc });
+                    head_face = true;
                 }
             }
             let mut decals = vec![];
@@ -688,112 +764,142 @@ impl World {
                     if ci.class == "Decal" || ci.class == "Texture" {
                         if let Some(tid) = ci.props.get("Texture").and_then(|v| v.as_str()).and_then(asset_id) {
                             let face = ci.props.get("Face").and_then(|v| v.as_i64()).unwrap_or(5) as u8;
-                            let da = 1.0 - ci.props.get("Transparency").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                            if da >= 0.05 {
-                                decals.push((face, tid, da, [0.0, 0.0, 1.0, 1.0]));
+                            let own = ci.props.get("Transparency").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                            let mut t = own;
+                            let lt = if let Some(l) = self.local_t.get(&id) { *l } else if era2018 { i.props.get("LocalTransparencyModifier").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32 } else { 0.0 };
+                            if lt > 0.0 {
+                                t = 1.0 - (1.0 - own) * (1.0 - lt);
                             }
+                            if t >= 1.0 {
+                                continue;
+                            }
+                            let color = arr(ci.props.get("Color3"), 3).map(|v| [v[0], v[1], v[2]]).unwrap_or([1.0; 3]);
+                            let spec = ci.props.get("Specular").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                            let shiny = ci.props.get("Shiny").and_then(|v| v.as_f64()).unwrap_or(20.0) as f32;
+                            let tile = if ci.class == "Texture" {
+                                let u = ci.props.get("StudsPerTileU").and_then(|v| v.as_f64()).unwrap_or(2.0) as f32;
+                                let w = ci.props.get("StudsPerTileV").and_then(|v| v.as_f64()).unwrap_or(2.0) as f32;
+                                Some([if u == 0.0 { 2.0 } else { u }, if w == 0.0 { 2.0 } else { w }])
+                            } else {
+                                None
+                            };
+                            decals.push(DecalRef { face, tex: tid, transp: t, color, spec, shiny, tile });
                         }
                     }
                 }
             }
-            if let Some(par) = i.parent.and_then(|p| self.insts.get(&p)) {
-                if par.class == "Model" {
-                    let name = i.props.get("Name").and_then(|v| v.as_str()).unwrap_or("");
-                    self.clothing_decals(par, name, &mut decals);
-                }
-            }
-            if mesh.is_none() && i.props.get("Name").and_then(|v| v.as_str()) == Some("Head") {
-                for &c in &i.children {
-                    if let Some(ci) = self.insts.get(&c) {
-                        if ci.class == "SpecialMesh" && ci.props.get("MeshType").and_then(|v| v.as_i64()).unwrap_or(0) == 0 {
-                            let sc = arr(ci.props.get("Scale"), 3).map(|v| [v[0] / 1.25, v[1] / 1.25, v[2] / 1.25]).unwrap_or([1.0; 3]);
-                            mesh = Some(MeshRef { mesh: "c:fonts/head.mesh".into(), tex: None, scale: sc, off: [0.0; 3], fit: false });
-                            for d in decals.iter_mut() {
-                                if d.0 == 5 {
-                                    d.0 = 6;
-                                }
-                            }
+            let mut limb = 0u8;
+            let mut model = 0u32;
+            if let Some(pid) = i.parent {
+                if let Some(par) = self.insts.get(&pid) {
+                    if par.class == "Model" && mesh.is_none() && shape == 1 && classes::is_a(&i.class, "Part") {
+                        let has_hum = par.children.iter().filter_map(|c| self.insts.get(c)).any(|c| c.class == "Humanoid");
+                        if has_hum {
+                            limb = match name {
+                                "Torso" => 1,
+                                "Left Arm" => 2,
+                                "Right Arm" => 3,
+                                "Left Leg" => 4,
+                                "Right Leg" => 5,
+                                _ => 0,
+                            };
+                            model = pid;
                         }
                     }
                 }
             }
-            let surf = |k: &str, d: u8| i.props.get(k).and_then(|v| v.as_i64()).map(|v| v as u8).unwrap_or(d);
-            let (top, bottom) = (surf("TopSurface", 3), surf("BottomSurface", 4));
-            out.push(Part { id, cf, size, color, alpha, shape, mesh, decals, top, bottom });
+            let geti = |k: &str| i.props.get(k).and_then(|v| v.as_i64());
+            let surf_of = |k: &str, d: u8| geti(k).map(|v| v as u8).unwrap_or(d);
+            let surf = [surf_of("RightSurface", 0), surf_of("LeftSurface", 0), surf_of("TopSurface", 3), surf_of("BottomSurface", 4), surf_of("BackSurface", 0), surf_of("FrontSurface", 0)];
+            let worn = i.parent.and_then(|p| self.insts.get(&p)).map(|p| matches!(p.class.as_str(), "Hat" | "Accessory" | "Accoutrement")).unwrap_or(false) && name == "Handle";
+            let material = geti("Material").unwrap_or(256) as u16;
+            let refl = i.props.get("Reflectance").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            let overlay_only = false;
+            let _ = overlay_only;
+            out.push(Part { id, cf, size, color, alpha, shape, mesh, decals, top: surf[2], bottom: surf[3], material, refl, surf, truss: i.class == "TrussPart", cast: transp < 0.5 && !worn, limb, model, head_face, dmesh });
         }
         out
     }
 
-    fn clothing_decals(&self, model: &Inst, part: &str, out: &mut Vec<(u8, String, f32, [f32; 4])>) {
-        let region: Option<[[f32; 4]; 6]> = match part {
-            "Torso" => Some([[231.0, 74.0, 128.0, 128.0], [427.0, 74.0, 128.0, 128.0], [165.0, 74.0, 64.0, 128.0], [361.0, 74.0, 64.0, 128.0], [231.0, 8.0, 128.0, 64.0], [231.0, 204.0, 128.0, 64.0]]),
-            "Right Arm" | "Right Leg" => Some([[217.0, 355.0, 64.0, 128.0], [85.0, 355.0, 64.0, 128.0], [151.0, 355.0, 64.0, 128.0], [19.0, 355.0, 64.0, 128.0], [217.0, 289.0, 64.0, 64.0], [217.0, 485.0, 64.0, 64.0]]),
-            "Left Arm" | "Left Leg" => Some([[308.0, 355.0, 64.0, 128.0], [440.0, 355.0, 64.0, 128.0], [506.0, 355.0, 64.0, 128.0], [374.0, 355.0, 64.0, 128.0], [308.0, 289.0, 64.0, 64.0], [308.0, 485.0, 64.0, 64.0]]),
-            _ => None,
-        };
-        let region = match region {
-            Some(r) => r,
-            None => return,
-        };
-        let leg = part.ends_with("Leg");
-        let torso = part == "Torso";
+    pub fn clothes(&self, model: u32) -> Option<Clothes> {
+        let m = self.insts.get(&model)?;
         let find = |cls: &str, key: &str| -> Option<String> {
-            model.children.iter().filter_map(|c| self.insts.get(c)).find(|i| i.class == cls).and_then(|i| i.props.get(key)).and_then(|v| v.as_str()).and_then(asset_id)
+            m.children.iter().filter_map(|c| self.insts.get(c)).find(|i| i.class == cls).and_then(|i| i.props.get(key)).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| asset_id(s).unwrap_or_default()).filter(|s| !s.is_empty())
         };
-        let faces = [5u8, 2, 0, 3, 1, 4];
-        let mut add = |tid: &str, out: &mut Vec<(u8, String, f32, [f32; 4])>| {
-            for (k, r) in region.iter().enumerate() {
-                out.push((faces[k], tid.to_string(), 1.0, [r[0] / 585.0, r[1] / 559.0, r[2] / 585.0, r[3] / 559.0]));
-            }
-        };
-        if leg || torso {
-            if let Some(t) = find("Pants", "PantsTemplate") {
-                add(&t, out);
-            }
+        let shirt = find("Shirt", "ShirtTemplate");
+        let pants = find("Pants", "PantsTemplate");
+        let tshirt = find("ShirtGraphic", "Graphic");
+        if shirt.is_none() && pants.is_none() && tshirt.is_none() {
+            return None;
         }
-        if !leg {
-            if let Some(t) = find("Shirt", "ShirtTemplate") {
-                add(&t, out);
-            }
+        let mut colors = [[0.63, 0.63, 0.63]; 5];
+        for (k, n) in ["Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg"].iter().enumerate() {
+            let b = m.children.iter().filter_map(|c| self.insts.get(c)).find(|i| i.props.get("Name").and_then(|v| v.as_str()) == Some(n)).and_then(|i| i.props.get("BrickColor")).and_then(|v| v.as_i64()).unwrap_or(194);
+            let c = swirl_core::rbx::brick_rgb01(b);
+            colors[k] = [c[0] as f32, c[1] as f32, c[2] as f32];
         }
-        if torso {
-            if let Some(t) = find("ShirtGraphic", "Graphic") {
-                let r = region[0];
-                let _ = r;
-                out.push((5, t, 1.0, [0.0, 0.0, 1.0, 1.0]));
-            }
-        }
+        Some(Clothes { shirt, pants, tshirt, colors })
     }
 
     pub fn lighting_inst(&self) -> Option<&Inst> {
         self.insts.values().find(|i| i.class == "Lighting")
     }
 
-    pub fn light(&self) -> Light {
+    pub fn lighting(&self) -> Lighting {
         let era2018 = self.era == 2018;
         let props = self.lighting_inst().map(|i| &i.props);
         let c3 = |k: &str, d: [f32; 3]| props.and_then(|p| arr(p.get(k), 3)).map(|v| [v[0], v[1], v[2]]).unwrap_or(d);
-        let mut amb = c3("Ambient", [0.5; 3]);
+        let num = |k: &str, d: f32| props.and_then(|p| p.get(k)).and_then(|v| v.as_f64()).map(|v| v as f32).unwrap_or(d);
+        let tod = props.and_then(|p| p.get("TimeOfDay")).and_then(|v| v.as_str()).unwrap_or("14:00:00").to_string();
+        let mut parts = tod.split(':').map(|x| x.trim().parse::<f32>().unwrap_or(0.0));
+        let (h, m, sec) = (parts.next().unwrap_or(0.0), parts.next().unwrap_or(0.0), parts.next().unwrap_or(0.0));
+        let min = h * 60.0 + m + sec / 60.0;
+        let lat = num("GeographicLatitude", 41.733).to_radians();
+        let hh = ((min / 1440.0) * 2.0 - 1.0) * std::f32::consts::PI;
+        let sx = -hh.sin();
+        let sy = hh.cos() * (lat - 0.4).cos();
+        let sz = hh.cos() * (lat - 0.4).sin();
+        let sl = (sx * sx + sy * sy + sz * sz).sqrt().max(1e-9);
+        let sun = [sx / sl, sy / sl, sz / sl];
+        let amb = c3("Ambient", [0.5; 3]);
+        let out = c3("OutdoorAmbient", [0.5; 3]);
+        let bright = num("Brightness", 1.0);
         let top = c3("ColorShift_Top", [0.0; 3]);
         let bot = c3("ColorShift_Bottom", [0.0; 3]);
-        let bright = props.and_then(|p| p.get("Brightness")).and_then(|v| v.as_f64()).map(|b| (b as f32).clamp(0.0, 5.0)).unwrap_or(1.0);
-        let out = c3("OutdoorAmbient", [0.5; 3]);
-        if era2018 && !props.map(|p| p.contains_key("Ambient")).unwrap_or(false) {
-            amb = [0.0; 3];
+        let sh = c3("ShadowColor", [0.702, 0.702, 0.722]);
+        let day = sun[1] >= 0.0;
+        let d = if day { sun } else { [-sun[0], -sun[1], -sun[2]] };
+        let k = if era2018 { if day { (0.25 + sun[1] * 4.0).min(1.0) } else { 0.15 } } else if day { (0.35 + sun[1] * 3.0).min(1.0) } else { 0.3 };
+        let l0 = {
+            let v = [d[0], d[1].max(0.05), d[2]];
+            let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            [v[0] / l, v[1] / l, v[2] / l]
+        };
+        let l1 = [-l0[0], -l0[1], -l0[2]];
+        let mut c0 = [0.0; 3];
+        let mut c1 = [0.0; 3];
+        let mut ambc = [0.0; 3];
+        let mut tint = sh;
+        if era2018 {
+            let sunc: Vec<f32> = (0..3).map(|i| ((0.62 + top[i] * 0.5) * bright * k).min(1.6)).collect();
+            let a: Vec<f32> = (0..3).map(|i| (amb[i] + out[i] * 0.55).min(1.0)).collect();
+            for i in 0..3 {
+                c0[i] = sunc[i];
+                c1[i] = 0.08 + bot[i] * 0.4;
+                ambc[i] = a[i];
+                tint[i] = ((a[i] + 0.1) / (a[i] + sunc[i] + 0.1)).clamp(0.35, 1.0);
+            }
+        } else {
+            for i in 0..3 {
+                c0[i] = (0.9 + top[i] * 0.6) * bright * k;
+                c1[i] = 0.28 + bot[i] * 0.6;
+                ambc[i] = amb[i];
+            }
         }
-        let mut a = [0.0f32; 3];
-        let mut k = [0.0f32; 3];
-        let mut f = [0.0f32; 3];
-        for i in 0..3 {
-            a[i] = if era2018 { (0.5 * (amb[i] + out[i] * 0.55) / 0.275).clamp(0.0, 1.2) } else { amb[i].clamp(0.0, 1.2) };
-            k[i] = 0.55 * bright * (1.0 + top[i] * 0.6 / 0.9);
-            f[i] = 0.12 * (0.28 + bot[i] * 0.6) / 0.28;
-        }
-        let avg = |v: [f32; 3]| (v[0] + v[1] + v[2]) / 3.0;
-        let (aa, kk) = (avg(a), avg(k));
-        let base = (aa + kk * 0.7).max(1e-3);
-        let mix = |i: usize| a[i] + k[i] * 0.7;
-        Light { amb: aa, key: kk, fill: avg(f), tint: [mix(0) / base, mix(1) / base, mix(2) / base] }
+        let fs = num("FogStart", 0.0);
+        let fe = num("FogEnd", 100000.0);
+        let fog = if fe < 5000.0 { Some((c3("FogColor", [0.753; 3]), fs, fe)) } else { None };
+        Lighting { lamp0_dir: l0, lamp0_color: c0, lamp1_dir: l1, lamp1_color: c1, amb: ambc, shadow_tint: tint, sun_dir: sun, fog }
     }
 
     pub fn sky_faces(&self) -> [String; 6] {
@@ -805,7 +911,7 @@ impl World {
             let id = sky.and_then(|s| s.props.get(names[i])).and_then(|v| v.as_str()).and_then(asset_id);
             out[i] = match id {
                 Some(id) => id,
-                None => format!("c:sky/null_plainsky512_{}.jpg", defs[i]),
+                None => if self.era == 2018 { format!("c:textures/sky/sky512_{}.tex", defs[i]) } else { format!("c:sky/null_plainsky512_{}.jpg", defs[i]) },
             };
         }
         out

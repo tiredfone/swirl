@@ -45,12 +45,20 @@ export async function start(opts = {}) {
     const fetchAsset = async (r) => {
       inflight++;
       try {
+        for (let n = 0; r.k === 'tex' && !(window.solarLoadImage && window.solarWorldReady) && n < 600; n++) await new Promise((res) => setTimeout(res, 50));
+        if (r.k === 'tex' && window.solarWorldReady) await window.solarWorldReady;
+        if (r.k === 'tex' && window.solarLoadImage) {
+          const img = await window.solarLoadImage(r.id.startsWith('c:') ? 'rbxasset://' + r.id.slice(2) : r.id);
+          if (!img) throw new Error('no image');
+          client.provide_texture(r.id, img);
+          return;
+        }
         const resp = await fetch(assetUrl(r.id), { credentials: 'same-origin' });
         if (!resp.ok) throw new Error('status ' + resp.status);
         let buf = new Uint8Array(await resp.arrayBuffer());
         if (buf[0] === 0x25) buf = buf.subarray(buf.indexOf(10) + 1);
         if (r.k === 'mesh') client.provide_mesh(r.id, buf);
-        else client.provide_texture(r.id, await createImageBitmap(new Blob([buf]), { premultiplyAlpha: 'none', colorSpaceConversion: 'none' }));
+        else client.provide_texture(r.id, await createImageBitmap(new Blob([buf]), { imageOrientation: 'flipY', premultiplyAlpha: 'none', colorSpaceConversion: 'none' }));
       } catch (e) {
         (window.solarAssetFailures || (window.solarAssetFailures = [])).push(r.k + ':' + r.id + ':' + (e && e.message));
         client.provide_failed(r.k, r.id);

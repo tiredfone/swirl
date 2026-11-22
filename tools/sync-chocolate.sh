@@ -9,7 +9,7 @@ done
 rsync -a --delete "$src/client/" "$dst/client/"
 rsync -a --delete "$src/shared/" "$dst/shared/"
 rsync -a --delete "$src/content/" "$dst/content/"
-rsync -a --delete --exclude=/platform/ "$src/content2018/" "$dst/content2018/"
+rsync -a --delete --include=/platform/ --include=/platform/textures/ --include=/platform/textures/studs.png --include='/platform/textures/*/' --include='/platform/textures/*/diffuse.png' --include=/platform/terrain/ --include=/platform/terrain/diffuse.png --exclude='/platform/**' "$src/content2018/" "$dst/content2018/"
 cp "$src/corescripts2018/bundle.json" "$dst/corescripts2018/bundle.json"
 cp "$src/corescripts2018/LICENSE.txt" "$src/corescripts2018/SOURCE.txt" "$dst/corescripts2018/"
 cp "$src/shared/runtime.lua" /var/www/swirl/crates/swirl-lua/data/runtime.lua

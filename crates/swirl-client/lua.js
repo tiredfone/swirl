@@ -23,14 +23,19 @@ const addStyle = (pub) => {
   document.head.appendChild(l);
 };
 
+const CELL_KIND = [null, 'grass', 'sand', 'brick', 'granite', 'concrete', 'corrodedmetal', 'metal', 'foil', 'woodplanks', 'wood', 'pebble', 'concrete', 'slate', 'concrete', 'plastic', 'plastic', 'plastic'];
+const SMOOTH_KIND = { Grass: 'grass', Slate: 'slate', Concrete: 'concrete', Brick: 'brick', Sand: 'sand', WoodPlanks: 'woodplanks', Rock: 'granite', Glacier: 'ice', Snow: 'plastic', Sandstone: 'sand', Mud: 'pebble', Basalt: 'granite', Ground: 'pebble', CrackedLava: 'granite', Asphalt: 'concrete', Cobblestone: 'cobblestone', Ice: 'ice', LeafyGrass: 'grass', Salt: 'sand', Limestone: 'concrete', Pavement: 'concrete' };
 const wid = (id) => (id == null ? null : id > 0 ? id : 0x40000000 + -id);
 
 export async function startLua(opts) {
   const { client, canvas } = opts;
+  let resolveWorld;
+  window.solarWorldReady = new Promise((r) => { resolveWorld = r; });
   const pub = new URL('./chocolate', import.meta.url).href;
   const cfg = Object.assign({}, opts.cfg, { publicPath: pub });
   addImportMap(pub);
   addStyle(pub);
+  const terrainMod = await import(pub + '/shared/terrain.js');
   const [THREE, assets, worldMod, guiMod, inputMod, luahost, C, wasmoon, rapierMod, cameraMod, codec, cursorMod, renderMod] = await Promise.all([
     import('three'),
     import(pub + '/client/assets.js'),
@@ -57,6 +62,7 @@ export async function startLua(opts) {
   const { CursorLayer, CURSORS } = cursorMod;
   assets.configure(cfg);
   const indexReady = assets.loadContentIndex();
+  indexReady.then(() => { window.solarLoadImage = assets.loadImage; });
   
   const runtimeSrc = fetch(pub + '/shared/runtime.lua?v=' + (cfg.version || '')).then((r) => r.text());
   const rapierReady = RAPIER.init();
@@ -186,7 +192,89 @@ export async function startLua(opts) {
       return { origin: ray.ray.origin.toArray(), dir: ray.ray.direction.toArray() };
     }
 
+    async applySky() {
+      const L = this.lt;
+      if (!L || this.skyBusy) return;
+      const era = this.world.era === 2018;
+      const DEF = (era ? ['rt', 'lf', 'up', 'dn', 'bk', 'ft'].map((f) => `rbxasset://textures/sky/sky512_${f}.tex`) : ['rt', 'lf', 'up', 'dn', 'bk', 'ft'].map((f) => `rbxasset://sky/null_plainsky512_${f}.jpg`));
+      const sky = L.findChildOfClass('Sky');
+      const urls = ['SkyboxRt', 'SkyboxLf', 'SkyboxUp', 'SkyboxDn', 'SkyboxBk', 'SkyboxFt'].map((k, i) => (sky && sky.props.get(k)) || DEF[i]);
+      const key = urls.join('|');
+      if (key === this.skyKey) return;
+      this.skyKey = key;
+      this.skyBusy = true;
+      try {
+        const load = (list) => Promise.all(list.map((u) => Promise.resolve(assets.loadImage(u)).catch(() => null)));
+        let imgs = await load(urls);
+        if (!imgs.every((i) => i && i.width && i.height) && !urls.every((u, i) => u === DEF[i])) imgs = await load(DEF);
+        if (this.skyKey !== key) return;
+        if (imgs.some((i) => !i || !i.width || !i.height)) {
+          client.set_sky_cube([]);
+          return;
+        }
+        const big = Math.max(...imgs.map((im) => Math.max(im.width, im.height)));
+        let size = 64;
+        while (size < big && size < 1024) size *= 2;
+        const maps = await Promise.all(imgs.map((im, i) => {
+          const c = document.createElement('canvas');
+          c.width = size;
+          c.height = size;
+          const g = c.getContext('2d');
+          if (i === 2) g.setTransform(0, -1, 1, 0, 0, size);
+          else if (i === 3) g.setTransform(0, 1, -1, 0, size, 0);
+          else g.setTransform(1, 0, 0, -1, 0, size);
+          g.drawImage(im, 0, 0, size, size);
+          return createImageBitmap(c, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' });
+        }));
+        client.set_sky_cube(maps);
+      } finally {
+        this.skyBusy = false;
+      }
+    }
+
+    syncTerrain() {
+      const t = this.world.terrain;
+      if (!t) return;
+      if (!this.terrainHooked) {
+        this.terrainHooked = true;
+        this.terrainInst = this.ws.findChildOfClass('Terrain');
+        t.listeners.add((keys) => this.terrainUpdate(keys));
+        this.terrainUpdate(t.allKeys());
+      }
+      t.flush();
+    }
+
+    terrainUpdate(keys) {
+      const t = this.world.terrain;
+      const era = this.world.era === 2018 ? 2018 : 2012;
+      for (const k of keys) {
+        client.clear_terrain_chunk(String(k));
+        const { groups } = terrainMod.meshChunk(t, k);
+        for (const [m, d] of groups) {
+          if (!d.pos.length) continue;
+          let color, kind, water, opacity = 1;
+          if (era === 2018) {
+            const name = terrainMod.SMOOTH_MATERIALS[m] || 'Grass';
+            water = m === terrainMod.SMOOTH_WATER;
+            const own = this.terrainInst && this.terrainInst.materialColors && this.terrainInst.materialColors.get(name);
+            color = water ? [12 / 255, 84 / 255, 92 / 255] : own || (terrainMod.SMOOTH_COLORS[name] || [127, 127, 127]).map((v) => v / 255);
+            kind = water ? 'plastic' : SMOOTH_KIND[name] || 'plastic';
+            if (water) opacity = 0.7;
+          } else {
+            const c = terrainMod.CELL_COLORS[m] || [127, 127, 127];
+            color = [c[0] / 255, c[1] / 255, c[2] / 255];
+            kind = CELL_KIND[m] || 'plastic';
+            water = m === terrainMod.CELL_WATER;
+            if (water) opacity = 0.55;
+          }
+          client.set_terrain_chunk(String(k), Float32Array.from(d.pos), Float32Array.from(d.nrm), Float32Array.from(d.uv), Float32Array.of(color[0], color[1], color[2], opacity, water ? 1 : 0), kind);
+        }
+      }
+    }
+
     frame() {
+      this.syncTerrain();
+      this.applySky();
       if (this.ops.length) {
         client.apply_local(JSON.stringify(this.ops));
         this.ops.length = 0;
@@ -355,6 +443,7 @@ export async function startLua(opts) {
     const text = await runtimeSrc;
     await Promise.all([rapierReady, indexReady]);
     await world.init(m, RAPIER, () => Lua.create({ customWasmUri: pub + '/client/vendor/liblua5.1.wasm' }), text);
+    resolveWorld();
     let renderer;
     if (opts.reference) {
       const c2 = document.createElement('canvas');
