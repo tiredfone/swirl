@@ -146,6 +146,7 @@ impl Game {
     }
 
     pub fn spawn_character(&mut self, player: InstId, name: &str) {
+        let mut spawned: Option<InstId> = None;
         {
             let mut dm = self.dm.borrow_mut();
             let ws = dm.services["Workspace"];
@@ -161,6 +162,7 @@ impl Game {
                     character::copy_starter_gui(&mut dm, player, first);
                     let own = json!({"t": "own", "id": ch.model, "s": ch.seq, "c": ch.cf});
                     self.pending.entry(player).or_default().push(own);
+                    spawned = Some(ch.model);
                     self.chars.insert(ch.model, ch);
                 }
                 Err(e) => {
@@ -168,6 +170,9 @@ impl Game {
                     return;
                 }
             }
+        }
+        if let Some(m) = spawned {
+            self.host.scan_subtree(m);
         }
         self.fill_backpack(player);
     }

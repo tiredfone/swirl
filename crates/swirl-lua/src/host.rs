@@ -72,25 +72,19 @@ const METHODS: &[&str] = &[
     "FilterStringAsync", "FilterStringForPlayerAsync", "FilterStringForBroadcast", "CanUserChatAsync", "CanUsersChatAsync", "IsInGroup", "isInGroup", "GetRankInGroup", "GetRoleInGroup", "SetEntries", "IsUserFeatureEnabled", "__UserSettings", "__settings", "GetFFlag", "GetFastFlag", "DefineFastFlag", "GetFVariable", "GetFastVariable", "IsRunning", "IsStudio", "IsServer", "IsClient", "IsRunMode", "IsEdit", "GetRobloxVersion", "AddCoreScriptLocal",
 ];
 
+static EVENT_TABLE: std::sync::OnceLock<Vec<(String, Vec<String>)>> = std::sync::OnceLock::new();
+
+fn event_table() -> &'static Vec<(String, Vec<String>)> {
+    EVENT_TABLE.get_or_init(|| {
+        let j: serde_json::Value = serde_json::from_str(include_str!("../data/events.json")).expect("events.json");
+        j.as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()).unwrap_or_default())).collect()).unwrap_or_default()
+    })
+}
+
 fn event_names(class: &str) -> Vec<&'static str> {
-    let mut v = vec!["Changed", "ChildAdded", "ChildRemoved", "DescendantAdded", "DescendantRemoving", "AncestryChanged"];
+    let mut v: Vec<&'static str> = vec!["Changed", "ChildAdded", "ChildRemoved", "DescendantAdded", "DescendantRemoving", "AncestryChanged"];
     if classes::is_a(class, "BasePart") {
         v.extend(["Touched", "TouchEnded"]);
-    }
-    if class == "Players" {
-        v.extend(["PlayerAdded", "PlayerRemoving"]);
-    }
-    if class == "Player" {
-        v.extend(["CharacterAdded", "CharacterRemoving", "Chatted"]);
-    }
-    if classes::is_a(class, "Tool") {
-        v.extend(["Activated", "Deactivated", "Equipped", "Unequipped"]);
-    }
-    if classes::is_a(class, "Mouse") {
-        v.extend(["Button1Down", "Button1Up", "Button2Down", "Button2Up", "Move", "Idle", "KeyDown", "KeyUp", "WheelForward", "WheelBackward"]);
-    }
-    if class == "Humanoid" {
-        v.extend(["Died", "HealthChanged", "Running", "Jumping"]);
     }
     if class == "RunService" {
         v.extend(["Stepped", "Heartbeat", "RenderStepped"]);
@@ -104,9 +98,15 @@ fn event_names(class: &str) -> Vec<&'static str> {
     if class == "RemoteEvent" {
         v.extend(["OnServerEvent", "OnClientEvent"]);
     }
+    for (cls, list) in event_table() {
+        if cls == class || classes::is_a(class, cls) {
+            for e in list {
+                v.push(e.as_str());
+            }
+        }
+    }
     v
 }
-
 
 fn tagged(lua: &Lua, items: &[Value]) -> mlua::Result<Table> {
     let t = lua.create_table()?;
@@ -1026,6 +1026,15 @@ impl Host {
     }
 
     pub fn tick(&mut self, t: f64) {
+        {
+            let d = self.dm.borrow();
+            let mut st = self.st.borrow_mut();
+            let dead: Vec<InstId> = st.running.iter().copied().filter(|i| !can_run(&d, *i)).collect();
+            for i in dead {
+                st.running.remove(&i);
+                st.queue.push(Q::Stop(i));
+            }
+        }
         if let Err(e) = self.step.call::<()>(t) {
             self.st.borrow_mut().logs.push(LogLine { kind: "error".into(), msg: format!("scheduler: {}", e), id: 0 });
         }
