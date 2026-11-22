@@ -23,6 +23,7 @@ if (process.env.KCCLOG) {
         const model = rec.model.props.get('Name');
         k.computeColliderMovement = (...a) => {
           const col = a[0];
+          if (process.env.KCCSET && !globalThis.__printed) { globalThis.__printed = true; const g = (f) => { try { return typeof k[f] === 'function' ? k[f]() : k[f]; } catch (e) { return 'err'; } }; const he = col.halfExtents ? col.halfExtents() : null; console.log('KCC', JSON.stringify({ offset: g('offset'), up: g('up'), slide: g('slideEnabled'), autoEn: g('autostepEnabled'), autoH: g('autostepMaxHeight'), autoW: g('autostepMinWidth'), autoDyn: g('autostepIncludesDynamicBodies'), snapEn: g('snapToGroundEnabled'), snap: g('snapToGroundDistance'), maxSlope: g('maxSlopeClimbAngle'), minSlide: g('minSlopeSlideAngle'), nudge: g('normalNudgeFactor'), he, shape: col.shape && col.shape.type, sensor: col.isSensor(), groups: col.collisionGroups(), act: col.activeCollisionTypes(), friction: col.friction() })); }
           const tr = col.translation(), ro = col.rotation();
           orig(...a);
           const n = k.numComputedCollisions();
