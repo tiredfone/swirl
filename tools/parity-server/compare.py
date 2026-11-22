@@ -14,7 +14,7 @@ def norm_choc(path):
 def norm_swirl(path):
     out = []
     for l in open(path):
-        l = l.rstrip('\n')
+        l = re.sub(r'^\[place [^\]]+\] ', '', l.rstrip('\n'))
         m = re.match(r'^\[(error|warn|print)\] (.*)$', l)
         if not m:
             continue

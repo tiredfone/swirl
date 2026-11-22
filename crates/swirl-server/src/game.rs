@@ -10,6 +10,23 @@ use swirl_lua::host::Wire;
 use swirl_lua::{wire_from_json, wire_to_json, Host, LogLine, Req};
 use crate::touch::{overlap, Box3};
 
+#[derive(Clone, Default, Debug)]
+pub struct UserInfo {
+    pub id: i64,
+    pub name: String,
+    pub membership: i64,
+    pub age: i64,
+    pub dev: bool,
+    pub r15: bool,
+    pub scale: J,
+    pub perks_badge: String,
+    pub perks_chat: Option<String>,
+    pub perks_name: Option<String>,
+    pub animations: Vec<String>,
+    pub gear_genres: Vec<String>,
+    pub gear_map: J,
+}
+
 pub struct Game {
     pub place_id: u64,
     pub era: i32,
@@ -39,6 +56,9 @@ pub struct Game {
     last_chat: HashMap<InstId, f64>,
     pub api: crate::api::Shared,
     flush_at: f64,
+    pub allow_gear: bool,
+    pre_logs: Vec<LogLine>,
+    pub kicks: Vec<(InstId, String)>,
 }
 
 impl Game {
@@ -104,7 +124,7 @@ impl Game {
                 host.scan_subtree(id);
             }
         }
-        Ok(Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], anim_state: HashMap::new(), last_chat: HashMap::new(), api, flush_at: 0.0 })
+        Ok(Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], anim_state: HashMap::new(), last_chat: HashMap::new(), api, flush_at: 0.0, allow_gear: true, pre_logs: vec![], kicks: vec![] })
     }
 
     pub fn join(&mut self, name: &str, user: Option<i64>, look: crate::appearance::Look) -> (J, InstId) {
@@ -115,6 +135,12 @@ impl Game {
                 self.next_user - 1
             }
         };
+        self.join_user(&UserInfo { id: uid, name: name.to_string(), age: 100, ..Default::default() }, look)
+    }
+
+    pub fn join_user(&mut self, user: &UserInfo, look: crate::appearance::Look) -> (J, InstId) {
+        let uid = user.id;
+        let name = user.name.as_str();
         let (player, snap) = {
             let mut dm = self.dm.borrow_mut();
             let players = dm.service("Players").unwrap();
@@ -123,12 +149,37 @@ impl Game {
             let _ = dm.set_prop(player, "userId", Val::Num(uid as f64));
             let _ = dm.set_prop(player, "UserId", Val::Num(uid as f64));
             let _ = dm.set_prop(player, "CharacterAppearance", Val::Str(format!("/api/charapp/{}", uid)));
-            let _ = dm.set_prop(player, "AccountAge", Val::Num(100.0));
+            let _ = dm.set_prop(player, "AccountAge", Val::Num(user.age as f64));
+            let _ = dm.set_prop(player, "MembershipType", Val::Num(user.membership as f64));
             let _ = dm.set_prop(player, "DataReady", Val::Bool(false));
             let _ = dm.set_prop(player, "DataComplexityLimit", Val::Num(45000.0));
             for (cls, nm) in [("Backpack", "Backpack"), ("PlayerGui", "PlayerGui")] {
                 if let Ok(c) = dm.create_any(cls, Some(player)) {
                     let _ = dm.set_prop(c, "Name", Val::Str(nm.to_string()));
+                }
+            }
+            if !user.perks_badge.is_empty() || user.perks_chat.is_some() || user.perks_name.is_some() {
+                if let Ok(cfg) = dm.create_any("Configuration", Some(player)) {
+                    dm.set_prop_quiet(cfg, "Name", Val::Str("SolarPerks".into()));
+                    dm.get_mut_name(cfg, "SolarPerks");
+                    if !user.perks_badge.is_empty() {
+                        if let Ok(v) = dm.create_any("StringValue", Some(cfg)) {
+                            dm.set_prop_quiet(v, "Name", Val::Str("Badge".into()));
+                            dm.get_mut_name(v, "Badge");
+                            let _ = dm.set_prop(v, "Value", Val::Str(user.perks_badge.clone()));
+                        }
+                    }
+                    for (hex, nm) in [(&user.perks_chat, "ChatColor"), (&user.perks_name, "NameColor")] {
+                        if let Some(h) = hex {
+                            if let Ok(n) = u32::from_str_radix(h.trim_start_matches('#'), 16) {
+                                if let Ok(v) = dm.create_any("Color3Value", Some(cfg)) {
+                                    dm.set_prop_quiet(v, "Name", Val::Str(nm.into()));
+                                    dm.get_mut_name(v, nm);
+                                    let _ = dm.set_prop(v, "Value", Val::Arr(vec![((n >> 16) & 255) as f64 / 255.0, ((n >> 8) & 255) as f64 / 255.0, (n & 255) as f64 / 255.0]));
+                                }
+                            }
+                        }
+                    }
                 }
             }
             character::assign_team(&mut dm, player);
@@ -361,6 +412,38 @@ impl Game {
         let _ = self.dm.borrow_mut().set_parent(tool, Some(ws));
         self.host.notify_parent(tool, Some(model), Some(ws));
         self.dirty.insert(model);
+    }
+
+    pub fn run_code(&mut self, source: &str, by: &str) {
+        self.host_logs_push(format!("Running server code from {}", by));
+        let made = {
+            let mut dm = self.dm.borrow_mut();
+            let sss = match dm.service("ServerScriptService") {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            match dm.create_any("Script", None) {
+                Ok(sc) => {
+                    dm.set_prop_quiet(sc, "Name", Val::Str("ServerCode".into()));
+                    dm.get_mut_name(sc, "ServerCode");
+                    dm.set_prop_quiet(sc, "Source", Val::Str(source.to_string()));
+                    let _ = dm.set_parent(sc, Some(sss));
+                    Some(sc)
+                }
+                Err(_) => None,
+            }
+        };
+        if let Some(sc) = made {
+            self.host.scan_subtree(sc);
+        }
+    }
+
+    fn host_logs_push(&mut self, msg: String) {
+        self.pre_logs.push(LogLine { kind: "print".into(), msg, id: 0 });
+    }
+
+    pub fn stop(&mut self) {
+        self.api.borrow_mut().flush();
     }
 
     pub fn leave(&mut self, player: InstId) {
@@ -824,7 +907,9 @@ impl Game {
             }
             self.touching = now;
         }
-        self.host.take_logs()
+        let mut logs = std::mem::take(&mut self.pre_logs);
+        logs.extend(self.host.take_logs());
+        logs
     }
 
     pub fn flush_all(&mut self, players: &[InstId]) -> Vec<(InstId, String)> {

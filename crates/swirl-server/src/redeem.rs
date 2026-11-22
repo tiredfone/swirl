@@ -30,11 +30,28 @@ impl Redeemer {
         if ticket.len() != 64 || !ticket.bytes().all(|b| b.is_ascii_hexdigit()) {
             return None;
         }
-        let body = format!("ticket={}", ticket);
+        let text = self.post(&self.path, "application/x-www-form-urlencoded", &format!("ticket={}", ticket)).await?;
+        let j: J = serde_json::from_str(text.trim()).ok()?;
+        if j["ok"].as_bool() == Some(true) {
+            Some(j)
+        } else {
+            None
+        }
+    }
+
+    pub fn sibling_path(&self, name: &str) -> String {
+        match self.path.rfind('/') {
+            Some(i) => format!("{}/{}", &self.path[..i], name),
+            None => format!("/{}", name),
+        }
+    }
+
+    pub async fn post(&self, path: &str, content_type: &str, body: &str) -> Option<String> {
         let req = format!(
-            "POST {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Swirl/1.0\r\nContent-Type: application/x-www-form-urlencoded\r\nX-Chocolate-Key: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            self.path,
+            "POST {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Swirl/1.0\r\nContent-Type: {}\r\nX-Chocolate-Key: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            path,
             self.host,
+            content_type,
             self.key,
             body.len(),
             body
@@ -48,13 +65,7 @@ impl Redeemer {
         if !head.starts_with("HTTP/1.1 200") && !head.starts_with("HTTP/1.0 200") {
             return None;
         }
-        let body = if head.to_ascii_lowercase().contains("transfer-encoding: chunked") { dechunk(body) } else { body.to_string() };
-        let j: J = serde_json::from_str(body.trim()).ok()?;
-        if j["ok"].as_bool() == Some(true) {
-            Some(j)
-        } else {
-            None
-        }
+        Some(if head.to_ascii_lowercase().contains("transfer-encoding: chunked") { dechunk(body) } else { body.to_string() })
     }
 }
 
