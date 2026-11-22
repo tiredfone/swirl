@@ -61,7 +61,7 @@ fn can_join(a: i32, b: i32) -> bool {
     false
 }
 
-struct PartRec {
+pub(crate) struct PartRec {
     collider: Option<ColliderHandle>,
     rot: Option<CF>,
     asm: Option<usize>,
@@ -70,12 +70,21 @@ struct PartRec {
     touch: bool,
 }
 
-struct Asm {
-    parts: IndexSet<InstId>,
+pub(crate) struct Asm {
+    pub(crate) parts: IndexSet<InstId>,
     anchored: bool,
     root: InstId,
     body: Option<RigidBodyHandle>,
     sleeping: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct Special {
+    pub part: Option<InstId>,
+    pub no_ray: bool,
+    pub character: Option<InstId>,
+    pub solid_proxy: bool,
+    pub sensor_only: bool,
 }
 
 pub struct TouchEvent {
@@ -91,21 +100,21 @@ pub struct RayHit {
 }
 
 pub struct Physics {
-    gravity: f64,
-    pipeline: PhysicsPipeline,
-    params: IntegrationParameters,
-    islands: IslandManager,
-    broad: BroadPhaseBvh,
-    soft: SoftBodySet,
-    narrow: NarrowPhase,
-    bodies: RigidBodySet,
-    colliders: ColliderSet,
-    joints_set: ImpulseJointSet,
-    multibody: MultibodyJointSet,
-    ccd: CCDSolver,
-    parts: IndexMap<InstId, PartRec>,
-    by_handle: HashMap<ColliderHandle, InstId>,
-    assemblies: IndexMap<usize, Asm>,
+    pub(crate) gravity: f64,
+    pub(crate) pipeline: PhysicsPipeline,
+    pub(crate) params: IntegrationParameters,
+    pub(crate) islands: IslandManager,
+    pub(crate) broad: BroadPhaseBvh,
+    pub(crate) soft: SoftBodySet,
+    pub(crate) narrow: NarrowPhase,
+    pub(crate) bodies: RigidBodySet,
+    pub(crate) colliders: ColliderSet,
+    pub(crate) joints_set: ImpulseJointSet,
+    pub(crate) multibody: MultibodyJointSet,
+    pub(crate) ccd: CCDSolver,
+    pub(crate) parts: IndexMap<InstId, PartRec>,
+    pub(crate) by_handle: HashMap<ColliderHandle, InstId>,
+    pub(crate) assemblies: IndexMap<usize, Asm>,
     asm_seq: usize,
     pub asm_epoch: u64,
     dirty: IndexSet<InstId>,
@@ -127,9 +136,14 @@ pub struct Physics {
     sent_sleep: HashMap<usize, bool>,
     cursor: usize,
     forced: IndexSet<RigidBodyHandle>,
-    group_cache: Option<(String, groups::Table)>,
+    pub(crate) group_tbl: groups::Table,
+    pub dead_chars: HashSet<InstId>,
+    pub anim_cf: HashMap<InstId, CF>,
     pub fallen: Vec<Vec<InstId>>,
     pub touches: Vec<TouchEvent>,
+    pub special: HashMap<ColliderHandle, Special>,
+    pub solid_proxies: HashSet<ColliderHandle>,
+    pub terrain_handles: HashSet<ColliderHandle>,
 }
 
 impl Default for Physics {
@@ -179,34 +193,39 @@ impl Physics {
             sent_sleep: HashMap::new(),
             cursor: 0,
             forced: IndexSet::new(),
-            group_cache: None,
+            group_tbl: groups::parse(""),
+            dead_chars: HashSet::new(),
+            anim_cf: HashMap::new(),
             fallen: vec![],
             touches: vec![],
+            special: HashMap::new(),
+            solid_proxies: HashSet::new(),
+            terrain_handles: HashSet::new(),
         }
     }
 
-    fn get_cf(dm: &DataModel, id: InstId) -> CF {
+    pub(crate) fn get_cf(dm: &DataModel, id: InstId) -> CF {
         match dm.get_prop(id, "CFrame") {
             Some(Val::Arr(a)) => cf::arr(a).unwrap_or(cf::IDENTITY),
             _ => cf::IDENTITY,
         }
     }
 
-    fn get_v3(dm: &DataModel, id: InstId, name: &str, def: [f64; 3]) -> [f64; 3] {
+    pub(crate) fn get_v3(dm: &DataModel, id: InstId, name: &str, def: [f64; 3]) -> [f64; 3] {
         match dm.get_prop(id, name) {
             Some(Val::Arr(a)) if a.len() >= 3 => f3(a),
             _ => def,
         }
     }
 
-    fn get_bool(dm: &DataModel, id: InstId, name: &str, def: bool) -> bool {
+    pub(crate) fn get_bool(dm: &DataModel, id: InstId, name: &str, def: bool) -> bool {
         match dm.get_prop(id, name) {
             Some(Val::Bool(b)) => *b,
             _ => def,
         }
     }
 
-    fn get_num(dm: &DataModel, id: InstId, name: &str, def: f64) -> f64 {
+    pub(crate) fn get_num(dm: &DataModel, id: InstId, name: &str, def: f64) -> f64 {
         match dm.get_prop(id, name) {
             Some(Val::Num(n)) => *n,
             _ => def,
@@ -219,16 +238,24 @@ impl Physics {
         }
     }
 
-    fn group_table(&mut self, dm: &DataModel) -> &groups::Table {
+    pub(crate) fn refresh_groups(&mut self, dm: &DataModel) {
         let s = match self.ws.and_then(|w| dm.get_prop(w, "CollisionGroups")) {
             Some(Val::Str(s)) => s.clone(),
             _ => String::new(),
         };
-        if self.group_cache.as_ref().map(|(k, _)| *k != s).unwrap_or(true) {
-            let t = groups::parse(&s);
-            self.group_cache = Some((s, t));
-        }
-        &self.group_cache.as_ref().unwrap().1
+        self.group_tbl = groups::parse(&s);
+    }
+
+    pub fn groups_collide(&self, a: i32, b: i32) -> bool {
+        groups::collide(&self.group_tbl, a, b)
+    }
+
+    pub fn stir(&mut self) {
+        self.stir = true;
+    }
+
+    pub fn gravity(&self) -> f64 {
+        self.gravity
     }
 
     pub fn set_gravity(&mut self, g: f64) {
@@ -244,6 +271,7 @@ impl Physics {
 
     pub fn attach_workspace(&mut self, dm: &mut DataModel, ws: InstId) {
         self.ws = Some(ws);
+        self.refresh_groups(dm);
         let g = Self::get_num(dm, ws, "Gravity", GRAVITY);
         self.set_gravity(g);
         let mut all = vec![];
@@ -390,10 +418,7 @@ impl Physics {
             None => base,
         };
         let gid = Self::get_num(dm, id, "CollisionGroupId", 0.0) as i32;
-        let packed = {
-            let t = self.group_table(dm);
-            groups::rapier(t, gid)
-        };
+        let packed = groups::rapier(&self.group_tbl, gid);
         let touch = self.parts.get(&id).map(|r| r.touch).unwrap_or(false);
         let mut b = builder
             .position(iso(&full))
@@ -1006,6 +1031,7 @@ impl Physics {
                 let g = Self::get_num(dm, id, "Gravity", GRAVITY);
                 self.set_gravity(g);
             } else if name == "CollisionGroups" {
+                self.refresh_groups(dm);
                 let ids: Vec<InstId> = self.parts.keys().copied().collect();
                 for p in ids {
                     self.apply_groups(dm, p);
@@ -1063,10 +1089,7 @@ impl Physics {
 
     fn apply_groups(&mut self, dm: &DataModel, id: InstId) {
         let gid = Self::get_num(dm, id, "CollisionGroupId", 0.0) as i32;
-        let packed = {
-            let t = self.group_table(dm);
-            groups::rapier(t, gid)
-        };
+        let packed = groups::rapier(&self.group_tbl, gid);
         if let Some(c) = self.parts.get(&id).and_then(|r| r.collider).and_then(|h| self.colliders.get_mut(h)) {
             c.set_collision_groups(InteractionGroups::new(Group::from_bits_truncate(packed >> 16), Group::from_bits_truncate(packed & 0xffff), InteractionTestMode::And));
         }
@@ -1163,7 +1186,8 @@ impl Physics {
             let (stx, _srx) = std::sync::mpsc::channel::<SoftBodyTearEvent>();
             let events = ChannelEventCollector::new(tx, ctx, stx);
             let g = Vector::new(0.0, -self.gravity as f32, 0.0);
-            self.pipeline.step(g, &self.params, &mut self.islands, &mut self.broad, &mut self.narrow, &mut self.bodies, &mut self.colliders, &mut self.joints_set, &mut self.multibody, &mut self.soft, &mut self.ccd, &(), &events);
+            let hooks = ProxyHooks { solid: self.solid_proxies.clone() };
+            self.pipeline.step(g, &self.params, &mut self.islands, &mut self.broad, &mut self.narrow, &mut self.bodies, &mut self.colliders, &mut self.joints_set, &mut self.multibody, &mut self.soft, &mut self.ccd, &hooks, &events);
             while let Ok(ev) = rx.try_recv() {
                 let (h1, h2, started) = match ev {
                     CollisionEvent::Started(a, b, _) => (a, b, true),
@@ -1339,6 +1363,40 @@ impl Physics {
         self.excluded.remove(&model);
     }
 
+    pub fn write_prop(&mut self, dm: &mut DataModel, id: InstId, name: &'static str, v: Val) {
+        self.set_own(dm, id, name, v);
+    }
+
+    pub fn remove_char_parts(&mut self, dm: &DataModel, model: InstId) {
+        let mut all = vec![];
+        dm.descendants(model, &mut all);
+        for p in all {
+            if self.parts.contains_key(&p) {
+                self.remove_part(p);
+            }
+        }
+    }
+
+    pub fn activate_parts(&mut self, dm: &mut DataModel, parts: &[InstId], vel: [f64; 3], jitter: &mut dyn FnMut() -> [f64; 2]) {
+        for p in parts {
+            self.break_joints(dm, *p);
+        }
+        for p in parts {
+            if dm.get(*p).map(|i| i.destroyed).unwrap_or(true) {
+                continue;
+            }
+            self.enter(dm, *p);
+        }
+        self.flush(dm);
+        for p in parts {
+            let bh = self.parts.get(p).and_then(|r| r.asm).and_then(|a| self.assemblies.get(&a)).and_then(|a| a.body);
+            if let Some(b) = bh.and_then(|h| self.bodies.get_mut(h)) {
+                let j = jitter();
+                b.set_linvel(Vector::new((vel[0] + j[0]) as f32, (vel[1].max(0.0) + 4.0) as f32, (vel[2] + j[1]) as f32), true);
+            }
+        }
+    }
+
     pub fn root_part(&self, id: InstId) -> InstId {
         self.parts.get(&id).and_then(|r| r.asm).and_then(|a| self.assemblies.get(&a)).map(|a| a.root).unwrap_or(id)
     }
@@ -1365,7 +1423,10 @@ impl Physics {
         let pred = |h: ColliderHandle, _c: &Collider| -> bool {
             let id = match self.by_handle.get(&h) {
                 Some(i) => *i,
-                None => return false,
+                None => match self.special.get(&h) {
+                    Some(sp) if !sp.no_ray && sp.part.is_some() => sp.part.unwrap(),
+                    _ => return false,
+                },
             };
             for x in ignore {
                 if id == *x || dm.is_descendant_of(id, *x) {
@@ -1384,9 +1445,25 @@ impl Physics {
         match qp.cast_ray_and_get_normal(&ray, max_len as f32, true) {
             Some((h, hit)) => {
                 let t = hit.time_of_impact as f64;
-                RayHit { part: self.by_handle.get(&h).copied(), point: [origin[0] + d[0] * t, origin[1] + d[1] * t, origin[2] + d[2] * t], normal: [hit.normal.x as f64, hit.normal.y as f64, hit.normal.z as f64] }
+                RayHit { part: self.by_handle.get(&h).copied().or_else(|| self.special.get(&h).and_then(|s| s.part)), point: [origin[0] + d[0] * t, origin[1] + d[1] * t, origin[2] + d[2] * t], normal: [hit.normal.x as f64, hit.normal.y as f64, hit.normal.z as f64] }
             }
             None => RayHit { part: None, point: [origin[0] + d[0] * max_len, origin[1] + d[1] * max_len, origin[2] + d[2] * max_len], normal: [0.0, 1.0, 0.0] },
         }
+    }
+}
+
+struct ProxyHooks {
+    solid: HashSet<ColliderHandle>,
+}
+
+impl PhysicsHooks for ProxyHooks {
+    fn filter_contact_pair(&self, ctx: &PairFilterContext) -> Option<SolverFlags> {
+        let other = if self.solid.contains(&ctx.collider1) { ctx.rigid_body2 } else { ctx.rigid_body1 };
+        if let Some(b) = other.and_then(|h| ctx.bodies.get(h)) {
+            if b.is_dynamic() && b.mass() > 150.0 {
+                return None;
+            }
+        }
+        Some(SolverFlags::COMPUTE_RIGID_IMPULSES)
     }
 }

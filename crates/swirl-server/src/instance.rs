@@ -71,7 +71,7 @@ pub fn spawn(spec: Spec) -> Handle {
                 let (atx, mut arx) = unbounded_channel::<(u32, Option<Vec<u8>>)>();
                 let site = spec.site.clone();
                 let mut clients: HashMap<u32, (InstIdAlias, UnboundedSender<Out>)> = HashMap::new();
-                let mut iv = tokio::time::interval(std::time::Duration::from_millis(33));
+                let mut iv = tokio::time::interval(std::time::Duration::from_micros(33333));
                 iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     tokio::select! {
@@ -136,7 +136,7 @@ pub fn spawn(spec: Spec) -> Handle {
                                 }
                             }
                             fr2.fetch_add(1, Ordering::Relaxed);
-                            let logs = game.tick(0.033);
+                            let logs = game.tick(1.0 / 30.0);
                             for l in logs {
                                 let line = format!("[{}] {}", l.kind, l.msg);
                                 eprintln!("{} {}", tag, line);

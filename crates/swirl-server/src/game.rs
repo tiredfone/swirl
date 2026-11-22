@@ -33,39 +33,40 @@ pub struct Game {
     pub dm: Rc<RefCell<DataModel>>,
     pub roots: Vec<InstId>,
     pub host: Host,
-    next_user: i64,
+    pub(crate) next_user: i64,
     pub t: f64,
     pub chars: HashMap<InstId, Char>,
-    pending: HashMap<InstId, Vec<J>>,
-    dirty: HashSet<InstId>,
-    touching: HashSet<(InstId, InstId)>,
-    dead: HashMap<InstId, f64>,
-    debris: Vec<(f64, InstId)>,
-    spawn_cache: Vec<InstId>,
-    spawn_refresh: f64,
-    mice: HashMap<InstId, InstId>,
-    loose: Vec<InstId>,
-    loose_refresh: f64,
-    joined_at: HashMap<InstId, usize>,
-    looks: HashMap<InstId, crate::appearance::Look>,
-    gui_copied: HashSet<InstId>,
-    invokes: HashMap<u32, (InstId, i64)>,
-    invoke_seq: u32,
+    pub(crate) pending: HashMap<InstId, Vec<J>>,
+    pub(crate) dirty: HashSet<InstId>,
+    pub(crate) touching: HashSet<(InstId, InstId)>,
+    pub(crate) dead: HashMap<InstId, f64>,
+    pub(crate) debris: Vec<(f64, InstId)>,
+    pub(crate) spawn_cache: Vec<InstId>,
+    pub(crate) spawn_refresh: f64,
+    pub(crate) mice: HashMap<InstId, InstId>,
+    pub(crate) loose: Vec<InstId>,
+    pub(crate) loose_refresh: f64,
+    pub(crate) joined_at: HashMap<InstId, usize>,
+    pub(crate) looks: HashMap<InstId, crate::appearance::Look>,
+    pub(crate) gui_copied: HashSet<InstId>,
+    pub(crate) invokes: HashMap<u32, (InstId, i64)>,
+    pub(crate) invoke_seq: u32,
     pub remote_out: Vec<(Vec<InstId>, J)>,
     pub anim_state: HashMap<(InstId, String), J>,
-    last_chat: HashMap<InstId, f64>,
+    pub(crate) last_chat: HashMap<InstId, f64>,
     pub api: crate::api::Shared,
     pub physics: swirl_physics::Physics,
-    frame: u64,
-    ph_cache: Vec<[f64; 16]>,
-    asm_sent: HashMap<InstId, Vec<i64>>,
-    asm_seen: u64,
-    asm_diff: Option<(Vec<J>, Vec<InstId>)>,
-    ph_far: HashMap<InstId, HashMap<InstId, [f64; 16]>>,
-    ph_n: HashMap<InstId, u32>,
-    flush_at: f64,
+    pub(crate) npcs: crate::npc::Npcs,
+    pub(crate) frame: u64,
+    pub(crate) ph_cache: Vec<[f64; 16]>,
+    pub(crate) asm_sent: HashMap<InstId, Vec<i64>>,
+    pub(crate) asm_seen: u64,
+    pub(crate) asm_diff: Option<(Vec<J>, Vec<InstId>)>,
+    pub(crate) ph_far: HashMap<InstId, HashMap<InstId, [f64; 16]>>,
+    pub(crate) ph_n: HashMap<InstId, u32>,
+    pub(crate) flush_at: f64,
     pub allow_gear: bool,
-    pre_logs: Vec<LogLine>,
+    pub(crate) pre_logs: Vec<LogLine>,
     pub kicks: Vec<(InstId, String)>,
 }
 
@@ -135,7 +136,12 @@ impl Game {
                 host.scan_subtree(id);
             }
         }
-        Ok(Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], anim_state: HashMap::new(), last_chat: HashMap::new(), api, physics, frame: 0, ph_cache: vec![], asm_sent: HashMap::new(), asm_seen: 0, asm_diff: None, ph_far: HashMap::new(), ph_n: HashMap::new(), flush_at: 0.0, allow_gear: true, pre_logs: vec![], kicks: vec![] })
+        let mut g = Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], anim_state: HashMap::new(), last_chat: HashMap::new(), api, physics, npcs: crate::npc::Npcs::new(), frame: 0, ph_cache: vec![], asm_sent: HashMap::new(), asm_seen: 0, asm_diff: None, ph_far: HashMap::new(), ph_n: HashMap::new(), flush_at: 0.0, allow_gear: true, pre_logs: vec![], kicks: vec![] };
+        g.scan_npcs_all();
+        for _ in 0..3 {
+            g.host.tick(0.0);
+        }
+        Ok(g)
     }
 
     pub fn join(&mut self, name: &str, user: Option<i64>, look: crate::appearance::Look) -> (J, InstId) {
@@ -783,6 +789,7 @@ impl Game {
                         _ => {}
                     }
                 }
+                Req::MoveTo(h, pos, part) => self.set_move_to(h, pos, part),
                 Req::InvokeResult(_, tok, args) => {
                     if let Some((pl, k)) = self.invokes.remove(&(tok as u32)) {
                         self.remote_out.push((vec![pl], json!({"t": "rfr", "k": k, "a": J::Array(wire_to_json(&args))})));
@@ -964,6 +971,8 @@ impl Game {
                 self.physics.touch_interest(id);
             }
         }
+        self.scan_npcs_journal();
+        self.update_npcs(1.0 / 30.0);
         {
             let mut dm = self.dm.borrow_mut();
             self.physics.step(&mut dm, 1.0 / 30.0);
@@ -1080,6 +1089,8 @@ impl Game {
                     J::Array(rec)
                 })
                 .collect();
+            let mut ch = ch;
+            ch.extend(self.npc_records());
             if !ch.is_empty() {
                 msg.insert("ch".into(), J::Array(ch));
             }

@@ -57,6 +57,7 @@ pub enum Req {
     UnequipTools(u32),
     Remote(u32, String, Vec<Wire>),
     InvokeResult(u32, f64, Vec<Wire>),
+    MoveTo(u32, Option<[f64; 3]>, Option<u32>),
 }
 
 struct State {
@@ -937,6 +938,10 @@ impl Host {
                             ok(Wire::Nil)
                         }
                         "TakeDamage" => {
+                            let has_ff = d.get(id).and_then(|i| i.parent).map(|p| d.find_child_of_class(p, "ForceField").is_some()).unwrap_or(false);
+                            if has_ff {
+                                return ok(Wire::Nil);
+                            }
                             let n = match args.first() {
                                 Some(Wire::N(n)) => *n,
                                 _ => 0.0,
@@ -963,6 +968,22 @@ impl Host {
                         "GetPlayers" | "getPlayers" => {
                             let l: Vec<Wire> = d.get(id).unwrap().children.iter().copied().filter(|c| d.get(*c).map(|i| i.class == "Player").unwrap_or(false)).map(Wire::I).collect();
                             ok(Wire::List(l))
+                        }
+                        "MoveTo" | "moveTo" if d.get(id).map(|i| i.class == "Humanoid").unwrap_or(false) => {
+                            let pos = match args.first() {
+                                Some(Wire::V3(v)) => Some(*v),
+                                _ => None,
+                            };
+                            let part = match args.get(1) {
+                                Some(Wire::I(p)) => Some(*p),
+                                _ => None,
+                            };
+                            if let Some(p) = pos {
+                                let _ = d.set_prop(id, "WalkToPoint", Val::Arr(p.to_vec()));
+                            }
+                            let _ = d.set_prop(id, "WalkToPart", Val::Ref(part));
+                            st2.borrow_mut().reqs.push(Req::MoveTo(id, pos, part));
+                            ok(Wire::Nil)
                         }
                         "Play" | "play" | "Stop" | "stop" | "Pause" | "pause" | "Resume" | "Move" => ok(Wire::Nil),
                         "__remote" => {

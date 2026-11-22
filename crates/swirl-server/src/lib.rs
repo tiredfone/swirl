@@ -7,5 +7,6 @@ pub mod codec;
 pub mod fetch;
 pub mod game;
 pub mod instance;
+pub mod npc;
 pub mod redeem;
 pub mod touch;
