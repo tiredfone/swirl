@@ -55,7 +55,7 @@ pub struct Game {
     pub anim_state: HashMap<(InstId, String), J>,
     pub(crate) last_chat: HashMap<InstId, f64>,
     pub api: crate::api::Shared,
-    pub physics: swirl_physics::Physics,
+    pub physics: Rc<RefCell<swirl_physics::Physics>>,
     pub(crate) npcs: crate::npc::Npcs,
     pub(crate) frame: u64,
     pub(crate) ph_cache: Vec<[f64; 16]>,
@@ -124,10 +124,11 @@ impl Game {
         physics.attach_workspace(&mut dm, ws);
         dm.journal.clear();
         physics.reset_cursor();
+        let physics = Rc::new(RefCell::new(physics));
         let dm = Rc::new(RefCell::new(dm));
         let mut host = Host::new(dm.clone()).map_err(|e| e.to_string())?;
         let api = crate::api::new_state(assets_dir, data_dir, place_id, era);
-        host.set_handler(Box::new(crate::api::Api(api.clone())));
+        host.set_handler(Box::new(crate::api::Api(api.clone(), physics.clone())));
         host.add_methods(crate::api::METHODS);
         host.scan_scripts();
         if let Some(b) = bundle.as_ref() {
@@ -249,7 +250,7 @@ impl Game {
             }
         }
         if let Some(m) = spawned {
-            self.physics.exclude_model(&self.dm.borrow(), m);
+            self.physics.borrow_mut().exclude_model(&self.dm.borrow(), m);
             self.host.scan_subtree(m);
         }
         self.fill_backpack(player);
@@ -968,16 +969,16 @@ impl Game {
         self.frame += 1;
         for ev in ["Touched", "TouchEnded"] {
             for id in self.host.subscribed(ev) {
-                self.physics.touch_interest(id);
+                self.physics.borrow_mut().touch_interest(id);
             }
         }
         self.scan_npcs_journal();
         self.update_npcs(1.0 / 30.0);
         {
             let mut dm = self.dm.borrow_mut();
-            self.physics.step(&mut dm, 1.0 / 30.0);
+            self.physics.borrow_mut().step(&mut dm, 1.0 / 30.0);
         }
-        let touches = std::mem::take(&mut self.physics.touches);
+        let touches = std::mem::take(&mut self.physics.borrow_mut().touches);
         for t in touches {
             let alive = {
                 let dm = self.dm.borrow();
@@ -990,7 +991,7 @@ impl Game {
             self.host.fire(t.a, ev, vec![Wire::I(t.b)]);
             self.host.fire(t.b, ev, vec![Wire::I(t.a)]);
         }
-        let fallen = std::mem::take(&mut self.physics.fallen);
+        let fallen = std::mem::take(&mut self.physics.borrow_mut().fallen);
         if !fallen.is_empty() {
             let mut dm = self.dm.borrow_mut();
             for parts in fallen {
@@ -999,9 +1000,9 @@ impl Game {
                 }
             }
         }
-        if self.asm_seen != self.physics.asm_epoch {
-            self.asm_seen = self.physics.asm_epoch;
-            let now = self.physics.assembly_list();
+        if self.asm_seen != self.physics.borrow_mut().asm_epoch {
+            self.asm_seen = self.physics.borrow_mut().asm_epoch;
+            let now = self.physics.borrow_mut().assembly_list();
             let mut as_: Vec<J> = vec![];
             for (r, d) in &now {
                 if self.asm_sent.get(r) != Some(d) {
@@ -1016,7 +1017,7 @@ impl Game {
         }
         if self.frame % 2 == 0 {
             let dm = self.dm.borrow();
-            self.ph_cache = self.physics.collect_phys(&dm);
+            self.ph_cache = self.physics.borrow_mut().collect_phys(&dm);
         }
     }
 

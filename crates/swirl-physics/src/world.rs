@@ -643,7 +643,7 @@ impl Physics {
         }
     }
 
-    fn make_joints(&mut self, dm: &DataModel, list: &[InstId]) {
+    pub fn make_joints(&mut self, dm: &DataModel, list: &[InstId]) {
         if list.is_empty() {
             return;
         }
@@ -1395,6 +1395,10 @@ impl Physics {
                 b.set_linvel(Vector::new((vel[0] + j[0]) as f32, (vel[1].max(0.0) + 4.0) as f32, (vel[2] + j[1]) as f32), true);
             }
         }
+    }
+
+    pub fn touching_parts(&self, id: InstId) -> Vec<InstId> {
+        self.touching.get(&id).map(|s| s.iter().copied().collect()).unwrap_or_default()
     }
 
     pub fn root_part(&self, id: InstId) -> InstId {

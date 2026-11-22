@@ -338,6 +338,10 @@ fn one_wire(a: &[J], i: &mut usize) -> Option<Wire> {
             Wire::S(v)
         }
         "i" => Wire::I(take(i, 1)[0] as u32),
+        "ray" => {
+            let v = take(i, 6);
+            Wire::List(v.into_iter().map(Wire::N).collect())
+        }
         "v3" => {
             let v = take(i, 3);
             Wire::V3([v[0], v[1], v[2]])

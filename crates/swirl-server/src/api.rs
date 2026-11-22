@@ -46,6 +46,7 @@ pub struct ApiState {
     pub social: Vec<SocialReq>,
     pub directed: Vec<(InstId, J)>,
     pub assets_wanted: Vec<(u32, u64)>,
+    pub path_cache: HashMap<String, (std::time::Instant, (i32, Vec<([f64; 3], bool)>))>,
     pub info_cache: HashMap<String, (std::time::Instant, Option<J>)>,
 }
 
@@ -105,6 +106,7 @@ pub fn new_state(assets_dir: &str, data_dir: &str, place_id: u64, era: i32) -> S
         social: vec![],
         directed: vec![],
         assets_wanted: vec![],
+        path_cache: HashMap::new(),
         info_cache: HashMap::new(),
     }))
 }
@@ -116,6 +118,8 @@ pub const METHODS: &[&str] = &[
     "AwardBadge", "UserHasBadge", "PlayerOwnsAsset", "UserOwnsGamePassAsync", "PlayerHasPass", "GetProductInfo", "PlayerCanMakePurchases", "PromptPurchase",
     "PromptProductPurchase", "PromptGamePassPurchase", "Teleport", "TeleportToSpawnByName", "TeleportToPlaceInstance", "GetRobuxBalance", "PerformPurchase",
     "LoadAsset", "loadAsset", "Insert", "FindFirstAncestor", "FindFirstAncestorOfClass", "GetDebugId", "GetServerTimeNow", "AddTag", "RemoveTag", "HasTag", "GetTags", "GetTagged",
+    "FindPartOnRay", "findPartOnRay", "FindPartOnRayWithIgnoreList", "findPartOnRayWithIgnoreList", "FindPartOnRayWithWhitelist", "GetMass", "getMass", "GetConnectedParts",
+    "GetRootPart", "GetTouchingParts", "BreakJoints", "breakJoints", "MakeJoints", "makeJoints", "__ComputePath",
     "GetTeams", "GetMinutesAfterMidnight", "SetMinutesAfterMidnight", "getMinutesAfterMidnight", "setMinutesAfterMidnight",
 ];
 
@@ -387,7 +391,7 @@ impl ApiState {
     }
 }
 
-pub struct Api(pub Shared);
+pub struct Api(pub Shared, pub Rc<RefCell<swirl_physics::Physics>>);
 
 fn num(a: &[Wire], i: usize) -> Option<f64> {
     match a.get(i) {
@@ -466,6 +470,137 @@ impl ApiHandler for Api {
                 Some(Res::Ok(vec![Wire::List(list)]))
             }
             "GetTranslatorForPlayer" => Some(Res::Ok(vec![Wire::Nil])),
+            "FindPartOnRay" | "findPartOnRay" | "FindPartOnRayWithIgnoreList" | "findPartOnRayWithIgnoreList" | "FindPartOnRayWithWhitelist" if class == "Workspace" => {
+                let ray = match args.first() {
+                    Some(Wire::List(l)) if l.len() == 6 => l.iter().map(|w| if let Wire::N(n) = w { *n } else { 0.0 }).collect::<Vec<f64>>(),
+                    _ => return Some(Res::Ok(vec![Wire::Nil, Wire::V3([0.0; 3]), Wire::V3([0.0, 1.0, 0.0])])),
+                };
+                let o = [ray[0], ray[1], ray[2]];
+                let dd = [ray[3], ray[4], ray[5]];
+                let mut ignore: Vec<InstId> = vec![];
+                match args.get(1) {
+                    Some(Wire::I(i)) => ignore.push(*i),
+                    Some(Wire::List(l)) => {
+                        for w in l {
+                            if let Wire::I(i) = w {
+                                ignore.push(*i);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                if method == "FindPartOnRayWithWhitelist" {
+                    let mut allow: HashSet<InstId> = HashSet::new();
+                    for x in ignore.drain(..) {
+                        allow.insert(x);
+                        let mut v = vec![];
+                        d.descendants(x, &mut v);
+                        allow.extend(v);
+                    }
+                    let ws = d.services.get("Workspace").copied()?;
+                    let mut all = vec![];
+                    d.descendants(ws, &mut all);
+                    ignore = all.into_iter().filter(|p| d.is_a(*p, "BasePart") && !allow.contains(p)).collect();
+                }
+                let ph = self.1.borrow();
+                let r = ph.raycast(d, o, dd, &ignore, None);
+                Some(Res::Ok(vec![r.part.map(Wire::I).unwrap_or(Wire::Nil), Wire::V3(r.point), Wire::V3(r.normal)]))
+            }
+            "GetMass" | "getMass" if d.is_a(id, "BasePart") => {
+                let s = match d.get_prop(id, "Size") {
+                    Some(Val::Arr(a)) if a.len() >= 3 => [a[0], a[1], a[2]],
+                    _ => [1.0; 3],
+                };
+                Some(Res::Ok(vec![Wire::N(s[0] * s[1] * s[2] * 0.7)]))
+            }
+            "GetConnectedParts" if d.is_a(id, "BasePart") => {
+                let l = self.1.borrow().connected_parts(id);
+                Some(Res::Ok(vec![Wire::List(l.into_iter().map(Wire::I).collect())]))
+            }
+            "GetRootPart" if d.is_a(id, "BasePart") => Some(Res::Ok(vec![Wire::I(self.1.borrow().root_part(id))])),
+            "GetTouchingParts" if d.is_a(id, "BasePart") => {
+                let l = self.1.borrow().touching_parts(id);
+                Some(Res::Ok(vec![Wire::List(l.into_iter().map(Wire::I).collect())]))
+            }
+            "BreakJoints" | "breakJoints" | "MakeJoints" | "makeJoints" if d.is_a(id, "BasePart") || class == "Model" => {
+                let parts: Vec<InstId> = if class == "Model" {
+                    let mut all = vec![];
+                    d.descendants(id, &mut all);
+                    all.into_iter().filter(|p| d.is_a(*p, "BasePart")).collect()
+                } else {
+                    vec![id]
+                };
+                let mut ph = self.1.borrow_mut();
+                if method.starts_with('B') || method.starts_with('b') {
+                    for p in parts {
+                        ph.break_joints(d, p);
+                    }
+                } else {
+                    ph.make_joints(d, &parts);
+                }
+                Some(Res::Ok(vec![]))
+            }
+            "__ComputePath" if class == "PathfindingService" => {
+                let v3 = |w: Option<&Wire>| match w {
+                    Some(Wire::V3(v)) => Some(*v),
+                    _ => None,
+                };
+                let (start, goal) = match (v3(args.first()), v3(args.get(1))) {
+                    (Some(a), Some(b)) => (a, b),
+                    _ => return Some(Res::Ok(vec![Wire::Dict(vec![("status".into(), Wire::N(5.0)), ("points".into(), Wire::List(vec![])), ("jumps".into(), Wire::List(vec![]))])])),
+                };
+                let radius = num(args, 2).filter(|r| *r != 0.0).unwrap_or(2.0);
+                let height = num(args, 3).filter(|r| *r != 0.0).unwrap_or(5.0);
+                let can_jump = !matches!(args.get(4), Some(Wire::B(false)));
+                let key = [start[0] / 4.0, start[2] / 4.0, goal[0] / 4.0, goal[2] / 4.0].iter().map(|v| format!("{}", v.round() as i64)).collect::<Vec<_>>().join(",");
+                let now = std::time::Instant::now();
+                let cached = st.path_cache.get(&key).filter(|(t, _)| now.duration_since(*t).as_millis() < 400).map(|(_, r)| (r.0, r.1.clone()));
+                let (status, pts) = match cached {
+                    Some((s, mut p)) => {
+                        if let Some(f) = p.first_mut() {
+                            *f = (start, false);
+                        }
+                        (s, p)
+                    }
+                    None => {
+                        let ph = self.1.borrow();
+                        let solid = |p: InstId| -> bool {
+                            if matches!(d.get_prop(p, "CanCollide"), Some(Val::Bool(false))) {
+                                return false;
+                            }
+                            let mut x = d.get(p).and_then(|i| i.parent);
+                            let mut n = 0;
+                            while let Some(xi) = x {
+                                if n >= 3 {
+                                    break;
+                                }
+                                if d.get(xi).map(|i| i.class == "Model").unwrap_or(false) && d.find_child_of_class(xi, "Humanoid").is_some() {
+                                    return false;
+                                }
+                                x = d.get(xi).and_then(|i| i.parent);
+                                n += 1;
+                            }
+                            true
+                        };
+                        let cast = |o: [f64; 3], dir: [f64; 3]| -> swirl_physics::path::CastHit {
+                            let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+                            let r = ph.raycast(d, o, dir, &[], Some(&solid));
+                            let miss = r.part.is_none() && ((r.point[0] - o[0]).powi(2) + (r.point[1] - o[1]).powi(2) + (r.point[2] - o[2]).powi(2)).sqrt() >= len - 1e-3;
+                            swirl_physics::path::CastHit { hit: !miss, point: r.point, normal: r.normal }
+                        };
+                        let res = swirl_physics::path::find_path(&cast, start, goal, radius, height, can_jump);
+                        let pts: Vec<([f64; 3], bool)> = res.points.iter().map(|w| (w.pos, w.jump)).collect();
+                        if st.path_cache.len() > 64 {
+                            st.path_cache.clear();
+                        }
+                        st.path_cache.insert(key, (now, (res.status, pts.clone())));
+                        (res.status, pts)
+                    }
+                };
+                let points: Vec<Wire> = pts.iter().map(|(p, _)| Wire::V3(*p)).collect();
+                let jumps: Vec<Wire> = pts.iter().map(|(_, j)| Wire::B(*j)).collect();
+                Some(Res::Ok(vec![Wire::Dict(vec![("status".into(), Wire::N(status as f64)), ("points".into(), Wire::List(points)), ("jumps".into(), Wire::List(jumps))])]))
+            }
             "LoadAsset" | "loadAsset" if class == "InsertService" => {
                 let id = num(args, 0).map(|n| n as u64).unwrap_or(0);
                 if id == 0 {

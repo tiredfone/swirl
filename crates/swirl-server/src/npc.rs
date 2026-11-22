@@ -105,14 +105,14 @@ impl Game {
         drop(dm);
         let dm = self.dm.clone();
         let dmr = dm.borrow();
-        let proxy = CharacterProxy::new(&mut self.physics, &dmr, model);
-        self.physics.remove_char_parts(&dmr, model);
+        let proxy = CharacterProxy::new(&mut *self.physics.borrow_mut(), &dmr, model);
+        self.physics.borrow_mut().remove_char_parts(&dmr, model);
         drop(dmr);
         self.npcs.insert(model, Npc { model, hum, rig, proxy: Some(proxy), ctrl: None, torso_cf, vel: [0.0; 3], state: humanoid::IDLE, dead: false, dirty: false, move_to: None, last_running: None, last_swim: None, last_step_cf: None });
     }
 
     fn physics_is_excluded(&self, model: InstId) -> bool {
-        self.physics.excluded.contains(&model)
+        self.physics.borrow_mut().excluded.contains(&model)
     }
 
     pub fn set_move_to(&mut self, hum: InstId, pos: Option<[f64; 3]>, part: Option<InstId>) {
@@ -189,7 +189,7 @@ impl Game {
             }
             _ => return,
         };
-        self.physics.dead_chars.insert(model);
+        self.physics.borrow_mut().dead_chars.insert(model);
         {
             let mut dm = self.dm.borrow_mut();
             if matches!(dm.get_prop(hum, "Health"), Some(Val::Num(h)) if *h > 0.0) && dm.get(hum).map(|i| !i.destroyed).unwrap_or(false) {
@@ -215,7 +215,7 @@ impl Game {
                 };
                 [n(), n()]
             };
-            self.physics.activate_parts(&mut dm, &parts, vel, &mut rnd);
+            self.physics.borrow_mut().activate_parts(&mut dm, &parts, vel, &mut rnd);
         }
         self.host.fire(hum, "Died", vec![]);
         self.debris.push((self.t + 15.0, model));
@@ -224,10 +224,10 @@ impl Game {
     pub fn drop_npc(&mut self, model: InstId) {
         if let Some(n) = self.npcs.get_mut(&model) {
             if let Some(mut p) = n.proxy.take() {
-                p.destroy(&mut self.physics);
+                p.destroy(&mut *self.physics.borrow_mut());
             }
             if let Some(mut c) = n.ctrl.take() {
-                c.destroy(&mut self.physics);
+                c.destroy(&mut *self.physics.borrow_mut());
             }
         }
     }
@@ -276,7 +276,7 @@ impl Game {
                     n.dirty = false;
                     n.rig.build(&dm);
                     if let Some(p) = n.proxy.as_mut() {
-                        p.refresh(&mut self.physics, &dm);
+                        p.refresh(&mut *self.physics.borrow_mut(), &dm);
                     }
                 }
             }
@@ -342,26 +342,26 @@ impl Game {
             let mut dm = dmc.borrow_mut();
             let mut n = self.npcs.shift_remove(&model).unwrap();
             if n.ctrl.is_none() {
-                n.ctrl = Some(Controller::new(&mut self.physics, &dm, model, hum));
+                n.ctrl = Some(Controller::new(&mut *self.physics.borrow_mut(), &dm, model, hum));
             }
-            let r = n.ctrl.as_mut().unwrap().update(&mut self.physics, &mut dm, dt, &Input { mv, jump: want_jump, face: None });
+            let r = n.ctrl.as_mut().unwrap().update(&mut *self.physics.borrow_mut(), &mut dm, dt, &Input { mv, jump: want_jump, face: None });
             let prev = n.state;
             n.torso_cf = r.cf;
             n.vel = r.vel;
             n.state = r.state;
-            let poses = n.rig.pose(&self.physics, &dm, &n.torso_cf);
+            let poses = n.rig.pose(&self.physics.borrow(), &dm, &n.torso_cf);
             for (p, c) in poses.iter() {
-                self.physics.write_prop(&mut dm, *p, "CFrame", Val::Arr(c.to_vec()));
+                self.physics.borrow_mut().write_prop(&mut dm, *p, "CFrame", Val::Arr(c.to_vec()));
             }
             if let Some(rt) = humanoid::root_of(&dm, model) {
-                self.physics.write_prop(&mut dm, rt, "Velocity", Val::Arr(n.vel.to_vec()));
+                self.physics.borrow_mut().write_prop(&mut dm, rt, "Velocity", Val::Arr(n.vel.to_vec()));
             }
             if let Some(p) = n.proxy.as_mut() {
-                p.update(&mut self.physics, &dm, &n.torso_cf, &poses);
+                p.update(&mut *self.physics.borrow_mut(), &dm, &n.torso_cf, &poses);
             }
             drop(dm);
             if n.last_step_cf.map(|l| l != n.torso_cf).unwrap_or(true) {
-                self.physics.stir();
+                self.physics.borrow_mut().stir();
                 n.last_step_cf = Some(n.torso_cf);
             }
             self.npcs.insert(model, n);

@@ -43,7 +43,7 @@ fn main() {
     }
     if std::env::var("DBG").is_ok() {
         let dm = g.dm.borrow();
-        let r = g.physics.raycast(&dm, [2.0, 0.5, 0.0], [4.0, 0.0, 0.0], &[], None);
+        let r = g.physics.borrow().raycast(&dm, [2.0, 0.5, 0.0], [4.0, 0.0, 0.0], &[], None);
         eprintln!("ray hit {:?} at {:?}", r.part.map(|p| dm.name(p).to_string()), r.point);
     }
     std::fs::write(&a[4], serde_json::Value::Array(trace).to_string()).unwrap();
