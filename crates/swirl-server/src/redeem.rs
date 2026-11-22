@@ -29,6 +29,7 @@ impl Redeemer {
 
     pub async fn redeem(&self, ticket: &str) -> Option<J> {
         if ticket.len() != 64 || !ticket.bytes().all(|b| b.is_ascii_hexdigit()) {
+            eprintln!("ticket has the wrong shape (length {})", ticket.len());
             return None;
         }
         let text = self.post(&self.path, "application/x-www-form-urlencoded", &format!("ticket={}", ticket)).await?;
@@ -36,6 +37,7 @@ impl Redeemer {
         if j["ok"].as_bool() == Some(true) {
             Some(j)
         } else {
+            eprintln!("ticket refused: {}", j["error"].as_str().unwrap_or("no reason given").chars().take(120).collect::<String>());
             None
         }
     }
@@ -64,6 +66,7 @@ impl Redeemer {
         let text = String::from_utf8_lossy(&buf).to_string();
         let (head, body) = text.split_once("\r\n\r\n")?;
         if !head.starts_with("HTTP/1.1 200") && !head.starts_with("HTTP/1.0 200") {
+            eprintln!("redeem endpoint answered {}", head.lines().next().unwrap_or("").chars().take(40).collect::<String>());
             return None;
         }
         Some(if head.to_ascii_lowercase().contains("transfer-encoding: chunked") { dechunk(body) } else { body.to_string() })

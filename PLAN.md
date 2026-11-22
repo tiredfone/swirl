@@ -178,3 +178,62 @@ When Swirl Studio is built it is desktop only: native, alongside `swirl-desktop`
 - Textures arrive through Chocolate's `loadImage` (flipY bitmaps), which waits for the world so the 2018 content index is loaded.
 - `tools/compare-shots.cjs` now restarts the server per side so both join as the same user; `EVAL`, `EVALOUT`, `FAILS` env options; `tools/pair-diff.sh` prints mean abs diff and % pixels over 16.
 - Still different: gradient dome colours in 2018, smooth terrain (2018 atlas shader not ported), truss texture, Reflectance env map, wedge stud/UV details, mesh Offset on file meshes, package CharacterMesh limbs, R15 characters and animation pose timing, sun and moon sprites, vendor content2018/platform subset added (17 MB).
+
+## Server port: independence, config and feature inventory (server 4)
+
+Owner direction: Swirl is 1:1 with Chocolate and vanilla but in Rust and depends on neither. Done for the server:
+
+- `config.local.php` (gitignored, array of `redeem_url`, `redeem_key`, `site_url`; optional `port`, `assets_dir`, `data_dir`, `presence_path`, `log_file`, committed template `config.example.php`) is read by `swirl-server` (`config.rs`, a small parser for that array format). CLI flags override it (`--config=`, `--port=`, `--assets=`, `--store=`, `--site=`, `--redeem-url=`, `--redeem-key-file=`, `--no-redeem`). The key is never printed or logged. With a key configured tickets are checked; without one (or with `--no-redeem`) any ticket is accepted and the default place is `--place`/`--era`. The wasm client's `?swirlws=` dev override sends the ticket `dev`, so test it against a `--no-redeem` server; real redemption is tested with `tools/swirl-ticket-join.cjs`.
+- No runtime or build dependency on Chocolate: the Lua runtimes and tables are Swirl-owned in `crates/swirl-lua/data/` (`runtime.lua`, `runtime2018.lua`, `luadata.lua`, `events.json`, `members.json`, `stubs.json`), the character scripts and the 2018 core bundle are in `data/server/` (`--data=` or `SWIRL_DATA`), `build.rs` no longer compares anything. `tools/compare-chocolate.sh` reports differences for information only. `tools/dump-*.mjs` are one-off generators that read Chocolate (they produced the JSON tables); rerun them only to pick up new Chocolate behaviour on purpose. `swirl-client` still uses `vendor/chocolate` (client crate, other owner).
+- DataStore and per-player data are stored in `data/store/` (gitignored; `data_dir` or `SWIRL_STORE`), in Chocolate's formats (`<place>.json` store map; `players/<place>/<uid>.json` with n, s, b, i).
+
+### Parity harness
+
+`tools/parity-server/choc-run.mjs <place> <era> <ms>` runs Chocolate's real `Game` headless (`CHOCOLATE_DATA_DIR=/tmp/claude-1000/chocdata`, dummy social key) and writes the normalised script output to `/tmp/swirl/par/<place>.choc.log`; `swirl-run.sh <place> <era> <port> <ms>` runs `swirl-server --no-redeem` and joins once; `compare.py <place>` diffs error, warn and print lines (script name, line number and player name normalised). Results: places 564, 1669 (2012) and 3, 1969 (2018) give identical script output. Not compared yet: replication stream contents (Chocolate 1969 sends about 300 `rep` frames in 10 s because its NPCs move; Swirl 5), physics trajectories (no physics in Swirl).
+
+### Feature inventory (Chocolate source, Swirl status)
+
+Status: done, partial, missing.
+
+| Chocolate | Feature | Swirl |
+| --- | --- | --- |
+| `server/main.js` | one process, many place instances (public, private `priv:`, reserved `res:`, `job:` join), choose instance from the ticket (`maxPlayers`, `allowGear`, `clientVersion`, `serverKey`), 60 instances, 4 starts per user per 5 min | done (`main.rs`, one thread per instance in `instance.rs`) |
+| `main.js` | ticket redemption with `X-Chocolate-Key`, bad ticket kick, 4 sockets per user, kick of the older session of the same user | done |
+| `main.js` | `/status`, `/kick`, `/shutdown`, `/run`, `/restart` with the key check (constant time, empty key refuses everything) | done; `/restart` re-execs the same arguments through `setsid` |
+| `main.js` | presence post every 60 s and on change, with idle, session, acts, kinds and cells from `noteActivity` | done |
+| `main.js` | idle shutdown after 90 s, message size 64 KB, 120 messages per second with 6 strikes, pings every 20 s | done |
+| `main.js` | per-IP limits (sockets, pending, connects per minute, bad tickets), buffered-bytes drop, join timeout, `X-Forwarded-For` | missing (the server only listens on loopback behind Apache) |
+| `main.js`, `teamcreate.js` | Studio team sessions (`mode: studio`), Play Solo test instances, collaborators | missing (Swirl Studio is desktop only; the server kicks studio tickets) |
+| `server/game.js` start | place load, services, Camera, Terrain, scripts started, core 2018 bundle | done |
+| `game.js` join | Player (userId, MembershipType, AccountAge, DataReady), Backpack, PlayerGui, `SolarPerks` (badge, ChatColor, NameColor), team assignment, StarterPlayer and PlayerScripts for 2018, snapshot, `init` | done; DataReady is set at once and DataComplexity is not maintained; `NetworkServer` replicators missing |
+| `game.js` | `Players.MaxPlayers` full check | done by the supervisor from the ticket |
+| `game.js` loadCharacter | R6 character, body colours, hats and accessories, shirts and pants, face, Motor6D joints, character scripts, respawn after 5 s | done for R6 and the 2018 R6 rig |
+| `game.js` loadCharacter | R15 character, scale, packages and `R15ArtistIntent` merging, animations replacing the Animate StringValues, avatar type | missing (`UserInfo` carries `r15`, `scale`, `animations`; nothing uses them yet) |
+| `game.js` | gear from the user's equipped gear (`allowedGear`, `gearFor`, `gearGenres`, `gearMap`) and `allowGear` | missing (`Game.allow_gear` is set but unused) |
+| `game.js` | tools: equip, unequip, drop, `act`, mouse and Hit, toolanim | done except toolanim and mouse Target for 2018 |
+| `game.js` | chat: filtering (`cleanText`), rate limit, Chatted, team chat, `noteChat` | partial (clean and rate limit, no filtering service) |
+| `game.js` | RemoteEvent, RemoteFunction, InvokeClient timeout | done (`re`, `rf`; InvokeClient timeout missing) |
+| `game.js` | friends: statuses, requests, revoke (`social` `statuses`, `request`, `revoke`) | missing |
+| `game.js` | MarketplaceService: product info, owns, prompt, purchase, receipts | partial: GetProductInfo, PlayerOwnsAsset, UserOwnsGamePassAsync, PlayerHasPass, PlayerCanMakePurchases, Prompt*Purchase are done; `purchase`, `balance`, `pendingReceipts`, `grantReceipt`, `__Receipt`, PerformPurchase missing |
+| `game.js` | BadgeService AwardBadge and UserHasBadge, award message | done |
+| `game.js` | groups (`IsInGroup`, `GetRankInGroup`, `GetRoleInGroup`), `IsFriendsWith`, `GetFriendsOnline`, `GetUserIdFromNameAsync`, `GetNameFromUserIdAsync` | stubs (always false, rank 0, Guest) |
+| `game.js` | TeleportService (sends `teleport`) | done |
+| `game.js` | `LoadAsset`, `Insert`, `linkedSource`, library preload (RbxGui, RbxGear, RbxUtility, RbxStamper) | LoadAsset and Insert done (disk, then the site); LinkedSource and library preload missing |
+| `game.js`, `persistence.js` | DataStoreService (Get, Set, Update, Increment, Remove, ordered), Player Save and Load (Number, String, Boolean) | done; SaveInstance and LoadInstance missing |
+| `game.js` | HttpService | not enabled in Chocolate either (its stubs error); JSONEncode and JSONDecode live in `runtime2018.lua` |
+| `game.js` | reports (`social.js` `report`) | missing (not called from Swirl; Chocolate sends them from the in-game menu through `POST /api/chocolate/report`) |
+| `game.js` | debugger (`DebugAgent`), `runCode` | `runCode` done; debugger missing |
+| `game.js` | `anim` messages from clients relayed to others | done |
+| `shared/animator.js` | LoadAnimation, AnimationTrack Play, Stop, AdjustSpeed, AdjustWeight, KeyframeReached, Stopped, Length, Looped, TimePosition, WeightCurrent, snapshot for joiners | done on the server side (no joint blending into server-side Motor6D `anim`, no priority) |
+| `shared/humanoid.js` | Humanoid server behaviour: states, MoveTo and MoveToFinished, Jump, Move, sit and seats, vehicle seats, skateboards, NPC characters, tools for NPCs, `Rig`, `Controller`, `CharacterProxy` | missing (only health, death, respawn and player-driven `char` messages) |
+| `shared/physics.js` | rapier world: unanchored parts, assemblies, Weld, WeldConstraint, Motor joints, hinges, surface joints, sleeping, network ownership, collision groups, Touched/TouchEnded for moving parts, terrain colliders, explosions, `ph`/`as`/`ad` streaming, FindPartOnRay and regions | missing (Touched only for characters against anchored parts, SAT in `touch.rs`) |
+| `shared/pathfinding.js` | PathfindingService | missing (`CreatePath`/`FindPathAsync` are in the Lua runtime and call `__ComputePath`, which is not implemented) |
+| `shared/collisiongroups.js` | PhysicsService | missing (stubs) |
+| `shared/terrain*.js` | ChocolateTerrain, Terrain Lua API | missing (replicated as an opaque BinaryString only) |
+| `shared/luahost.js`, `api2018.js` | host methods and computed properties (537 method names) | partial: about 300 are implemented or stubbed; the rest are listed below |
+| `shared/runtime*.lua` | Lua runtime | done (identical copy, Swirl-owned) |
+| `shared/codec.js`, `server/replicator.js` | `init`, `rep` ops (p, m, n, d), scoped containers, snapshots | done (`codec.rs`), no priority or size limits |
+| `shared/core2018.js`, `luadata` | 2018 core bundle (server starter) | done (`core2018.rs`) |
+| `shared/csg.js` | union bounds for physics | missing with physics |
+
+Methods Chocolate defines that Swirl does not yet implement (by class; names only, from `tools/dump-members.mjs`): Terrain (cell and voxel API, 25), BasePart and Model (BreakJoints, MakeJoints, GetMass, GetConnectedParts, GetTouchingParts, GetRootPart, Resize, GetPivot, PivotTo, MoveTo, TranslateBy, GetModelCFrame, GetModelSize, GetExtentsSize, SetPrimaryPartCFrame, GetPrimaryPartCFrame), Humanoid (MoveTo, ChangeState, GetState, GetAccessories, AddAccessory, RemoveAccessories, GetLimb, GetBodyPartR15, BuildRigFromAttachments, GetMoveVelocity), Player (Kick, GetMouse, ClearCharacterAppearance, DistanceFromCharacter, friend methods, JumpCharacter, MoveCharacter, RemoveCharacter), Workspace (FindPartOnRay, FindPartOnRayWithIgnoreList, FindPartOnRayWithWhitelist, FindPartsInRegion3), PhysicsService (collision groups), Players (Chat, TeamChat, WhisperChat, GetUserThumbnailAsync, ReportAbuse), DataModel (GetMessage, SetMessage, ClearMessage, Shutdown, FindService, IsLoaded), MarketplaceService (the Signal* methods), InsertService (the free-model queries), ScriptContext (AddCoreScript, AddStarterScript, RegisterLibrary), HopperBin, SoundService, LogService, Lighting sun and moon directions, TextService GetTextSize, Camera and GUI client-only methods (they only matter to a client and Chocolate answers them with stubs on the server).
