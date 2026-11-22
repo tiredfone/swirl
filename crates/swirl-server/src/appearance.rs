@@ -5,6 +5,7 @@ use swirl_core::instance::{DataModel, InstId, Val};
 pub struct Look {
     pub colors: Option<[i64; 6]>,
     pub assets: Vec<(u64, Vec<u8>)>,
+    pub gear: Vec<(u64, Vec<u8>)>,
 }
 
 fn int_of(xml: &str, name: &str) -> Option<i64> {
@@ -151,4 +152,43 @@ pub fn apply(dm: &mut DataModel, model: InstId, look: &Look) {
             wearable(dm, model, m);
         }
     }
+}
+
+pub async fn gear_ids(site: &Site, uid: i64) -> Vec<u64> {
+    match site.get(&format!("/User/Gears?userId={}", uid)).await {
+        Some(b) => {
+            let t = String::from_utf8_lossy(&b).to_string();
+            let mut out = vec![];
+            let mut cur = String::new();
+            for c in t.chars().chain(std::iter::once(' ')) {
+                if c.is_ascii_digit() {
+                    cur.push(c);
+                } else if !cur.is_empty() {
+                    if let Ok(n) = cur.parse::<u64>() {
+                        if n > 0 {
+                            out.push(n);
+                        }
+                    }
+                    cur.clear();
+                }
+            }
+            out
+        }
+        None => vec![],
+    }
+}
+
+pub async fn load_gear(site: &Site, assets_dir: &str, ids: &[u64]) -> Vec<(u64, Vec<u8>)> {
+    let mut out = vec![];
+    for id in ids.iter().take(40) {
+        let local = std::fs::read(format!("{}/assets/{}", assets_dir, id)).ok();
+        let bytes = match local {
+            Some(b) => Some(b),
+            None => site.get(&format!("/asset/?id={}", id)).await,
+        };
+        if let Some(b) = bytes {
+            out.push((*id, strip_header(b)));
+        }
+    }
+    out
 }

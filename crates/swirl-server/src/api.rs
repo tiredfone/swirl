@@ -68,6 +68,7 @@ pub enum SocialKind {
     Mkt(InstId, i64, u8),
     Pending(InstId),
     Grant,
+    Report,
 }
 
 pub struct SocialReq {
@@ -205,7 +206,7 @@ impl ApiState {
                 let msg = r.as_ref().and_then(|j| if awarded { j["message"].as_str().map(|m| m.to_string()) } else { None });
                 (Ok(vec![Wire::B(awarded)]), msg)
             }
-            SocialKind::Mkt(..) | SocialKind::Pending(_) | SocialKind::Grant => (Ok(vec![]), None),
+            SocialKind::Mkt(..) | SocialKind::Pending(_) | SocialKind::Grant | SocialKind::Report => (Ok(vec![]), None),
             SocialKind::Info => match r.and_then(|j| if j["info"].is_null() { None } else { Some(j["info"].clone()) }) {
                 Some(info) => (Ok(vec![json_wire(&info)]), None),
                 None => (Err("Invalid asset id".into()), None),

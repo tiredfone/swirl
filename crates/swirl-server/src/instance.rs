@@ -65,6 +65,7 @@ pub fn spawn(spec: Spec) -> Handle {
                     }
                 };
                 game.allow_gear = spec.allow_gear;
+                game.job = spec.job.clone();
                 r2.store(true, Ordering::SeqCst);
                 let (stx, mut srx) = unbounded_channel::<(u32, crate::api::SocialKind, Option<serde_json::Value>)>();
                 let social = spec.social.clone();
@@ -124,7 +125,8 @@ pub fn spawn(spec: Spec) -> Handle {
                             for req in game.social_requests() {
                                 match &social {
                                     Some((r, path)) => {
-                                        let (r, path, stx) = (r.clone(), path.clone(), stx.clone());
+                                        let path = if matches!(req.kind, crate::api::SocialKind::Report) { r.sibling_path("report") } else { path.clone() };
+                                        let (r, stx) = (r.clone(), stx.clone());
                                         tokio::task::spawn_local(async move {
                                             let out = r.post(&path, "application/json", &req.body.to_string()).await.and_then(|t| serde_json::from_str::<serde_json::Value>(t.trim()).ok()).filter(|j| j["ok"].as_bool() == Some(true));
                                             let _ = stx.send((req.token, req.kind, out));

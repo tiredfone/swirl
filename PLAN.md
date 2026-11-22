@@ -209,7 +209,7 @@ Status: done, partial, missing.
 | `game.js` | `Players.MaxPlayers` full check | done by the supervisor from the ticket |
 | `game.js` loadCharacter | R6 character, body colours, hats and accessories, shirts and pants, face, Motor6D joints, character scripts, respawn after 5 s | done for R6 and the 2018 R6 rig |
 | `game.js` loadCharacter | R15 character, scale, packages and `R15ArtistIntent` merging, animations replacing the Animate StringValues, avatar type | missing (`UserInfo` carries `r15`, `scale`, `animations`; nothing uses them yet) |
-| `game.js` | gear from the user's equipped gear (`allowedGear`, `gearFor`, `gearGenres`, `gearMap`) and `allowGear` | missing (`Game.allow_gear` is set but unused) |
+| `game.js` | gear from the user's equipped gear (`allowedGear`, `gearFor`, `gearGenres`, `gearMap`) and `allowGear` | done in code (`/User/Gears` ids filtered by genre, model loaded per spawn into the Backpack when allowGear is on); untested because the test account owns no gear |
 | `game.js` | tools: equip, unequip, drop, `act`, mouse and Hit, toolanim | done except toolanim and mouse Target for 2018 |
 | `game.js` | chat: filtering (`cleanText`), rate limit, Chatted, team chat, `noteChat` | partial (clean and rate limit, no filtering service) |
 | `game.js` | RemoteEvent, RemoteFunction, InvokeClient timeout | done (`re`, `rf`; InvokeClient timeout missing) |
@@ -221,7 +221,7 @@ Status: done, partial, missing.
 | `game.js` | `LoadAsset`, `Insert`, `linkedSource`, library preload (RbxGui, RbxGear, RbxUtility, RbxStamper) | LoadAsset and Insert done (disk, then the site); LinkedSource and library preload missing |
 | `game.js`, `persistence.js` | DataStoreService (Get, Set, Update, Increment, Remove, ordered), Player Save and Load (Number, String, Boolean) | done; SaveInstance and LoadInstance missing |
 | `game.js` | HttpService | not enabled in Chocolate either (its stubs error); JSONEncode and JSONDecode live in `runtime2018.lua` |
-| `game.js` | reports (`social.js` `report`) | missing (not called from Swirl; Chocolate sends them from the in-game menu through `POST /api/chocolate/report`) |
+| `game.js` | reports (`social.js` `report`) | done (client `report` message, 20 s limit, last 25 chat lines, posted to the site's report endpoint; not exercised live because it writes a report row) |
 | `game.js` | debugger (`DebugAgent`), `runCode` | `runCode` done; debugger missing |
 | `game.js` | `anim` messages from clients relayed to others | done |
 | `shared/animator.js` | LoadAnimation, AnimationTrack Play, Stop, AdjustSpeed, AdjustWeight, KeyframeReached, Stopped, Length, Looped, TimePosition, WeightCurrent, snapshot for joiners | done on the server side (no joint blending into server-side Motor6D `anim`, no priority) |

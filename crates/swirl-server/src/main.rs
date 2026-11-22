@@ -51,6 +51,7 @@ struct Place {
     private_id: i64,
     max: usize,
     era: i32,
+    allow_gear: bool,
     handle: Handle,
     members: HashMap<u32, Member>,
     started: Instant,
@@ -222,7 +223,7 @@ async fn start_instance(sup: &Rc<RefCell<Sup>>, env: &Rc<Env>, place: u64, kind:
     let spec = Spec { place, job: job.clone(), kind: kind.to_string(), private_id, era, allow_gear, bytes: Arc::new(bytes), assets: env.assets.clone(), data_dir: env.data_dir.clone(), social: env.redeemer.as_ref().map(|r| (r.clone(), r.sibling_path("social"))), site: env.site.clone() };
     log(&format!("[place {} {}] starting (max {}, {} client)", place, if kind == "public" { job.clone() } else { format!("{} {}", kind, private_id) }, max, era));
     let handle = instance::spawn(spec);
-    s.places.insert(job.clone(), Place { job: job.clone(), place, kind: kind.to_string(), private_id, max, era, handle, members: HashMap::new(), started: Instant::now(), empty_since: None, dead: false });
+    s.places.insert(job.clone(), Place { job: job.clone(), place, kind: kind.to_string(), private_id, max, era, allow_gear, handle, members: HashMap::new(), started: Instant::now(), empty_since: None, dead: false });
     Ok(job)
 }
 
@@ -562,8 +563,20 @@ async fn ws_connection(stream: TcpStream, cid: u32, sup: Rc<RefCell<Sup>>, env: 
         }
     };
     let user = user_from(&info);
+    let allow_gear = sup.borrow().places.get(&job).map(|p| p.allow_gear).unwrap_or(false);
     let look = match &env.site {
-        Some(st) => appearance::fetch(st, &env.assets, user.id).await,
+        Some(st) => {
+            let mut l = appearance::fetch(st, &env.assets, user.id).await;
+            if allow_gear {
+                let mut ids = appearance::gear_ids(st, user.id).await;
+                let genres = &user.gear_genres;
+                if !genres.is_empty() {
+                    ids.retain(|id| user.gear_map[id.to_string()].as_array().map(|g| g.iter().any(|x| x.as_str().map(|s| genres.iter().any(|a| a == s)).unwrap_or(false))).unwrap_or(false));
+                }
+                l.gear = appearance::load_gear(st, &env.assets, &ids).await;
+            }
+            l
+        }
         None => appearance::Look::default(),
     };
     let cmd_tx = {

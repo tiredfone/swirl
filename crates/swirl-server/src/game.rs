@@ -55,6 +55,9 @@ pub struct Game {
     pub anim_state: HashMap<(InstId, String), J>,
     pub(crate) last_chat: HashMap<InstId, f64>,
     pub api: crate::api::Shared,
+    pub job: String,
+    pub(crate) chat_log: Vec<String>,
+    pub(crate) last_report: HashMap<InstId, f64>,
     pub(crate) mkt_ids: HashMap<u32, i64>,
     pub(crate) bought: HashMap<InstId, HashSet<String>>,
     pub(crate) receipt_busy: HashSet<InstId>,
@@ -160,7 +163,7 @@ impl Game {
                 host.scan_subtree(id);
             }
         }
-        let mut g = Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], anim_state: HashMap::new(), last_chat: HashMap::new(), api, mkt_ids: HashMap::new(), bought: HashMap::new(), receipt_busy: HashSet::new(), receipt_queue: HashMap::new(), receipt_wait: HashMap::new(), receipt_seq: 0, receipt_retry: vec![], mkt_window: HashMap::new(), physics, npcs: crate::npc::Npcs::new(), frame: 0, ph_cache: vec![], asm_sent: HashMap::new(), asm_seen: 0, asm_diff: None, ph_far: HashMap::new(), ph_n: HashMap::new(), flush_at: 0.0, allow_gear: true, pre_logs: vec![], kicks: vec![] };
+        let mut g = Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], anim_state: HashMap::new(), last_chat: HashMap::new(), api, job: String::new(), chat_log: vec![], last_report: HashMap::new(), mkt_ids: HashMap::new(), bought: HashMap::new(), receipt_busy: HashSet::new(), receipt_queue: HashMap::new(), receipt_wait: HashMap::new(), receipt_seq: 0, receipt_retry: vec![], mkt_window: HashMap::new(), physics, npcs: crate::npc::Npcs::new(), frame: 0, ph_cache: vec![], asm_sent: HashMap::new(), asm_seen: 0, asm_diff: None, ph_far: HashMap::new(), ph_n: HashMap::new(), flush_at: 0.0, allow_gear: true, pre_logs: vec![], kicks: vec![] };
         g.scan_npcs_all();
         for _ in 0..3 {
             g.host.tick(0.0);
@@ -311,6 +314,39 @@ impl Game {
         };
         for (c, bp) in made {
             self.host.notify_parent(c, None, Some(bp));
+        }
+        let gear: Vec<(u64, Vec<u8>)> = self.looks.get(&player).map(|l| l.gear.clone()).unwrap_or_default();
+        if self.allow_gear && !gear.is_empty() {
+            let added: Vec<(InstId, InstId)> = {
+                let mut dm = self.dm.borrow_mut();
+                let bp = match dm.find_child_of_class(player, "Backpack") {
+                    Some(b) => b,
+                    None => return,
+                };
+                let mut out = vec![];
+                for (_, bytes) in gear {
+                    let tree = match swirl_core::rbx::parse(&bytes) {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    };
+                    let tmp = match dm.create_any("Model", None) {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    };
+                    let made = dm.load_tree(&tree, tmp);
+                    let tool = made.iter().copied().find(|m| dm.get(*m).map(|i| i.class == "Tool" || i.class == "HopperBin").unwrap_or(false));
+                    if let Some(t) = tool {
+                        if dm.set_parent(t, Some(bp)).is_ok() {
+                            out.push((t, bp));
+                        }
+                    }
+                    dm.destroy(tmp);
+                }
+                out
+            };
+            for (c, bp) in added {
+                self.host.notify_parent(c, None, Some(bp));
+            }
         }
     }
 
@@ -502,7 +538,7 @@ impl Game {
                 }
                 return;
             }
-            SocialKind::Grant => return,
+            SocialKind::Grant | SocialKind::Report => return,
             _ => {}
         }
         let (res, msg) = self.api.borrow_mut().finish_social(kind, r);
@@ -655,6 +691,35 @@ impl Game {
                 if !others.is_empty() {
                     self.remote_out.push((others, m));
                 }
+            }
+            "report" => {
+                if self.t - self.last_report.get(&player).copied().unwrap_or(-999.0) < 20.0 {
+                    return;
+                }
+                self.last_report.insert(player, self.t);
+                let (rid, rname) = {
+                    let dm = self.dm.borrow();
+                    let id = match dm.get_prop(player, "userId") {
+                        Some(Val::Num(n)) => *n as i64,
+                        _ => 0,
+                    };
+                    (id, dm.name(player).to_string())
+                };
+                let target = v["p"].as_u64().map(|x| x as InstId).filter(|t| self.dm.borrow().get(*t).map(|i| i.class == "Player" && !i.destroyed).unwrap_or(false));
+                let tid = target.and_then(|t| match self.dm.borrow().get_prop(t, "userId") {
+                    Some(Val::Num(n)) => Some(*n as i64),
+                    _ => None,
+                }).unwrap_or(0);
+                let clean = |s: &str, n: usize| -> String { s.chars().filter(|c| !c.is_control()).take(n).collect::<String>().trim().to_string() };
+                let reason = clean(v["r"].as_str().unwrap_or(""), 80);
+                let chat: Vec<String> = self.chat_log.iter().rev().take(25).rev().cloned().collect();
+                let mut a = self.api.borrow_mut();
+                a.token += 1;
+                let token = a.token;
+                let place = a.place_id;
+                let job = self.job.clone();
+                eprintln!("report from {} ({}) about {}: {}", rname, rid, tid, reason);
+                a.social.push(crate::api::SocialReq { token, body: json!({"reporterId": rid, "targetId": tid, "placeId": place, "job": job, "reason": reason, "description": clean(v["m"].as_str().unwrap_or(""), 1500), "chat": chat}), kind: crate::api::SocialKind::Report });
             }
             "mkt" => {
                 let (win, cnt) = self.mkt_window.get(&player).copied().unwrap_or((0.0, 0));
@@ -824,6 +889,10 @@ impl Game {
                 } else {
                     vec![]
                 };
+                self.chat_log.push(format!("{}: {}", name, msg).chars().take(200).collect());
+                if self.chat_log.len() > 40 {
+                    self.chat_log.remove(0);
+                }
                 self.host.fire(player, "Chatted", vec![Wire::S(msg.clone()), Wire::Nil]);
                 self.remote_out.push((targets, json!({"t": "chat", "p": player, "n": name, "u": uid, "m": msg, "k": kind})));
             }
