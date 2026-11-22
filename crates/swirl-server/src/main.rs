@@ -24,16 +24,23 @@ async fn main() {
         std::process::exit(2);
     }
     let era: i32 = arg("era").and_then(|s| s.parse().ok()).unwrap_or(2012);
-    character::set_content_dir(&arg("chocolate").unwrap_or("/var/www/swirl/vendor/chocolate".into()));
+    let cfg = swirl_server::config::Config::load(&arg("config").unwrap_or_else(swirl_server::config::default_config_path));
+    character::set_content_dir(&arg("data").unwrap_or_else(swirl_server::config::default_data_dir));
     let assets = arg("assets").unwrap_or("/var/www/assets".into());
-    let redeemer: Option<Rc<Redeemer>> = match (arg("redeem-url"), arg("redeem-key-file")) {
-        (Some(u), Some(f)) => {
-            let key = std::fs::read_to_string(&f).expect("redeem key file").trim().to_string();
-            Some(Rc::new(Redeemer::parse(&u, key).expect("redeem url must be http on loopback")))
-        }
+    let no_redeem = std::env::args().any(|a| a == "--no-redeem");
+    let redeem_url = arg("redeem-url").or_else(|| cfg.get("redeem_url"));
+    let redeem_key = match arg("redeem-key-file") {
+        Some(f) => Some(std::fs::read_to_string(&f).expect("redeem key file").trim().to_string()),
+        None => cfg.get("redeem_key"),
+    };
+    let redeemer: Option<Rc<Redeemer>> = match (no_redeem, redeem_url, redeem_key) {
+        (false, Some(u), Some(k)) if !k.is_empty() => Some(Rc::new(Redeemer::parse(&u, k).expect("redeem url must be http on loopback"))),
         _ => None,
     };
-    let site: Option<Site> = arg("site").and_then(|u| Site::parse(&u));
+    if redeemer.is_none() {
+        eprintln!("tickets are not checked: no redeem key configured or --no-redeem given");
+    }
+    let site: Option<Site> = arg("site").or_else(|| cfg.get("site_url")).and_then(|u| Site::parse(&u));
     let bytes = std::fs::read(format!("{}/assets/{}", assets, place)).expect("place file");
     let game = Rc::new(RefCell::new(Game::load(place, &bytes, era).unwrap_or_else(|e| panic!("{}", e))));
     let clients: Rc<RefCell<HashMap<u32, (u32, UnboundedSender<String>)>>> = Rc::new(RefCell::new(HashMap::new()));

@@ -1,4 +1,5 @@
 pub mod appearance;
+pub mod config;
 pub mod core2018;
 pub mod character;
 pub mod codec;

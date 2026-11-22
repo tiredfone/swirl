@@ -338,11 +338,11 @@ pub fn add_scripts(dm: &mut DataModel, model: InstId, era: i32) {
         None => return,
     };
     if era == 2018 {
-        load_scripts(dm, model, &format!("{}/content2018/avatar/scripts/humanoidAnimateLocalKeyframe.rbxm", dir), None);
-        load_scripts(dm, model, &format!("{}/content/fonts/humanoidHealth.rbxm", dir), Some("Health"));
+        load_scripts(dm, model, &format!("{}/character/humanoidAnimateLocalKeyframe.rbxm", dir), None);
+        load_scripts(dm, model, &format!("{}/character/humanoidHealth.rbxm", dir), Some("Health"));
     } else {
         for f in ["humanoidAnimateLocal", "humanoidSound", "humanoidHealth"] {
-            load_scripts(dm, model, &format!("{}/content/fonts/{}.rbxm", dir, f), None);
+            load_scripts(dm, model, &format!("{}/character/{}.rbxm", dir, f), None);
         }
     }
 }
