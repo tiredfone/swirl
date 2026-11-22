@@ -37,10 +37,16 @@ pub struct Game {
     pub remote_out: Vec<(Vec<InstId>, J)>,
     pub anim_state: HashMap<(InstId, String), J>,
     last_chat: HashMap<InstId, f64>,
+    pub api: crate::api::Shared,
+    flush_at: f64,
 }
 
 impl Game {
     pub fn load(place_id: u64, bytes: &[u8], era: i32) -> Result<Game, String> {
+        Game::load_with(place_id, bytes, era, "/var/www/assets", "/tmp/swirl-data")
+    }
+
+    pub fn load_with(place_id: u64, bytes: &[u8], era: i32, assets_dir: &str, data_dir: &str) -> Result<Game, String> {
         let mut tree = swirl_core::rbx::parse_limit(bytes, 256 * 1024 * 1024)?;
         let mut dm = DataModel::new("server");
         dm.era = era;
@@ -88,6 +94,9 @@ impl Game {
         dm.journal.clear();
         let dm = Rc::new(RefCell::new(dm));
         let mut host = Host::new(dm.clone()).map_err(|e| e.to_string())?;
+        let api = crate::api::new_state(assets_dir, data_dir, place_id, era);
+        host.set_handler(Box::new(crate::api::Api(api.clone())));
+        host.add_methods(crate::api::METHODS);
         host.scan_scripts();
         if let Some(b) = bundle.as_ref() {
             let started = b.server_starter(&mut dm.borrow_mut());
@@ -95,7 +104,7 @@ impl Game {
                 host.scan_subtree(id);
             }
         }
-        Ok(Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], anim_state: HashMap::new(), last_chat: HashMap::new() })
+        Ok(Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], anim_state: HashMap::new(), last_chat: HashMap::new(), api, flush_at: 0.0 })
     }
 
     pub fn join(&mut self, name: &str, user: Option<i64>, look: crate::appearance::Look) -> (J, InstId) {
@@ -584,6 +593,32 @@ impl Game {
     pub fn tick(&mut self, dt: f64) -> Vec<LogLine> {
         self.t += dt;
         self.host.tick(self.t);
+        {
+            let mut a = self.api.borrow_mut();
+            a.step_tracks(dt, &mut self.dm.borrow_mut());
+            let events = std::mem::take(&mut a.events);
+            let casts = std::mem::take(&mut a.broadcasts);
+            let done = std::mem::take(&mut a.completions);
+            if self.t >= self.flush_at {
+                self.flush_at = self.t + 2.0;
+                a.flush();
+            }
+            drop(a);
+            for (id, name, args) in events {
+                self.host.fire(id, &name, args);
+            }
+            for m in casts {
+                if m["op"] == "play" {
+                    self.anim_state.insert((0, format!("{}", m["k"])), m.clone());
+                } else if m["op"] == "stop" {
+                    self.anim_state.remove(&(0, format!("{}", m["k"])));
+                }
+                self.remote_out.push((vec![], m));
+            }
+            for (tok, r) in done {
+                self.host.resolve(tok, r);
+            }
+        }
         for r in self.host.take_requests() {
             match r {
                 Req::LoadCharacter(p) => self.respawn(p),

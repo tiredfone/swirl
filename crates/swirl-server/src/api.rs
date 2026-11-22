@@ -1,0 +1,530 @@
+use serde_json::{json, Value as J};
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+use swirl_core::instance::{DataModel, InstId, Val};
+use swirl_lua::host::{ApiHandler, Res, Wire};
+
+pub struct Seq {
+    pub length: f64,
+    pub looped: bool,
+    pub frames: Vec<(f64, String)>,
+}
+
+pub struct Track {
+    pub hum: Option<InstId>,
+    pub key: String,
+    pub anim_id: Option<u64>,
+    pub seq: Option<Rc<Seq>>,
+    pub target: f64,
+    pub w: f64,
+    pub weight: f64,
+    pub speed: f64,
+    pub fade: f64,
+    pub time: f64,
+    pub playing: bool,
+}
+
+pub struct ApiState {
+    pub assets_dir: String,
+    pub data_dir: String,
+    pub place_id: u64,
+    pub era: i32,
+    pub stores: HashMap<InstId, String>,
+    pub store_keys: HashMap<String, InstId>,
+    pub data: HashMap<String, HashMap<String, String>>,
+    pub data_loaded: bool,
+    pub data_dirty: bool,
+    pub players: HashMap<i64, PlayerBag>,
+    pub players_dirty: HashSet<i64>,
+    pub tracks: HashMap<InstId, Track>,
+    pub seqs: HashMap<u64, Option<Rc<Seq>>>,
+    pub events: Vec<(InstId, String, Vec<Wire>)>,
+    pub broadcasts: Vec<J>,
+    pub completions: Vec<(u32, Result<Vec<Wire>, String>)>,
+    pub token: u32,
+    pub social: Vec<SocialReq>,
+}
+
+#[derive(Default, Clone)]
+pub struct PlayerBag {
+    pub n: HashMap<String, f64>,
+    pub s: HashMap<String, String>,
+    pub b: HashMap<String, bool>,
+    pub i: HashMap<String, String>,
+}
+
+pub struct SocialReq {
+    pub token: u32,
+    pub body: J,
+}
+
+pub type Shared = Rc<RefCell<ApiState>>;
+
+pub fn new_state(assets_dir: &str, data_dir: &str, place_id: u64, era: i32) -> Shared {
+    Rc::new(RefCell::new(ApiState {
+        assets_dir: assets_dir.to_string(),
+        data_dir: data_dir.to_string(),
+        place_id,
+        era,
+        stores: HashMap::new(),
+        store_keys: HashMap::new(),
+        data: HashMap::new(),
+        data_loaded: false,
+        data_dirty: false,
+        players: HashMap::new(),
+        players_dirty: HashSet::new(),
+        tracks: HashMap::new(),
+        seqs: HashMap::new(),
+        events: vec![],
+        broadcasts: vec![],
+        completions: vec![],
+        token: 1_000_000,
+        social: vec![],
+    }))
+}
+
+pub const METHODS: &[&str] = &[
+    "__dataStore", "__dsGet", "__dsSet", "__dsSorted", "LoadAnimation", "loadAnimation", "GetPlayingAnimationTracks", "AdjustSpeed", "AdjustWeight",
+    "GetTranslatorForPlayer", "WaitForDataReady", "waitForDataReady", "SaveNumber", "SaveString", "SaveBoolean", "LoadNumber", "LoadString", "LoadBoolean",
+    "SaveInstance", "LoadInstance", "GetPlayerByUserId", "GetPlayerByID", "GetUserIdFromNameAsync", "GetNameFromUserIdAsync",
+];
+
+fn anim_asset_id(url: &str) -> Option<u64> {
+    let s = url.trim();
+    let digits = |t: &str| -> Option<u64> {
+        let d: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if d.is_empty() { None } else { d.parse().ok() }
+    };
+    if let Some(i) = s.to_ascii_lowercase().find("id=") {
+        return digits(&s[i + 3..]);
+    }
+    if let Some(r) = s.strip_prefix("rbxassetid://") {
+        return digits(r);
+    }
+    if s.chars().all(|c| c.is_ascii_digit()) {
+        return digits(s);
+    }
+    None
+}
+
+fn read_asset(dir: &str, id: u64) -> Option<Vec<u8>> {
+    std::fs::read(format!("{}/assets/{}", dir, id)).ok().or_else(|| std::fs::read(format!("{}/cache/{}", dir, id)).ok())
+}
+
+fn find_sequence(nodes: &[swirl_core::rbx::Inst]) -> Option<Seq> {
+    for n in nodes {
+        if n.cls == "KeyframeSequence" {
+            let looped = matches!(n.props.get("Loop"), Some(swirl_core::rbx::Value::Bool(true)));
+            let mut frames: Vec<(f64, String)> = vec![];
+            for k in &n.children {
+                if k.cls == "Keyframe" {
+                    let t = k.props.get("Time").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    frames.push((t, k.name.clone()));
+                }
+            }
+            frames.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            let length = frames.last().map(|f| f.0).unwrap_or(0.0);
+            return Some(Seq { length, looped, frames });
+        }
+        if let Some(s) = find_sequence(&n.children) {
+            return Some(s);
+        }
+    }
+    None
+}
+
+impl ApiState {
+    pub fn sequence(&mut self, id: u64) -> Option<Rc<Seq>> {
+        if let Some(s) = self.seqs.get(&id) {
+            return s.clone();
+        }
+        let seq = read_asset(&self.assets_dir, id).and_then(|b| swirl_core::rbx::parse(&b).ok()).and_then(|t| find_sequence(&t.roots)).map(|mut s| {
+            if id == 180426354 {
+                s.looped = true;
+            }
+            Rc::new(s)
+        });
+        self.seqs.insert(id, seq.clone());
+        seq
+    }
+
+    fn data_path(&self) -> String {
+        format!("{}/{}.json", self.data_dir, self.place_id)
+    }
+
+    fn load_data(&mut self) {
+        if self.data_loaded {
+            return;
+        }
+        self.data_loaded = true;
+        if let Ok(b) = std::fs::read(self.data_path()) {
+            if let Ok(J::Object(o)) = serde_json::from_slice::<J>(&b) {
+                for (store, v) in o {
+                    if let J::Object(m) = v {
+                        let mut h = HashMap::new();
+                        for (k, val) in m {
+                            if let Some(s) = val.as_str() {
+                                h.insert(k, s.to_string());
+                            }
+                        }
+                        self.data.insert(store, h);
+                    }
+                }
+            }
+        }
+    }
+
+    fn bag_path(&self, uid: i64) -> String {
+        format!("{}/players/{}/{}.json", self.data_dir, self.place_id, uid)
+    }
+
+    pub fn bag(&mut self, uid: i64) -> &mut PlayerBag {
+        if !self.players.contains_key(&uid) {
+            let mut bag = PlayerBag::default();
+            if let Ok(b) = std::fs::read(self.bag_path(uid)) {
+                if let Ok(j) = serde_json::from_slice::<J>(&b) {
+                    if let Some(o) = j["n"].as_object() {
+                        for (k, v) in o {
+                            if let Some(x) = v.as_f64() {
+                                bag.n.insert(k.clone(), x);
+                            }
+                        }
+                    }
+                    if let Some(o) = j["s"].as_object() {
+                        for (k, v) in o {
+                            if let Some(x) = v.as_str() {
+                                bag.s.insert(k.clone(), x.to_string());
+                            }
+                        }
+                    }
+                    if let Some(o) = j["b"].as_object() {
+                        for (k, v) in o {
+                            if let Some(x) = v.as_bool() {
+                                bag.b.insert(k.clone(), x);
+                            }
+                        }
+                    }
+                    if let Some(o) = j["i"].as_object() {
+                        for (k, v) in o {
+                            if let Some(x) = v.as_str() {
+                                bag.i.insert(k.clone(), x.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            self.players.insert(uid, bag);
+        }
+        self.players.get_mut(&uid).unwrap()
+    }
+
+    pub fn flush(&mut self) {
+        if self.data_dirty {
+            self.data_dirty = false;
+            let mut o = serde_json::Map::new();
+            for (store, m) in &self.data {
+                let mut h = serde_json::Map::new();
+                for (k, v) in m {
+                    h.insert(k.clone(), J::String(v.clone()));
+                }
+                o.insert(store.clone(), J::Object(h));
+            }
+            let _ = std::fs::create_dir_all(&self.data_dir);
+            let path = self.data_path();
+            let tmp = format!("{}.{}.tmp", path, std::process::id());
+            if std::fs::write(&tmp, J::Object(o).to_string()).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
+        }
+        let dirty: Vec<i64> = self.players_dirty.drain().collect();
+        for uid in dirty {
+            if let Some(bag) = self.players.get(&uid) {
+                let j = json!({"n": bag.n, "s": bag.s, "b": bag.b, "i": bag.i});
+                let path = self.bag_path(uid);
+                let _ = std::fs::create_dir_all(format!("{}/players/{}", self.data_dir, self.place_id));
+                let tmp = format!("{}.{}.tmp", path, std::process::id());
+                if std::fs::write(&tmp, j.to_string()).is_ok() {
+                    let _ = std::fs::rename(&tmp, &path);
+                }
+            }
+        }
+    }
+
+    pub fn step_tracks(&mut self, dt: f64, dm: &mut DataModel) {
+        let ids: Vec<InstId> = self.tracks.keys().copied().collect();
+        for id in ids {
+            let gone = dm.get(id).map(|i| i.destroyed).unwrap_or(true);
+            if gone {
+                self.tracks.remove(&id);
+                continue;
+            }
+            let mut ev: Vec<(String, Vec<Wire>)> = vec![];
+            let mut stopped = false;
+            {
+                let tr = self.tracks.get_mut(&id).unwrap();
+                if !tr.playing {
+                    continue;
+                }
+                let rate = if tr.fade > 0.0 { dt / tr.fade } else { f64::INFINITY };
+                tr.w = if tr.target > tr.w { (tr.w + rate).min(tr.target) } else { (tr.w - rate).max(tr.target) };
+                if tr.target == 0.0 && tr.w <= 0.0 {
+                    tr.playing = false;
+                    stopped = true;
+                } else if let Some(seq) = tr.seq.clone() {
+                    let prev = tr.time;
+                    let mut now = prev + dt * tr.speed;
+                    let len = seq.length;
+                    if now < 0.0 {
+                        now = if seq.looped && len > 0.0 { ((now % len) + len) % len } else { 0.0 };
+                    }
+                    if tr.target > 0.0 {
+                        if len > 0.0 && now >= len {
+                            for (t, n) in &seq.frames {
+                                if *t > prev && *t <= len {
+                                    ev.push(("KeyframeReached".into(), vec![Wire::S(n.clone())]));
+                                }
+                            }
+                            if seq.looped {
+                                now %= len;
+                                for (t, n) in &seq.frames {
+                                    if *t <= now {
+                                        ev.push(("KeyframeReached".into(), vec![Wire::S(n.clone())]));
+                                    }
+                                }
+                            } else {
+                                now = len;
+                                tr.target = 0.0;
+                                tr.fade = 0.0;
+                                tr.w = 0.0;
+                                tr.playing = false;
+                                stopped = true;
+                            }
+                        } else {
+                            for (t, n) in &seq.frames {
+                                if *t > prev && *t <= now {
+                                    ev.push(("KeyframeReached".into(), vec![Wire::S(n.clone())]));
+                                }
+                            }
+                        }
+                    }
+                    tr.time = now;
+                }
+            }
+            ev.retain(|(_, a)| !matches!(a.first(), Some(Wire::S(n)) if n == "Keyframe"));
+            for (n, a) in ev {
+                self.events.push((id, n, a));
+            }
+            if stopped {
+                let _ = dm.set_prop(id, "IsPlaying", Val::Bool(false));
+                self.events.push((id, "Stopped".into(), vec![]));
+            }
+        }
+    }
+}
+
+pub struct Api(pub Shared);
+
+fn num(a: &[Wire], i: usize) -> Option<f64> {
+    match a.get(i) {
+        Some(Wire::N(n)) if n.is_finite() => Some(*n),
+        _ => None,
+    }
+}
+
+fn text(a: &[Wire], i: usize) -> String {
+    match a.get(i) {
+        Some(Wire::S(s)) => s.clone(),
+        Some(Wire::N(n)) => n.to_string(),
+        _ => String::new(),
+    }
+}
+
+impl ApiHandler for Api {
+    fn call(&mut self, d: &mut DataModel, id: InstId, method: &str, args: &[Wire]) -> Option<Res> {
+        if !METHODS.contains(&method) && !matches!(method, "Play" | "play" | "Stop" | "stop") {
+            return None;
+        }
+        let mut st = self.0.borrow_mut();
+        let class = d.get(id).map(|i| i.class.clone()).unwrap_or_default();
+        match method {
+            "__dataStore" => {
+                let name = text(args, 0);
+                let scope = text(args, 1);
+                let ordered = matches!(args.get(2), Some(Wire::B(true)));
+                let key = format!("{}|{}|{}", if ordered { "o" } else { "g" }, scope, name);
+                if let Some(i) = st.store_keys.get(&key) {
+                    if d.get(*i).map(|x| !x.destroyed).unwrap_or(false) {
+                        return Some(Res::Ok(vec![Wire::I(*i)]));
+                    }
+                }
+                let ds = d.create_any(if ordered { "OrderedDataStore" } else { "GlobalDataStore" }, None).ok()?;
+                d.set_prop_quiet(ds, "Name", Val::Str(name));
+                d.get_mut_name(ds, &text(args, 0));
+                st.stores.insert(ds, key.clone());
+                st.store_keys.insert(key, ds);
+                Some(Res::Ok(vec![Wire::I(ds)]))
+            }
+            "__dsGet" => {
+                st.load_data();
+                let key = st.stores.get(&id)?.clone();
+                let v = st.data.get(&key).and_then(|m| m.get(&text(args, 0))).cloned();
+                Some(Res::Ok(vec![v.map(Wire::S).unwrap_or(Wire::Nil)]))
+            }
+            "__dsSet" => {
+                st.load_data();
+                let key = st.stores.get(&id)?.clone();
+                let k = text(args, 0);
+                match args.get(1) {
+                    Some(Wire::S(v)) => {
+                        st.data.entry(key).or_default().insert(k, v.clone());
+                    }
+                    _ => {
+                        if let Some(m) = st.data.get_mut(&key) {
+                            m.remove(&k);
+                        }
+                    }
+                }
+                st.data_dirty = true;
+                Some(Res::Ok(vec![]))
+            }
+            "__dsSorted" => {
+                st.load_data();
+                let key = st.stores.get(&id)?.clone();
+                let asc = matches!(args.first(), Some(Wire::B(true)));
+                let size = num(args, 1).map(|n| n as i64).filter(|n| *n > 0).unwrap_or(50).clamp(1, 100) as usize;
+                let mut rows: Vec<(String, f64)> = st.data.get(&key).map(|m| m.iter().map(|(k, v)| (k.clone(), serde_json::from_str::<f64>(v).unwrap_or(0.0))).collect()).unwrap_or_default();
+                rows.sort_by(|a, b| {
+                    let o = a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal);
+                    if asc { o } else { o.reverse() }
+                });
+                let list: Vec<Wire> = rows.into_iter().take(size).map(|(k, v)| Wire::Dict(vec![("key".into(), Wire::S(k)), ("value".into(), Wire::N(v))])).collect();
+                Some(Res::Ok(vec![Wire::List(list)]))
+            }
+            "GetTranslatorForPlayer" => Some(Res::Ok(vec![Wire::Nil])),
+            "WaitForDataReady" | "waitForDataReady" => Some(Res::Ok(vec![Wire::B(true)])),
+            "SaveNumber" | "SaveString" | "SaveBoolean" | "LoadNumber" | "LoadString" | "LoadBoolean" | "SaveInstance" | "LoadInstance" if class == "Player" => {
+                let uid = match d.get_prop(id, "userId") {
+                    Some(Val::Num(n)) => *n as i64,
+                    _ => 0,
+                };
+                if uid <= 0 {
+                    return Some(Res::Ok(vec![]));
+                }
+                let k = text(args, 0);
+                let bag = st.bag(uid);
+                match method {
+                    "SaveNumber" => {
+                        bag.n.insert(k, num(args, 1).unwrap_or(0.0));
+                    }
+                    "SaveString" => {
+                        bag.s.insert(k, text(args, 1));
+                    }
+                    "SaveBoolean" => {
+                        bag.b.insert(k, matches!(args.get(1), Some(Wire::B(true))));
+                    }
+                    "LoadNumber" => return Some(Res::Ok(vec![Wire::N(bag.n.get(&k).copied().unwrap_or(0.0))])),
+                    "LoadString" => return Some(Res::Ok(vec![Wire::S(bag.s.get(&k).cloned().unwrap_or_default())])),
+                    "LoadBoolean" => return Some(Res::Ok(vec![Wire::B(bag.b.get(&k).copied().unwrap_or(false))])),
+                    "SaveInstance" => {
+                        return Some(Res::Ok(vec![]));
+                    }
+                    _ => return Some(Res::Ok(vec![Wire::Nil])),
+                }
+                st.players_dirty.insert(uid);
+                Some(Res::Ok(vec![]))
+            }
+            "LoadAnimation" | "loadAnimation" if class == "Humanoid" || class == "Animator" => {
+                let anim = match args.first() {
+                    Some(Wire::I(a)) if d.get(*a).map(|i| i.class == "Animation").unwrap_or(false) => *a,
+                    _ => return Some(Res::Err("LoadAnimation requires an Animation object".into())),
+                };
+                let hum = if class == "Humanoid" { Some(id) } else { d.get(id).and_then(|i| i.parent).filter(|p| d.get(*p).map(|x| x.class == "Humanoid").unwrap_or(false)) };
+                let tr = d.create_any("AnimationTrack", None).ok()?;
+                let name = d.get(anim).map(|a| a.name.clone()).unwrap_or_default();
+                d.set_prop_quiet(tr, "Name", Val::Str(name.clone()));
+                d.get_mut_name(tr, &name);
+                let _ = d.set_prop(tr, "Animation", Val::Ref(Some(anim)));
+                st.tracks.insert(tr, Track { hum, key: format!("s{}", tr), anim_id: None, seq: None, target: 0.0, w: 0.0, weight: 1.0, speed: 1.0, fade: 0.1, time: 0.0, playing: false });
+                Some(Res::Ok(vec![Wire::I(tr)]))
+            }
+            "GetPlayingAnimationTracks" => {
+                let hum = if class == "Humanoid" { id } else { d.get(id).and_then(|i| i.parent)? };
+                let list: Vec<Wire> = st.tracks.iter().filter(|(_, t)| t.hum == Some(hum) && t.playing && t.target > 0.0).map(|(i, _)| Wire::I(*i)).collect();
+                Some(Res::Ok(vec![Wire::List(list)]))
+            }
+            "Play" | "play" | "Stop" | "stop" | "AdjustSpeed" | "AdjustWeight" if class == "AnimationTrack" => {
+                let playing_op = matches!(method, "Play" | "play");
+                let anim = match d.get_prop(id, "Animation") {
+                    Some(Val::Ref(Some(a))) => Some(*a),
+                    _ => None,
+                };
+                let aid = anim.and_then(|a| match d.get_prop(a, "AnimationId") {
+                    Some(Val::Str(s)) => anim_asset_id(s),
+                    _ => None,
+                });
+                let seq = if playing_op { aid.and_then(|a| st.sequence(a)) } else { None };
+                let (op, a, b, c, key, hum_id) = {
+                    let tr = st.tracks.get_mut(&id)?;
+                    match method {
+                        "Play" | "play" => {
+                            tr.anim_id = aid;
+                            tr.seq = seq.clone();
+                            tr.target = 1.0;
+                            tr.fade = num(args, 0).unwrap_or(0.1).max(0.0);
+                            tr.weight = num(args, 1).unwrap_or(1.0).max(0.0);
+                            tr.speed = num(args, 2).unwrap_or(1.0);
+                            tr.time = 0.0;
+                            if tr.fade == 0.0 {
+                                tr.w = 1.0;
+                            }
+                            tr.playing = true;
+                            ("play", Some(tr.fade), Some(tr.weight), Some(tr.speed), tr.key.clone(), tr.hum)
+                        }
+                        "Stop" | "stop" => {
+                            tr.target = 0.0;
+                            tr.fade = num(args, 0).unwrap_or(0.1).max(0.0);
+                            if tr.fade == 0.0 {
+                                tr.w = 0.0;
+                            }
+                            ("stop", Some(tr.fade), None, None, tr.key.clone(), tr.hum)
+                        }
+                        "AdjustSpeed" => {
+                            tr.speed = num(args, 0).unwrap_or(1.0);
+                            ("speed", Some(tr.speed), None, None, tr.key.clone(), tr.hum)
+                        }
+                        _ => {
+                            tr.weight = num(args, 0).unwrap_or(1.0).max(0.0);
+                            tr.fade = num(args, 1).unwrap_or(0.1).max(0.0);
+                            ("weight", Some(tr.weight), Some(tr.fade), None, tr.key.clone(), tr.hum)
+                        }
+                    }
+                };
+                if op == "play" {
+                    let _ = d.set_prop(id, "IsPlaying", Val::Bool(true));
+                    if let Some(s) = &seq {
+                        let _ = d.set_prop(id, "Length", Val::Num(s.length));
+                        let _ = d.set_prop(id, "Looped", Val::Bool(s.looped));
+                    }
+                }
+                if let Some(h) = hum_id {
+                    st.broadcasts.push(json!({"t": "anim", "h": h, "k": key, "op": op, "id": aid.unwrap_or(0), "a": a, "b": b, "c": c}));
+                }
+                Some(Res::Ok(vec![]))
+            }
+            _ => None,
+        }
+    }
+
+    fn get(&mut self, _d: &DataModel, id: InstId, key: &str) -> Option<Wire> {
+        let st = self.0.borrow();
+        let tr = st.tracks.get(&id)?;
+        match key {
+            "TimePosition" => Some(Wire::N(tr.time)),
+            "Speed" => Some(Wire::N(tr.speed)),
+            "WeightCurrent" => Some(Wire::N(tr.w * tr.weight)),
+            "WeightTarget" => Some(Wire::N(tr.target * tr.weight)),
+            _ => None,
+        }
+    }
+}

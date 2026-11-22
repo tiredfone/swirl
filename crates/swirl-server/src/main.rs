@@ -41,8 +41,9 @@ async fn main() {
         eprintln!("tickets are not checked: no redeem key configured or --no-redeem given");
     }
     let site: Option<Site> = arg("site").or_else(|| cfg.get("site_url")).and_then(|u| Site::parse(&u));
+    let data_dir = arg("store").or_else(|| cfg.get("data_dir")).unwrap_or_else(swirl_server::config::default_store_dir);
     let bytes = std::fs::read(format!("{}/assets/{}", assets, place)).expect("place file");
-    let game = Rc::new(RefCell::new(Game::load(place, &bytes, era).unwrap_or_else(|e| panic!("{}", e))));
+    let game = Rc::new(RefCell::new(Game::load_with(place, &bytes, era, &assets, &data_dir).unwrap_or_else(|e| panic!("{}", e))));
     let clients: Rc<RefCell<HashMap<u32, (u32, UnboundedSender<String>)>>> = Rc::new(RefCell::new(HashMap::new()));
     let local = tokio::task::LocalSet::new();
     local.run_until(async move {

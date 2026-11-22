@@ -30,7 +30,21 @@ pub enum Wire {
     Dict(Vec<(String, Wire)>),
 }
 
+pub enum Res {
+    Ok(Vec<Wire>),
+    Async(u32),
+    Err(String),
+}
+
+pub trait ApiHandler {
+    fn call(&mut self, d: &mut DataModel, id: InstId, method: &str, args: &[Wire]) -> Option<Res>;
+    fn get(&mut self, _d: &DataModel, _id: InstId, _key: &str) -> Option<Wire> {
+        None
+    }
+}
+
 enum Q {
+    Async(u32, Result<Vec<Wire>, String>),
     Start(u32),
     Stop(u32),
     Event(u32, String, Vec<Wire>),
@@ -54,6 +68,9 @@ struct State {
     t0: std::time::Instant,
     settings: Option<u32>,
     user_settings: Option<u32>,
+    handler: Option<Box<dyn ApiHandler>>,
+    extra_methods: HashSet<String>,
+    async_seq: u32,
 }
 
 pub struct Host {
@@ -71,6 +88,76 @@ const METHODS: &[&str] = &[
     "FireServer", "FireClient", "FireAllClients", "InvokeServer", "InvokeClient",
     "FilterStringAsync", "FilterStringForPlayerAsync", "FilterStringForBroadcast", "CanUserChatAsync", "CanUsersChatAsync", "IsInGroup", "isInGroup", "GetRankInGroup", "GetRoleInGroup", "SetEntries", "IsUserFeatureEnabled", "__UserSettings", "__settings", "GetFFlag", "GetFastFlag", "DefineFastFlag", "GetFVariable", "GetFastVariable", "IsRunning", "IsStudio", "IsServer", "IsClient", "IsRunMode", "IsEdit", "GetRobloxVersion", "AddCoreScriptLocal",
 ];
+
+struct Members {
+    methods: Vec<(String, std::collections::HashSet<String>)>,
+    lua_class: std::collections::HashMap<String, Vec<String>>,
+}
+
+static MEMBERS: std::sync::OnceLock<Members> = std::sync::OnceLock::new();
+
+fn members() -> &'static Members {
+    MEMBERS.get_or_init(|| {
+        let j: serde_json::Value = serde_json::from_str(include_str!("../data/members.json")).expect("members.json");
+        let strs = |v: &serde_json::Value| -> Vec<String> { v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()).unwrap_or_default() };
+        let methods = j["methods"].as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), strs(v).into_iter().collect())).collect()).unwrap_or_default();
+        let lua_class = j["luaClass"].as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), strs(v))).collect()).unwrap_or_default();
+        Members { methods, lua_class }
+    })
+}
+
+fn method_known(d: &DataModel, id: InstId, class: &str, key: &str) -> bool {
+    let m = members();
+    let try_key = |k: &str| -> bool {
+        if let Some(cs) = m.lua_class.get(k) {
+            if cs.iter().any(|c| classes::is_a(class, c)) {
+                return true;
+            }
+        }
+        for (c, set) in &m.methods {
+            if set.contains(k) && (classes::is_a(class, c) || (c == "DataModel" && id == d.root)) {
+                return true;
+            }
+        }
+        false
+    };
+    if try_key(key) {
+        return true;
+    }
+    match key.chars().next() {
+        Some(f) if f.is_ascii_lowercase() => try_key(&format!("{}{}", f.to_ascii_uppercase(), &key[1..])),
+        _ => false,
+    }
+}
+
+static STUBS: std::sync::OnceLock<Vec<(Vec<String>, String, serde_json::Value)>> = std::sync::OnceLock::new();
+
+fn stubs() -> &'static Vec<(Vec<String>, String, serde_json::Value)> {
+    STUBS.get_or_init(|| {
+        let j: serde_json::Value = serde_json::from_str(include_str!("../data/stubs.json")).expect("stubs.json");
+        j.as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|e| {
+                        let names = e["names"].as_array().map(|n| n.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()).unwrap_or_default();
+                        (names, e["cls"].as_str().unwrap_or("").to_string(), e["value"].clone())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+fn stub_wire(v: &serde_json::Value) -> Wire {
+    match v {
+        serde_json::Value::Null => Wire::Nil,
+        serde_json::Value::Bool(b) => Wire::B(*b),
+        serde_json::Value::Number(n) => Wire::N(n.as_f64().unwrap_or(0.0)),
+        serde_json::Value::String(s) => Wire::S(s.clone()),
+        serde_json::Value::Array(_) => Wire::List(vec![]),
+        _ => Wire::Dict(vec![]),
+    }
+}
 
 static EVENT_TABLE: std::sync::OnceLock<Vec<(String, Vec<String>)>> = std::sync::OnceLock::new();
 
@@ -573,10 +660,11 @@ fn after_parent_change(st: &Rc<RefCell<State>>, dm: &DataModel, id: InstId, old:
 impl Host {
     pub fn new(dm: Rc<RefCell<DataModel>>) -> mlua::Result<Host> {
         let lua = unsafe { Lua::unsafe_new() };
-        let st = Rc::new(RefCell::new(State { reqs: vec![], queue: vec![], subs: HashSet::new(), logs: vec![], running: HashSet::new(), t0: std::time::Instant::now(), settings: None, user_settings: None }));
+        let st = Rc::new(RefCell::new(State { reqs: vec![], queue: vec![], subs: HashSet::new(), logs: vec![], running: HashSet::new(), t0: std::time::Instant::now(), settings: None, user_settings: None, handler: None, extra_methods: HashSet::new(), async_seq: 1 }));
         let j = lua.create_table()?;
         {
             let dm = dm.clone();
+            let st_get = st.clone();
             j.set(
                 "get",
                 lua.create_function(move |lua, (id, key): (u32, String)| {
@@ -600,12 +688,28 @@ impl Host {
                     if key == "Name" {
                         return s(lua, &inst.name);
                     }
+                    let hooked = {
+                        let h = st_get.borrow_mut().handler.take();
+                        match h {
+                            Some(mut h) => {
+                                let r = h.get(&d, id, &key);
+                                st_get.borrow_mut().handler = Some(h);
+                                r
+                            }
+                            None => None,
+                        }
+                    };
+                    if let Some(w) = hooked {
+                        let mut out = vec![];
+                        enc_into(lua, &mut out, &w)?;
+                        return Ok(Value::Table(tagged(lua, &out)?));
+                    }
                     if let Some(w) = virtual_get(&d, id, &inst.class, &key) {
                         let mut out = vec![];
                         enc_into(lua, &mut out, &w)?;
                         return Ok(Value::Table(tagged(lua, &out)?));
                     }
-                    if METHODS.contains(&key.as_str()) {
+                    if METHODS.contains(&key.as_str()) || st_get.borrow().extra_methods.contains(&key) || method_known(&d, id, &inst.class, &key) {
                         return Ok(Value::Table(tagged(lua, &[s(lua, "m")?, s(lua, &key)?])?));
                     }
                     let cap = {
@@ -705,6 +809,33 @@ impl Host {
                         Some(Wire::S(x)) => x.clone(),
                         _ => String::new(),
                     };
+                    let handled = {
+                        let h = st2.borrow_mut().handler.take();
+                        match h {
+                            Some(mut h) => {
+                                let r = h.call(&mut d, id, &method, &args);
+                                st2.borrow_mut().handler = Some(h);
+                                r
+                            }
+                            None => None,
+                        }
+                    };
+                    if let Some(r) = handled {
+                        return match r {
+                            Res::Ok(ws) => {
+                                let mut out = vec![s(lua, "ok")?];
+                                for w in &ws {
+                                    enc_into(lua, &mut out, w)?;
+                                }
+                                if ws.is_empty() {
+                                    enc_into(lua, &mut out, &Wire::Nil)?;
+                                }
+                                Ok(Value::Table(tagged(lua, &out)?))
+                            }
+                            Res::Async(tok) => Ok(Value::Table(tagged(lua, &[s(lua, "async")?, Value::Number(tok as f64)])?)),
+                            Res::Err(m) => err(&m),
+                        };
+                    }
                     match method.as_str() {
                         "__source" => {
                             let src = match d.get_prop(id, "Source") {
@@ -873,6 +1004,7 @@ impl Host {
                             }
                         }
                         "SetEntries" => ok(Wire::Nil),
+                        "__CloseBound" => ok(Wire::Nil),
                         "FilterStringAsync" | "FilterStringForPlayerAsync" | "FilterStringForBroadcast" => ok(args.first().cloned().unwrap_or(Wire::Nil)),
                         "CanUserChatAsync" | "CanUsersChatAsync" => Ok(Value::Boolean(true)),
                         "IsInGroup" | "isInGroup" => Ok(Value::Boolean(false)),
@@ -909,7 +1041,18 @@ impl Host {
                                 Err(_) => err(&format!("{} is not a valid Service name", n)),
                             }
                         }
-                        _ => err(&format!("{} is not a valid member of {}", method, d.get(id).unwrap().class)),
+                        _ => {
+                            let class = d.get(id).unwrap().class.clone();
+                            for (names, cls, v) in stubs() {
+                                if names.iter().any(|n| n == &method) && (classes::is_a(&class, cls) || (cls == "DataModel" && id == d.root)) {
+                                    return match v {
+                                        serde_json::Value::Bool(b) => Ok(Value::Boolean(*b)),
+                                        _ => ok(stub_wire(v)),
+                                    };
+                                }
+                            }
+                            err(&format!("{} is not a valid member of {}", method, class))
+                        }
                     }
                 })?,
             )?;
@@ -962,6 +1105,25 @@ impl Host {
                                 out.push(s(lua, "stop")?);
                                 out.push(Value::Number(id as f64));
                             }
+                            Q::Async(tok, r) => {
+                                let mut body: Vec<Value> = vec![];
+                                match r {
+                                    Ok(vals) => {
+                                        body.push(s(lua, "ok")?);
+                                        for v in &vals {
+                                            enc_into(lua, &mut body, v)?;
+                                        }
+                                    }
+                                    Err(m) => {
+                                        body.push(s(lua, "err")?);
+                                        body.push(s(lua, &m)?);
+                                    }
+                                }
+                                out.push(s(lua, "async")?);
+                                out.push(Value::Number(tok as f64));
+                                out.push(Value::Number(body.len() as f64));
+                                out.extend(body);
+                            }
                             Q::Event(id, name, args) => {
                                 out.push(s(lua, "ev")?);
                                 out.push(Value::Number(id as f64));
@@ -1008,6 +1170,27 @@ impl Host {
             ext.call::<()>((include_str!("../data/runtime2018.lua"), "runtime2018"))?;
         }
         Ok(Host { lua, dm, st, step })
+    }
+
+    pub fn set_handler(&mut self, h: Box<dyn ApiHandler>) {
+        self.st.borrow_mut().handler = Some(h);
+    }
+
+    pub fn add_methods(&mut self, names: &[&str]) {
+        let mut st = self.st.borrow_mut();
+        for n in names {
+            st.extra_methods.insert(n.to_string());
+        }
+    }
+
+    pub fn new_token(&mut self) -> u32 {
+        let mut st = self.st.borrow_mut();
+        st.async_seq += 1;
+        st.async_seq
+    }
+
+    pub fn resolve(&mut self, token: u32, r: Result<Vec<Wire>, String>) {
+        self.st.borrow_mut().queue.push(Q::Async(token, r));
     }
 
     pub fn scan_scripts(&mut self) {

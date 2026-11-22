@@ -82,6 +82,10 @@ pub fn default_data_dir() -> String {
     std::env::var("SWIRL_DATA").unwrap_or_else(|_| repo_root().join("data/server").to_string_lossy().to_string())
 }
 
+pub fn default_store_dir() -> String {
+    std::env::var("SWIRL_STORE").unwrap_or_else(|_| repo_root().join("data/store").to_string_lossy().to_string())
+}
+
 #[derive(Default, Clone)]
 pub struct Config {
     pub map: HashMap<String, String>,
