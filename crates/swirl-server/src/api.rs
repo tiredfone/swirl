@@ -44,6 +44,8 @@ pub struct ApiState {
     pub completions: Vec<(u32, Result<Vec<Wire>, String>)>,
     pub token: u32,
     pub social: Vec<SocialReq>,
+    pub directed: Vec<(InstId, J)>,
+    pub info_cache: HashMap<String, (std::time::Instant, Option<J>)>,
 }
 
 #[derive(Default, Clone)]
@@ -54,9 +56,28 @@ pub struct PlayerBag {
     pub i: HashMap<String, String>,
 }
 
+#[derive(Clone, Copy)]
+pub enum SocialKind {
+    Bool(&'static str),
+    Info,
+    Award,
+}
+
 pub struct SocialReq {
     pub token: u32,
     pub body: J,
+    pub kind: SocialKind,
+}
+
+pub fn json_wire(v: &J) -> Wire {
+    match v {
+        J::Null => Wire::Nil,
+        J::Bool(b) => Wire::B(*b),
+        J::Number(n) => Wire::N(n.as_f64().unwrap_or(0.0)),
+        J::String(s) => Wire::S(s.clone()),
+        J::Array(a) => Wire::List(a.iter().map(json_wire).collect()),
+        J::Object(o) => Wire::Dict(o.iter().map(|(k, v)| (k.clone(), json_wire(v))).collect()),
+    }
 }
 
 pub type Shared = Rc<RefCell<ApiState>>;
@@ -81,6 +102,8 @@ pub fn new_state(assets_dir: &str, data_dir: &str, place_id: u64, era: i32) -> S
         completions: vec![],
         token: 1_000_000,
         social: vec![],
+        directed: vec![],
+        info_cache: HashMap::new(),
     }))
 }
 
@@ -88,7 +111,20 @@ pub const METHODS: &[&str] = &[
     "__dataStore", "__dsGet", "__dsSet", "__dsSorted", "LoadAnimation", "loadAnimation", "GetPlayingAnimationTracks", "AdjustSpeed", "AdjustWeight",
     "GetTranslatorForPlayer", "WaitForDataReady", "waitForDataReady", "SaveNumber", "SaveString", "SaveBoolean", "LoadNumber", "LoadString", "LoadBoolean",
     "SaveInstance", "LoadInstance", "GetPlayerByUserId", "GetPlayerByID", "GetUserIdFromNameAsync", "GetNameFromUserIdAsync",
+    "AwardBadge", "UserHasBadge", "PlayerOwnsAsset", "UserOwnsGamePassAsync", "PlayerHasPass", "GetProductInfo", "PlayerCanMakePurchases", "PromptPurchase",
+    "PromptProductPurchase", "PromptGamePassPurchase", "Teleport", "TeleportToSpawnByName", "TeleportToPlaceInstance", "GetRobuxBalance", "PerformPurchase",
 ];
+
+fn user_id_of(d: &DataModel, w: Option<&Wire>) -> i64 {
+    match w {
+        Some(Wire::I(p)) => match d.get_prop(*p, "userId") {
+            Some(Val::Num(n)) => *n as i64,
+            _ => 0,
+        },
+        Some(Wire::N(n)) => *n as i64,
+        _ => 0,
+    }
+}
 
 fn anim_asset_id(url: &str) -> Option<u64> {
     let s = url.trim();
@@ -135,6 +171,21 @@ fn find_sequence(nodes: &[swirl_core::rbx::Inst]) -> Option<Seq> {
 }
 
 impl ApiState {
+    pub fn finish_social(&mut self, kind: SocialKind, r: Option<J>) -> (Result<Vec<Wire>, String>, Option<String>) {
+        match kind {
+            SocialKind::Bool(field) => (Ok(vec![Wire::B(r.map(|j| j[field].as_bool().unwrap_or(false)).unwrap_or(false))]), None),
+            SocialKind::Award => {
+                let awarded = r.as_ref().map(|j| j["awarded"].as_bool().unwrap_or(false)).unwrap_or(false);
+                let msg = r.as_ref().and_then(|j| if awarded { j["message"].as_str().map(|m| m.to_string()) } else { None });
+                (Ok(vec![Wire::B(awarded)]), msg)
+            }
+            SocialKind::Info => match r.and_then(|j| if j["info"].is_null() { None } else { Some(j["info"].clone()) }) {
+                Some(info) => (Ok(vec![json_wire(&info)]), None),
+                None => (Err("Invalid asset id".into()), None),
+            },
+        }
+    }
+
     pub fn sequence(&mut self, id: u64) -> Option<Rc<Seq>> {
         if let Some(s) = self.seqs.get(&id) {
             return s.clone();
@@ -402,6 +453,76 @@ impl ApiHandler for Api {
                 Some(Res::Ok(vec![Wire::List(list)]))
             }
             "GetTranslatorForPlayer" => Some(Res::Ok(vec![Wire::Nil])),
+            "AwardBadge" | "UserHasBadge" if class == "BadgeService" => {
+                let uid = num(args, 0).map(|n| n as i64).unwrap_or(0);
+                let bid = num(args, 1).map(|n| n as i64).unwrap_or(0);
+                if uid <= 0 || bid <= 0 {
+                    return Some(Res::Ok(vec![Wire::B(false)]));
+                }
+                st.token += 1;
+                let token = st.token;
+                let place = st.place_id;
+                if method == "AwardBadge" {
+                    st.social.push(SocialReq { token, body: json!({"action": "award", "userId": uid, "badgeId": bid, "placeId": place}), kind: SocialKind::Award });
+                } else {
+                    st.social.push(SocialReq { token, body: json!({"action": "hasBadge", "userId": uid, "badgeId": bid}), kind: SocialKind::Bool("has") });
+                }
+                Some(Res::Async(token))
+            }
+            "PlayerOwnsAsset" | "UserOwnsGamePassAsync" | "PlayerHasPass" if class == "MarketplaceService" || class == "GamePassService" => {
+                let uid = user_id_of(d, args.first());
+                let id = num(args, 1).map(|n| n as i64).unwrap_or(0);
+                if uid <= 0 || id <= 0 {
+                    return Some(Res::Ok(vec![Wire::B(false)]));
+                }
+                st.token += 1;
+                let token = st.token;
+                st.social.push(SocialReq { token, body: json!({"action": "ownsAsset", "userId": uid, "assetId": id}), kind: SocialKind::Bool("owns") });
+                Some(Res::Async(token))
+            }
+            "GetProductInfo" if class == "MarketplaceService" => {
+                let id = num(args, 0).map(|n| n as i64).unwrap_or(0);
+                let kind = match args.get(1) {
+                    Some(Wire::E(_, v)) if *v == 1.0 => "product",
+                    Some(Wire::E(_, v)) if *v == 2.0 => "gamepass",
+                    Some(Wire::N(v)) if *v == 1.0 => "product",
+                    Some(Wire::N(v)) if *v == 2.0 => "gamepass",
+                    _ => "asset",
+                };
+                if id <= 0 {
+                    return Some(Res::Err(format!("Invalid {} id", if kind == "product" { "product" } else { "asset" })));
+                }
+                st.token += 1;
+                let token = st.token;
+                st.social.push(SocialReq { token, body: json!({"action": "productInfo", "kind": kind, "id": id}), kind: SocialKind::Info });
+                Some(Res::Async(token))
+            }
+            "PlayerCanMakePurchases" if class == "MarketplaceService" => Some(Res::Ok(vec![Wire::B(user_id_of(d, args.first()) > 0)])),
+            "PromptPurchase" | "PromptProductPurchase" | "PromptGamePassPurchase" if class == "MarketplaceService" => {
+                let pl = match args.first() {
+                    Some(Wire::I(p)) if d.get(*p).map(|i| i.class == "Player").unwrap_or(false) => *p,
+                    _ => return Some(Res::Err("Argument 1 missing or nil".into())),
+                };
+                let id = num(args, 1).map(|n| n as i64).unwrap_or(0);
+                if id > 0 {
+                    let kind = match method {
+                        "PromptPurchase" => "asset",
+                        "PromptProductPurchase" => "product",
+                        _ => "gamepass",
+                    };
+                    let equip = matches!(args.get(2), Some(Wire::B(true))) && method != "PromptGamePassPurchase";
+                    st.directed.push((pl, json!({"t": "prompt", "kind": kind, "id": id, "equip": equip})));
+                }
+                Some(Res::Ok(vec![]))
+            }
+            "Teleport" | "TeleportToSpawnByName" | "TeleportToPlaceInstance" if class == "TeleportService" => {
+                if let (Some(place), Some(Wire::I(pl))) = (num(args, 0), args.get(1)) {
+                    if place > 0.0 {
+                        st.directed.push((*pl, json!({"t": "teleport", "place": place as i64})));
+                    }
+                }
+                Some(Res::Ok(vec![]))
+            }
             "WaitForDataReady" | "waitForDataReady" => Some(Res::Ok(vec![Wire::B(true)])),
             "SaveNumber" | "SaveString" | "SaveBoolean" | "LoadNumber" | "LoadString" | "LoadBoolean" | "SaveInstance" | "LoadInstance" if class == "Player" => {
                 let uid = match d.get_prop(id, "userId") {

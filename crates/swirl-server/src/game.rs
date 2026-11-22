@@ -414,6 +414,19 @@ impl Game {
         self.dirty.insert(model);
     }
 
+    pub fn social_requests(&mut self) -> Vec<crate::api::SocialReq> {
+        std::mem::take(&mut self.api.borrow_mut().social)
+    }
+
+    pub fn social_done(&mut self, token: u32, kind: crate::api::SocialKind, r: Option<J>) {
+        let (res, msg) = self.api.borrow_mut().finish_social(kind, r);
+        if let Some(m) = msg {
+            let text: String = m.chars().take(200).collect();
+            self.remote_out.push((vec![], json!({"t": "sys", "m": text})));
+        }
+        self.host.resolve(token, res);
+    }
+
     pub fn run_code(&mut self, source: &str, by: &str) {
         self.host_logs_push(format!("Running server code from {}", by));
         let made = {
@@ -681,6 +694,7 @@ impl Game {
             a.step_tracks(dt, &mut self.dm.borrow_mut());
             let events = std::mem::take(&mut a.events);
             let casts = std::mem::take(&mut a.broadcasts);
+            let directed = std::mem::take(&mut a.directed);
             let done = std::mem::take(&mut a.completions);
             if self.t >= self.flush_at {
                 self.flush_at = self.t + 2.0;
@@ -700,6 +714,9 @@ impl Game {
             }
             for (tok, r) in done {
                 self.host.resolve(tok, r);
+            }
+            for (pl, m) in directed {
+                self.remote_out.push((vec![pl], m));
             }
         }
         for r in self.host.take_requests() {

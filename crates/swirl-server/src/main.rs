@@ -219,7 +219,7 @@ async fn start_instance(sup: &Rc<RefCell<Sup>>, env: &Rc<Env>, place: u64, kind:
     let mut s = sup.borrow_mut();
     s.job_seq += 1;
     let job = format!("{:x}{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0), s.job_seq);
-    let spec = Spec { place, job: job.clone(), kind: kind.to_string(), private_id, era, allow_gear, bytes: Arc::new(bytes), assets: env.assets.clone(), data_dir: env.data_dir.clone() };
+    let spec = Spec { place, job: job.clone(), kind: kind.to_string(), private_id, era, allow_gear, bytes: Arc::new(bytes), assets: env.assets.clone(), data_dir: env.data_dir.clone(), social: env.redeemer.as_ref().map(|r| (r.clone(), r.sibling_path("social"))) };
     log(&format!("[place {} {}] starting (max {}, {} client)", place, if kind == "public" { job.clone() } else { format!("{} {}", kind, private_id) }, max, era));
     let handle = instance::spawn(spec);
     s.places.insert(job.clone(), Place { job: job.clone(), place, kind: kind.to_string(), private_id, max, era, handle, members: HashMap::new(), started: Instant::now(), empty_since: None, dead: false });

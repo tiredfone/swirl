@@ -2,6 +2,7 @@ use serde_json::Value as J;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+#[derive(Clone)]
 pub struct Redeemer {
     pub host: String,
     pub port: u16,

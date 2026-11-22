@@ -29,6 +29,7 @@ pub struct Spec {
     pub bytes: Arc<Vec<u8>>,
     pub assets: String,
     pub data_dir: String,
+    pub social: Option<(crate::redeem::Redeemer, String)>,
 }
 
 pub struct Handle {
@@ -64,6 +65,8 @@ pub fn spawn(spec: Spec) -> Handle {
                 };
                 game.allow_gear = spec.allow_gear;
                 r2.store(true, Ordering::SeqCst);
+                let (stx, mut srx) = unbounded_channel::<(u32, crate::api::SocialKind, Option<serde_json::Value>)>();
+                let social = spec.social.clone();
                 let mut clients: HashMap<u32, (InstIdAlias, UnboundedSender<Out>)> = HashMap::new();
                 let mut iv = tokio::time::interval(std::time::Duration::from_millis(33));
                 iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -94,7 +97,26 @@ pub fn spawn(spec: Spec) -> Handle {
                                 }
                             }
                         }
+                        res = srx.recv() => {
+                            if let Some((token, kind, j)) = res {
+                                game.social_done(token, kind, j);
+                            }
+                        }
                         _ = iv.tick() => {
+                            for req in game.social_requests() {
+                                match &social {
+                                    Some((r, path)) => {
+                                        let (r, path, stx) = (r.clone(), path.clone(), stx.clone());
+                                        tokio::task::spawn_local(async move {
+                                            let out = r.post(&path, "application/json", &req.body.to_string()).await.and_then(|t| serde_json::from_str::<serde_json::Value>(t.trim()).ok()).filter(|j| j["ok"].as_bool() == Some(true));
+                                            let _ = stx.send((req.token, req.kind, out));
+                                        });
+                                    }
+                                    None => {
+                                        let _ = stx.send((req.token, req.kind, None));
+                                    }
+                                }
+                            }
                             fr2.fetch_add(1, Ordering::Relaxed);
                             let logs = game.tick(0.033);
                             for l in logs {
