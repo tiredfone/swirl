@@ -123,6 +123,8 @@ pub struct Physics {
     stir_write: bool,
     any_awake: Option<bool>,
     skip: HashSet<(InstId, &'static str)>,
+    ph_sent: HashMap<InstId, [f64; 16]>,
+    sent_sleep: HashMap<usize, bool>,
     cursor: usize,
     forced: IndexSet<RigidBodyHandle>,
     group_cache: Option<(String, groups::Table)>,
@@ -173,6 +175,8 @@ impl Physics {
             stir_write: false,
             any_awake: None,
             skip: HashSet::new(),
+            ph_sent: HashMap::new(),
+            sent_sleep: HashMap::new(),
             cursor: 0,
             forced: IndexSet::new(),
             group_cache: None,
@@ -938,12 +942,12 @@ impl Physics {
         let changes: Vec<Change> = dm.journal[from..end].to_vec();
         self.cursor = end;
         let mut sweep = false;
-        for ch in changes {
+        let mut drop_idx: Vec<usize> = vec![];
+        for (n, ch) in changes.into_iter().enumerate() {
             match ch {
                 Change::Prop(id, name) => {
-                    let key = self.skip.iter().find(|(i, n)| *i == id && *n == name.as_str()).copied();
-                    if let Some(k) = key {
-                        self.skip.remove(&k);
+                    if self.skip.contains(&(id, if name == "CFrame" { "CFrame" } else if name == "Velocity" { "Velocity" } else if name == "RotVelocity" { "RotVelocity" } else { "" })) {
+                        drop_idx.push(from + n);
                         continue;
                     }
                     self.changed(dm, id, &name);
@@ -984,6 +988,16 @@ impl Physics {
             }
         }
         self.skip.clear();
+        if !drop_idx.is_empty() {
+            let drop: HashSet<usize> = drop_idx.into_iter().collect();
+            let mut i = 0usize;
+            dm.journal.retain(|_| {
+                let keep = !drop.contains(&i);
+                i += 1;
+                keep
+            });
+            self.cursor = dm.journal.len();
+        }
     }
 
     fn changed(&mut self, dm: &mut DataModel, id: InstId, name: &str) {
@@ -1244,6 +1258,85 @@ impl Physics {
             let parts: Vec<InstId> = self.assemblies[&ai].parts.iter().copied().collect();
             self.fallen.push(parts);
         }
+    }
+
+    pub fn collect_phys(&mut self, dm: &DataModel) -> Vec<[f64; 16]> {
+        let r = |v: f64| (v * 1000.0).round() / 1000.0;
+        let mut out = vec![];
+        let keys: Vec<usize> = self.assemblies.keys().copied().collect();
+        for ai in keys {
+            let bh = match self.assemblies[&ai].body {
+                Some(b) => b,
+                None => continue,
+            };
+            let sleeping = self.bodies.get(bh).map(|b| b.is_sleeping()).unwrap_or(true);
+            if sleeping && self.sent_sleep.get(&ai).copied().unwrap_or(false) {
+                continue;
+            }
+            self.sent_sleep.insert(ai, sleeping);
+            let parts: Vec<InstId> = self.assemblies[&ai].parts.iter().copied().collect();
+            for p in parts {
+                let c = Self::get_cf(dm, p);
+                let v = Self::get_v3(dm, p, "Velocity", [0.0; 3]);
+                let mut rec = [p as f64, r(c[0]), r(c[1]), r(c[2]), r(c[3]), r(c[4]), r(c[5]), r(c[6]), r(c[7]), r(c[8]), r(c[9]), r(c[10]), r(c[11]), r(v[0]), r(v[1]), r(v[2])];
+                let last = self.ph_sent.get(&p);
+                if sleeping {
+                    rec[13] = 0.0;
+                    rec[14] = 0.0;
+                    rec[15] = 0.0;
+                    if let Some(l) = last {
+                        if l.iter().zip(rec.iter()).all(|(a, b)| a == b) {
+                            continue;
+                        }
+                    }
+                } else if let Some(l) = last {
+                    let same = (1..4).all(|i| (l[i] - rec[i]).abs() <= 0.01) && (4..13).all(|i| (l[i] - rec[i]).abs() <= 0.002) && (13..16).all(|i| (l[i] - rec[i]).abs() <= 0.05);
+                    if same {
+                        continue;
+                    }
+                }
+                self.ph_sent.insert(p, rec);
+                out.push(rec);
+            }
+        }
+        out
+    }
+
+    pub fn assembly_list(&self) -> IndexMap<InstId, Vec<i64>> {
+        let mut out = IndexMap::new();
+        for a in self.assemblies.values() {
+            if a.body.is_none() || a.anchored || a.parts.len() < 8 {
+                continue;
+            }
+            let mut ids: Vec<i64> = a.parts.iter().map(|p| *p as i64).collect();
+            ids.sort();
+            let mut prev = 0;
+            let d: Vec<i64> = ids
+                .iter()
+                .map(|id| {
+                    let x = id - prev;
+                    prev = *id;
+                    x
+                })
+                .collect();
+            out.insert(a.root, d);
+        }
+        out
+    }
+
+    pub fn exclude_model(&mut self, dm: &DataModel, model: InstId) {
+        self.excluded.insert(model);
+        let mut all = vec![model];
+        dm.descendants(model, &mut all);
+        for p in all {
+            if self.parts.contains_key(&p) {
+                self.remove_part(p);
+            }
+        }
+    }
+
+    pub fn include_model(&mut self, model: InstId) {
+        self.excluded.remove(&model);
     }
 
     pub fn root_part(&self, id: InstId) -> InstId {

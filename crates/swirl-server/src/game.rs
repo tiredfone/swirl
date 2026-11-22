@@ -55,6 +55,14 @@ pub struct Game {
     pub anim_state: HashMap<(InstId, String), J>,
     last_chat: HashMap<InstId, f64>,
     pub api: crate::api::Shared,
+    pub physics: swirl_physics::Physics,
+    frame: u64,
+    ph_cache: Vec<[f64; 16]>,
+    asm_sent: HashMap<InstId, Vec<i64>>,
+    asm_seen: u64,
+    asm_diff: Option<(Vec<J>, Vec<InstId>)>,
+    ph_far: HashMap<InstId, HashMap<InstId, [f64; 16]>>,
+    ph_n: HashMap<InstId, u32>,
     flush_at: f64,
     pub allow_gear: bool,
     pre_logs: Vec<LogLine>,
@@ -111,7 +119,10 @@ impl Game {
         if let Some(b) = bundle.as_ref() {
             b.prepare(&mut dm)?;
         }
+        let mut physics = swirl_physics::Physics::new();
+        physics.attach_workspace(&mut dm, ws);
         dm.journal.clear();
+        physics.reset_cursor();
         let dm = Rc::new(RefCell::new(dm));
         let mut host = Host::new(dm.clone()).map_err(|e| e.to_string())?;
         let api = crate::api::new_state(assets_dir, data_dir, place_id, era);
@@ -124,7 +135,7 @@ impl Game {
                 host.scan_subtree(id);
             }
         }
-        Ok(Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], anim_state: HashMap::new(), last_chat: HashMap::new(), api, flush_at: 0.0, allow_gear: true, pre_logs: vec![], kicks: vec![] })
+        Ok(Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], anim_state: HashMap::new(), last_chat: HashMap::new(), api, physics, frame: 0, ph_cache: vec![], asm_sent: HashMap::new(), asm_seen: 0, asm_diff: None, ph_far: HashMap::new(), ph_n: HashMap::new(), flush_at: 0.0, allow_gear: true, pre_logs: vec![], kicks: vec![] })
     }
 
     pub fn join(&mut self, name: &str, user: Option<i64>, look: crate::appearance::Look) -> (J, InstId) {
@@ -232,6 +243,7 @@ impl Game {
             }
         }
         if let Some(m) = spawned {
+            self.physics.exclude_model(&self.dm.borrow(), m);
             self.host.scan_subtree(m);
         }
         self.fill_backpack(player);
@@ -778,6 +790,7 @@ impl Game {
                 }
             }
         }
+        self.step_physics();
         let due: Vec<InstId> = self.debris.iter().filter(|(t, _)| *t <= self.t).map(|(_, i)| *i).collect();
         if !due.is_empty() {
             self.debris.retain(|(t, _)| *t > self.t);
@@ -944,6 +957,95 @@ impl Game {
         logs
     }
 
+    fn step_physics(&mut self) {
+        self.frame += 1;
+        for ev in ["Touched", "TouchEnded"] {
+            for id in self.host.subscribed(ev) {
+                self.physics.touch_interest(id);
+            }
+        }
+        {
+            let mut dm = self.dm.borrow_mut();
+            self.physics.step(&mut dm, 1.0 / 30.0);
+        }
+        let touches = std::mem::take(&mut self.physics.touches);
+        for t in touches {
+            let alive = {
+                let dm = self.dm.borrow();
+                dm.get(t.a).map(|i| !i.destroyed).unwrap_or(false) && dm.get(t.b).map(|i| !i.destroyed).unwrap_or(false)
+            };
+            if !alive {
+                continue;
+            }
+            let ev = if t.started { "Touched" } else { "TouchEnded" };
+            self.host.fire(t.a, ev, vec![Wire::I(t.b)]);
+            self.host.fire(t.b, ev, vec![Wire::I(t.a)]);
+        }
+        let fallen = std::mem::take(&mut self.physics.fallen);
+        if !fallen.is_empty() {
+            let mut dm = self.dm.borrow_mut();
+            for parts in fallen {
+                for p in parts {
+                    dm.destroy(p);
+                }
+            }
+        }
+        if self.asm_seen != self.physics.asm_epoch {
+            self.asm_seen = self.physics.asm_epoch;
+            let now = self.physics.assembly_list();
+            let mut as_: Vec<J> = vec![];
+            for (r, d) in &now {
+                if self.asm_sent.get(r) != Some(d) {
+                    as_.push(json!([r, d]));
+                }
+            }
+            let ad: Vec<InstId> = self.asm_sent.keys().copied().filter(|r| !now.contains_key(r)).collect();
+            self.asm_sent = now.into_iter().collect();
+            self.asm_diff = if as_.is_empty() && ad.is_empty() { None } else { Some((as_, ad)) };
+        } else {
+            self.asm_diff = None;
+        }
+        if self.frame % 2 == 0 {
+            let dm = self.dm.borrow();
+            self.ph_cache = self.physics.collect_phys(&dm);
+        }
+    }
+
+    fn phys_for(&mut self, player: InstId, ph: Vec<[f64; 16]>) -> Vec<[f64; 16]> {
+        const FAR: f64 = 200.0;
+        let focus = self.chars.values().find(|c| c.player == player && !self.dead.contains_key(&c.model)).map(|c| c.cf);
+        let far = self.ph_far.entry(player).or_default();
+        let pos = match focus {
+            Some(p) => p,
+            None => {
+                if far.is_empty() {
+                    return ph;
+                }
+                let mut all: Vec<[f64; 16]> = far.values().copied().collect();
+                far.clear();
+                all.extend(ph);
+                return all;
+            }
+        };
+        let mut out = vec![];
+        for r in ph {
+            let (dx, dy, dz) = (r[1] - pos[0], r[2] - pos[1], r[3] - pos[2]);
+            if dx * dx + dy * dy + dz * dz > FAR * FAR {
+                far.insert(r[0] as InstId, r);
+            } else {
+                far.remove(&(r[0] as InstId));
+                out.push(r);
+            }
+        }
+        let n = self.ph_n.entry(player).or_insert(0);
+        *n += 1;
+        if !far.is_empty() && *n % 4 == 0 {
+            out.extend(far.values().copied());
+            far.clear();
+        }
+        out
+    }
+
     pub fn flush_all(&mut self, players: &[InstId]) -> Vec<(InstId, String)> {
         let journal = {
             let mut dm = self.dm.borrow_mut();
@@ -980,6 +1082,20 @@ impl Game {
                 .collect();
             if !ch.is_empty() {
                 msg.insert("ch".into(), J::Array(ch));
+            }
+            if self.frame % 2 == 0 {
+                let ph = self.phys_for(p, self.ph_cache.clone());
+                if !ph.is_empty() {
+                    msg.insert("ph".into(), J::Array(ph.iter().map(|r| J::Array(r.iter().map(|x| json!(x)).collect())).collect()));
+                }
+            }
+            if let Some((as_, ad)) = &self.asm_diff {
+                if !as_.is_empty() {
+                    msg.insert("as".into(), J::Array(as_.clone()));
+                }
+                if !ad.is_empty() {
+                    msg.insert("ad".into(), json!(ad));
+                }
             }
             if let Some(after) = self.pending.remove(&p) {
                 if !after.is_empty() {
