@@ -567,7 +567,7 @@ impl Controller {
         self.rot = rot;
         self.rot_cf = yaw;
         if let Some(b) = ph.bodies.get_mut(self.body) {
-            b.set_next_kinematic_rotation(Rotation::from_xyzw(rot[0], rot[1], rot[2], rot[3]));
+            b.set_next_kinematic_rotation(Rotation::from_xyzw(rot[0], rot[1], rot[2], rot[3]).normalize());
         }
     }
 
