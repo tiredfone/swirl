@@ -96,6 +96,21 @@ impl Game {
         tree.roots.retain(|n| dm.services.contains_key(&n.cls) || allowed.contains(&n.cls.as_str()));
         let root = dm.root;
         dm.load_tree(&tree, root);
+        {
+            let mut all = vec![];
+            dm.descendants(root, &mut all);
+            for d in all {
+                if dm.get(d).map(|i| i.class == "Humanoid").unwrap_or(false) {
+                    let mh = matches!(dm.get_prop(d, "MaxHealth"), Some(Val::Num(n)) if *n > 0.0);
+                    if !mh {
+                        let _ = dm.set_prop(d, "MaxHealth", Val::Num(100.0));
+                        if !matches!(dm.get_prop(d, "Health"), Some(Val::Num(n)) if *n > 0.0) {
+                            let _ = dm.set_prop(d, "Health", Val::Num(100.0));
+                        }
+                    }
+                }
+            }
+        }
         dm.set_prop(root, "PlaceId", Val::Num(place_id as f64)).ok();
         dm.set_prop(root, "Name", Val::Str("Game".into())).ok();
         let ws = dm.service("Workspace")?;

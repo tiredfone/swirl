@@ -267,11 +267,39 @@ impl DataModel {
     }
 
     pub fn clone_tree(&mut self, id: InstId) -> Option<InstId> {
+        let mut map: HashMap<InstId, InstId> = HashMap::new();
+        let n = self.clone_rec(id, &mut map)?;
+        let created: Vec<InstId> = map.values().copied().collect();
+        for c in created {
+            let remap: Vec<(String, InstId)> = match self.get(c) {
+                Some(i) => i
+                    .props
+                    .iter()
+                    .filter_map(|(k, v)| match v {
+                        Val::Ref(Some(t)) => map.get(t).map(|nt| (k.clone(), *nt)),
+                        _ => None,
+                    })
+                    .collect(),
+                None => vec![],
+            };
+            for (k, t) in remap {
+                if let Some(i) = self.get_mut(c) {
+                    i.props.insert(k, Val::Ref(Some(t)));
+                }
+            }
+        }
+        Some(n)
+    }
+
+    fn clone_rec(&mut self, id: InstId, map: &mut HashMap<InstId, InstId>) -> Option<InstId> {
         let (class, name, props, tags, kids) = {
             let i = self.get(id)?;
             (i.class.clone(), i.name.clone(), i.props.clone(), i.tags.clone(), i.children.clone())
         };
         if classes::is_service(&class) {
+            return None;
+        }
+        if matches!(props.get("Archivable"), Some(Val::Bool(false))) {
             return None;
         }
         let n = self.alloc(&class, &name);
@@ -280,8 +308,9 @@ impl DataModel {
             m.props = props;
             m.tags = tags;
         }
+        map.insert(id, n);
         for k in kids {
-            if let Some(c) = self.clone_tree(k) {
+            if let Some(c) = self.clone_rec(k, map) {
                 let _ = self.set_parent(c, Some(n));
             }
         }

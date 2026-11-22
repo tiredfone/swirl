@@ -122,6 +122,8 @@ pub const METHODS: &[&str] = &[
     "LoadAsset", "loadAsset", "Insert", "FindFirstAncestor", "FindFirstAncestorOfClass", "GetDebugId", "GetServerTimeNow", "AddTag", "RemoveTag", "HasTag", "GetTags", "GetTagged",
     "FindPartOnRay", "findPartOnRay", "FindPartOnRayWithIgnoreList", "findPartOnRayWithIgnoreList", "FindPartOnRayWithWhitelist", "GetMass", "getMass", "GetConnectedParts",
     "GetRootPart", "GetTouchingParts", "BreakJoints", "breakJoints", "MakeJoints", "makeJoints", "__ComputePath",
+    "MoveTo", "moveTo", "TranslateBy", "GetModelCFrame", "getModelCFrame", "GetModelSize", "getModelSize", "GetExtentsSize", "GetPrimaryPartCFrame", "SetPrimaryPartCFrame",
+    "GetPivot", "PivotTo",
     "GetTeams", "GetMinutesAfterMidnight", "SetMinutesAfterMidnight", "getMinutesAfterMidnight", "setMinutesAfterMidnight",
 ];
 
@@ -507,6 +509,165 @@ impl ApiHandler for Api {
                 let ph = self.1.borrow();
                 let r = ph.raycast(d, o, dd, &ignore, None);
                 Some(Res::Ok(vec![r.part.map(Wire::I).unwrap_or(Wire::Nil), Wire::V3(r.point), Wire::V3(r.normal)]))
+            }
+            "MoveTo" | "moveTo" | "TranslateBy" | "GetModelCFrame" | "getModelCFrame" | "GetModelSize" | "getModelSize" | "GetExtentsSize" | "GetPrimaryPartCFrame" | "SetPrimaryPartCFrame" | "GetPivot" | "PivotTo" if class == "Model" || (method == "PivotTo" && d.is_a(id, "BasePart")) => {
+                use swirl_physics::cf::{self, CF};
+                let parts_of = |d: &DataModel, m: InstId| -> Vec<InstId> {
+                    let mut all = vec![];
+                    d.descendants(m, &mut all);
+                    all.into_iter().filter(|p| d.is_a(*p, "BasePart")).collect()
+                };
+                let cf_of = |d: &DataModel, p: InstId| -> CF {
+                    match d.get_prop(p, "CFrame") {
+                        Some(Val::Arr(a)) => cf::arr(a).unwrap_or(cf::IDENTITY),
+                        _ => cf::IDENTITY,
+                    }
+                };
+                let bounds = |d: &DataModel, parts: &[InstId]| -> ([f64; 3], [f64; 3]) {
+                    let mut lo = [f64::INFINITY; 3];
+                    let mut hi = [f64::NEG_INFINITY; 3];
+                    for p in parts {
+                        let c = cf_of(d, *p);
+                        let s = match d.get_prop(*p, "Size") {
+                            Some(Val::Arr(a)) if a.len() >= 3 => [a[0], a[1], a[2]],
+                            _ => [1.0; 3],
+                        };
+                        let h = [s[0] / 2.0, s[1] / 2.0, s[2] / 2.0];
+                        for k in 0..3 {
+                            let e = c[3 + k * 3].abs() * h[0] + c[4 + k * 3].abs() * h[1] + c[5 + k * 3].abs() * h[2];
+                            lo[k] = lo[k].min(c[k] - e);
+                            hi[k] = hi[k].max(c[k] + e);
+                        }
+                    }
+                    if parts.is_empty() { ([0.0; 3], [0.0; 3]) } else { (lo, hi) }
+                };
+                let primary = |d: &DataModel, m: InstId| -> Option<InstId> {
+                    match d.get_prop(m, "PrimaryPart") {
+                        Some(Val::Ref(Some(p))) if d.is_descendant_of(*p, m) => Some(*p),
+                        _ => None,
+                    }
+                };
+                let cfw = |w: Option<&Wire>| -> Option<CF> {
+                    match w {
+                        Some(Wire::Cf(c)) => Some(*c),
+                        _ => None,
+                    }
+                };
+                match method {
+                    "MoveTo" | "moveTo" => {
+                        let target = match args.first() {
+                            Some(Wire::V3(v)) => *v,
+                            _ => return Some(Res::Ok(vec![])),
+                        };
+                        let parts = parts_of(d, id);
+                        let (lo, hi) = bounds(d, &parts);
+                        let ctr = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+                        let size_y = parts.iter().map(|p| match d.get_prop(*p, "Size") { Some(Val::Arr(a)) if a.len() >= 3 => a[1], _ => 1.0 }).fold(1.0f64, f64::max);
+                        let mut lo_y = f64::INFINITY;
+                        let mut hi_y = f64::NEG_INFINITY;
+                        for p in &parts {
+                            let c = cf_of(d, *p);
+                            let s = match d.get_prop(*p, "Size") { Some(Val::Arr(a)) if a.len() >= 3 => [a[0], a[1], a[2]], _ => [1.0; 3] };
+                            let e = c[6].abs() * s[0] / 2.0 + c[7].abs() * s[1] / 2.0 + c[8].abs() * s[2] / 2.0;
+                            lo_y = lo_y.min(c[1] - e);
+                            hi_y = hi_y.max(c[1] + e);
+                        }
+                        let half = if lo_y.is_finite() { (hi_y - lo_y) / 2.0 } else { size_y / 2.0 };
+                        let mut t = target;
+                        let r = self.1.borrow().raycast(d, [t[0], t[1] + 200.0, t[2]], [0.0, -400.0, 0.0], &[id], None);
+                        if r.part.is_some() && r.point[1] + half > t[1] {
+                            t = [t[0], r.point[1] + half, t[2]];
+                        }
+                        let model_cf = match primary(d, id) {
+                            Some(pp) => cf::with_pos(&cf_of(d, pp), ctr[0], ctr[1], ctr[2]),
+                            None => [ctr[0], ctr[1], ctr[2], 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                        };
+                        let delta = [t[0] - model_cf[0], t[1] - model_cf[1], t[2] - model_cf[2]];
+                        for p in parts {
+                            let mut c = cf_of(d, p);
+                            c[0] += delta[0];
+                            c[1] += delta[1];
+                            c[2] += delta[2];
+                            let _ = d.set_prop(p, "CFrame", Val::Arr(c.to_vec()));
+                        }
+                        Some(Res::Ok(vec![]))
+                    }
+                    "TranslateBy" => {
+                        let delta = match args.first() { Some(Wire::V3(v)) => *v, _ => return Some(Res::Ok(vec![])) };
+                        for p in parts_of(d, id) {
+                            let mut c = cf_of(d, p);
+                            c[0] += delta[0];
+                            c[1] += delta[1];
+                            c[2] += delta[2];
+                            let _ = d.set_prop(p, "CFrame", Val::Arr(c.to_vec()));
+                        }
+                        Some(Res::Ok(vec![]))
+                    }
+                    "GetModelCFrame" | "getModelCFrame" => {
+                        let parts = parts_of(d, id);
+                        let (lo, hi) = bounds(d, &parts);
+                        let ctr = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+                        let c = match primary(d, id) {
+                            Some(pp) => cf::with_pos(&cf_of(d, pp), ctr[0], ctr[1], ctr[2]),
+                            None => [ctr[0], ctr[1], ctr[2], 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                        };
+                        Some(Res::Ok(vec![Wire::Cf(c)]))
+                    }
+                    "GetModelSize" | "getModelSize" | "GetExtentsSize" => {
+                        let parts = parts_of(d, id);
+                        let (lo, hi) = bounds(d, &parts);
+                        Some(Res::Ok(vec![Wire::V3([hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]])]))
+                    }
+                    "GetPrimaryPartCFrame" => Some(Res::Ok(vec![match d.get_prop(id, "PrimaryPart") {
+                        Some(Val::Ref(Some(pp))) => Wire::Cf(cf_of(d, *pp)),
+                        _ => Wire::Nil,
+                    }])),
+                    "SetPrimaryPartCFrame" => {
+                        let target = match cfw(args.first()) { Some(c) => c, None => return Some(Res::Ok(vec![])) };
+                        let pp = match d.get_prop(id, "PrimaryPart") {
+                            Some(Val::Ref(Some(p))) => *p,
+                            _ => return Some(Res::Err("Model:SetPrimaryPartCFrame() failed because no PrimaryPart has been set".into())),
+                        };
+                        let rel = cf::mul(&target, &cf::inv(&cf_of(d, pp)));
+                        for p in parts_of(d, id) {
+                            let nc = cf::orthonormalize(&cf::mul(&rel, &cf_of(d, p)));
+                            let _ = d.set_prop(p, "CFrame", Val::Arr(nc.to_vec()));
+                        }
+                        Some(Res::Ok(vec![]))
+                    }
+                    "GetPivot" => {
+                        if let Some(pp) = primary(d, id) {
+                            return Some(Res::Ok(vec![Wire::Cf(cf_of(d, pp))]));
+                        }
+                        let parts = parts_of(d, id);
+                        if parts.is_empty() {
+                            return Some(Res::Ok(vec![Wire::Cf(cf::IDENTITY)]));
+                        }
+                        let (lo, hi) = bounds(d, &parts);
+                        Some(Res::Ok(vec![Wire::Cf([(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])]))
+                    }
+                    _ => {
+                        let target = match cfw(args.first()) { Some(c) if cf::is_finite(&c) => c, _ => return Some(Res::Ok(vec![])) };
+                        if class != "Model" {
+                            let _ = d.set_prop(id, "CFrame", Val::Arr(cf::orthonormalize(&target).to_vec()));
+                            return Some(Res::Ok(vec![]));
+                        }
+                        let pivot = match primary(d, id) {
+                            Some(pp) => cf_of(d, pp),
+                            None => {
+                                let parts = parts_of(d, id);
+                                let (lo, hi) = bounds(d, &parts);
+                                [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+                            }
+                        };
+                        let rel = cf::mul(&target, &cf::inv(&pivot));
+                        for p in parts_of(d, id) {
+                            let nc = cf::orthonormalize(&cf::mul(&rel, &cf_of(d, p)));
+                            let _ = d.set_prop(p, "CFrame", Val::Arr(nc.to_vec()));
+                        }
+                        Some(Res::Ok(vec![]))
+                    }
+                }
             }
             "GetMass" | "getMass" if d.is_a(id, "BasePart") => {
                 let s = match d.get_prop(id, "Size") {

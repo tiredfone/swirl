@@ -1942,9 +1942,9 @@ dependencies = [
 
 [[package]]
 name = "rapier3d"
-version = "0.36.1"
+version = "0.36.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "033e2edc815d61ab97bd74ed5d1cbea5ebe575218774a7cfedbd3551f0033317"
+checksum = "c2e2b20538584bb3ba5bfe6a66c2d9a242ee17d15e5398be0fa35279c7d73739"
 dependencies = [
  "approx",
  "arrayvec",
@@ -2493,6 +2493,7 @@ name = "swirl-server"
 version = "1.13.0"
 dependencies = [
  "futures-util",
+ "indexmap",
  "serde_json",
  "swirl-core",
  "swirl-lua",

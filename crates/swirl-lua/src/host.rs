@@ -491,6 +491,7 @@ fn wire_to_val(ty: &str, w: &Wire) -> Option<Val> {
         ("string", Wire::N(n)) => Val::Str(n.to_string()),
         ("int", Wire::N(n)) => Val::Num(n.trunc()),
         ("number", Wire::N(n)) | ("enum", Wire::N(n)) | ("BC", Wire::N(n)) => Val::Num(*n),
+        ("enum", Wire::E(_, v)) => Val::Num(*v),
         ("V3", Wire::V3(a)) | ("C3", Wire::C3(a)) => Val::Arr(a.to_vec()),
         ("V2", Wire::V2(a)) => Val::Arr(a.to_vec()),
         ("UD2", Wire::Ud2(a)) => Val::Arr(a.to_vec()),
