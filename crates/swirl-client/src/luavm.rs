@@ -39,6 +39,8 @@ pub struct LuaVm {
     chars: Option<crate::clientchars::ClientChars>,
     mouse_state: crate::clientchars::MouseState,
     screen: [f64; 2],
+    gui_dom: Option<crate::gui::Gui>,
+    gui_dirty: bool,
     tools: crate::clientchars::Tools,
     remote_moved: std::collections::HashSet<u32>,
     fired_later: Vec<(u32, &'static str, Vec<swirl_lua::host::Wire>)>,
@@ -54,7 +56,7 @@ impl LuaVm {
         let mut dm = DataModel::new("client");
         dm.local_alloc = true;
         let dm = Rc::new(RefCell::new(dm));
-        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), gui: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), screen: [800.0, 600.0], tools: Default::default(), remote_moved: Default::default(), fired_later: vec![], t: 0.0 })
+        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), gui: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), screen: [800.0, 600.0], gui_dom: None, gui_dirty: true, tools: Default::default(), remote_moved: Default::default(), fired_later: vec![], t: 0.0 })
     }
 
     pub fn apply(&mut self, text: &str) -> bool {
@@ -240,6 +242,68 @@ impl LuaVm {
             }
         }
         serde_json::to_string(&m).unwrap_or_default()
+    }
+
+    pub fn attach_gui(&mut self, root: web_sys::HtmlElement) {
+        self.gui_dom = crate::gui::Gui::new(&root);
+    }
+
+    pub fn gui_frame(&mut self, vw: f64, vh: f64, k: f64, l: f64, t: f64, r: f64, b: f64, show: bool) -> usize {
+        let mut fired: Vec<(u32, &'static str, Vec<swirl_lua::host::Wire>)> = vec![];
+        let mut out: Vec<String> = vec![];
+        let mut count = 0;
+        if let Some(g) = self.gui_dom.as_mut() {
+            g.set_visible(show);
+            if !show {
+                return 0;
+            }
+            let evs: Vec<crate::gui::GuiEv> = std::mem::take(&mut *g.events.borrow_mut());
+            for e in evs {
+                match e {
+                    crate::gui::GuiEv::Fire(inst, name, a, rep) => {
+                        let wire: Vec<swirl_lua::host::Wire> = if name.ends_with("Click") { vec![] } else { vec![swirl_lua::host::Wire::N(a.first().copied().unwrap_or(0.0).trunc()), swirl_lua::host::Wire::N(a.get(1).copied().unwrap_or(0.0).trunc())] };
+                        fired.push((inst, name, if name.ends_with("Click") { vec![] } else { wire }));
+                        if rep {
+                            let (cx, cy) = if name.ends_with("Click") { (a.first().copied().unwrap_or(0.0), a.get(1).copied().unwrap_or(0.0)) } else { (a.get(2).copied().unwrap_or(0.0), a.get(3).copied().unwrap_or(0.0)) };
+                            let mut j = serde_json::json!({"t": "gui", "id": inst, "ev": name});
+                            if !name.starts_with("MouseEnter") && !name.starts_with("MouseLeave") {
+                                j["x"] = serde_json::json!(cx as i64);
+                                j["y"] = serde_json::json!(cy as i64);
+                            }
+                            out.push(j.to_string());
+                        }
+                    }
+                    crate::gui::GuiEv::Focus(inst) => {
+                        if flag_true(&self.dm.borrow(), inst, "ClearTextOnFocus") {
+                            self.dm.borrow_mut().set_prop_quiet(inst, "Text", Val::Str(String::new()));
+                        }
+                        fired.push((inst, "Focused", vec![]));
+                    }
+                    crate::gui::GuiEv::Commit(inst, text, enter) => {
+                        self.dm.borrow_mut().set_prop_quiet(inst, "Text", Val::Str(text.clone()));
+                        fired.push((inst, "Changed", vec![swirl_lua::host::Wire::S("Text".into())]));
+                        fired.push((inst, "FocusLost", vec![swirl_lua::host::Wire::B(enter)]));
+                        if inst < swirl_core::instance::LOCAL_BASE {
+                            out.push(serde_json::json!({"t": "txt", "id": inst, "text": text, "done": true, "enter": enter}).to_string());
+                        }
+                    }
+                }
+            }
+            if self.gui_dirty || g.dirty.get() || g.hover_changed() {
+                self.gui_dirty = false;
+                g.dirty.set(false);
+                let mut dm = self.dm.borrow_mut();
+                g.layout(&mut dm, vw, vh, k, [l, t, r, b], &mut fired);
+            }
+            count = g.node_count();
+        }
+        if let Some(h) = self.host.as_mut() {
+            for (inst, name, args) in fired {
+                h.fire(inst, name, args);
+            }
+        }
+        self.core.borrow_mut().out.extend(out);
+        count
     }
 
     pub fn set_screen(&mut self, w: f64, h: f64) {
@@ -435,7 +499,7 @@ impl LuaVm {
                     Some(Val::Arr(a)) => serde_json::json!(a),
                     _ => serde_json::Value::Null,
                 };
-                serde_json::json!({"n": d.full_name(i), "c": d.get(i).map(|x| x.class.clone()), "t": t, "p": pos, "id": i})
+                serde_json::json!({"n": d.full_name(i), "c": d.get(i).map(|x| x.class.clone()), "t": t, "p": pos, "s": match d.get_prop(i, "Size") { Some(Val::Arr(a)) => serde_json::json!(a), _ => serde_json::Value::Null }, "v": d.get_prop(i, "Visible").map(|v| matches!(v, Val::Bool(true))), "a": match d.get_prop(i, "AbsoluteSize") { Some(Val::Arr(a)) => serde_json::json!(a), _ => serde_json::Value::Null }, "id": i})
             })
             .collect();
         serde_json::to_string(&v).unwrap_or_default()
@@ -459,6 +523,15 @@ impl LuaVm {
                 serde_json::json!([d.full_name(i), t, b[0], b[1]])
             })
             .collect();
+        serde_json::to_string(&v).unwrap_or_default()
+    }
+
+    pub fn gui_node_names(&self) -> String {
+        let d = self.dm.borrow();
+        let v: Vec<String> = match self.gui_dom.as_ref() {
+            Some(g) => g.node_ids().into_iter().map(|i| d.full_name(i)).collect(),
+            None => vec![],
+        };
         serde_json::to_string(&v).unwrap_or_default()
     }
 
@@ -533,6 +606,12 @@ impl LuaVm {
         if let Some(ch) = self.chars.as_mut() {
             let mut dm = self.dm.borrow_mut();
             ch.pose(&mut dm);
+            if dm.journal.iter().any(|c| match c {
+                swirl_core::instance::Change::Prop(id, _) => dm.get(*id).map(|i| matches!(i.class.as_str(), "Player" | "Humanoid") || dm.is_a(*id, "GuiBase") || dm.is_a(*id, "ValueBase") || dm.is_a(*id, "GuiObject")).unwrap_or(false),
+                _ => true,
+            }) {
+                self.gui_dirty = true;
+            }
             let mouse = self.core.borrow().mouse;
             if let Some(mouse) = mouse {
                 let moves: Vec<(u32, Option<u32>)> = dm
@@ -691,4 +770,8 @@ fn boot(dm: &mut DataModel, screen: [f64; 2]) -> Option<u32> {
         }
     }
     mouse_id
+}
+
+fn flag_true(dm: &DataModel, id: u32, k: &str) -> bool {
+    matches!(dm.get_prop(id, k), Some(Val::Bool(true)))
 }

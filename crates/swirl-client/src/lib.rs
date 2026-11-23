@@ -51,6 +51,9 @@ mod gl;
 mod clientchars;
 
 #[cfg(target_arch = "wasm32")]
+mod gui;
+
+#[cfg(target_arch = "wasm32")]
 mod luavm;
 
 #[cfg(target_arch = "wasm32")]

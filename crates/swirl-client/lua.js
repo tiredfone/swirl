@@ -92,6 +92,12 @@ export async function startLua(opts) {
   const { CameraController } = cameraMod;
   const { CursorLayer, CURSORS } = cursorMod;
   assets.configure(cfg);
+  window.solarImageUrl = (url) => {
+    const t = String(url || '').trim();
+    if (/^rbxasset:\/\//i.test(t)) return assets.contentImageUrl(t) || null;
+    const id = assets.assetId(t);
+    return id ? assets.endpointUrl('asset', id) : null;
+  };
   const indexReady = assets.loadContentIndex();
   indexReady.then(() => { window.solarLoadImage = assets.loadImage; });
   
@@ -504,6 +510,7 @@ export async function startLua(opts) {
       flush: () => world.host.tick(world.t),
     });
     state.gui = gui;
+    state.guiRust = /[?&]swirlgui=1/.test(location.search);
     world.host.env.textBounds = (inst) => gui.textBounds(inst);
     world.host.env.absoluteSize = (inst) => gui.absoluteSize(inst);
     if (world.era === 2018) {
@@ -848,6 +855,15 @@ export async function startLua(opts) {
       if (window.solarVm && /[?&]swirlhost=1/.test(location.search)) {
         try {
           window.solarVm.update(dt, input.move[0], input.move[2], !!input.jump);
+          if (state.guiRust && state.gui) {
+            if (!state.rustGuiAttached) {
+              state.rustGuiAttached = true;
+              window.solarVm.attach_gui(root);
+            }
+            state.gui.overlay.style.visibility = 'hidden';
+            const ins = world.guiInset || [0, 0, 0, 0];
+            window.solarRustGuiNodes = window.solarVm.gui_frame(canvas.clientWidth || 1, canvas.clientHeight || 1, world.guiScale ? world.guiScale() : 1, ins[0], ins[1], ins[2], ins[3], true);
+          }
           for (const l of JSON.parse(window.solarVm.logs())) (window.solarRustLogs = window.solarRustLogs || []).push(l);
           comparePos();
           const rsAll = JSON.parse(window.solarVm.take_out());

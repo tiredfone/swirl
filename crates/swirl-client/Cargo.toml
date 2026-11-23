@@ -18,5 +18,5 @@ swirl-physics = { path = "../swirl-physics" }
 version = "0.3.77"
 features = [
     "Window", "Document", "Element", "HtmlCanvasElement", "WebGl2RenderingContext", "WebGlProgram", "WebGlShader", "WebGlBuffer",
-    "WebGlVertexArrayObject", "WebGlUniformLocation", "WebSocket", "MessageEvent", "MouseEvent", "WheelEvent", "Event", "CloseEvent", "KeyboardEvent", "ImageBitmap", "WebGlTexture", "WebGlFramebuffer", "WebGlSampler", "ImageData", "OffscreenCanvas", "HtmlImageElement", "OffscreenCanvasRenderingContext2d", "TextMetrics",
+    "WebGlVertexArrayObject", "WebGlUniformLocation", "WebSocket", "MessageEvent", "MouseEvent", "WheelEvent", "Event", "CloseEvent", "KeyboardEvent", "ImageBitmap", "WebGlTexture", "WebGlFramebuffer", "WebGlSampler", "ImageData", "OffscreenCanvas", "HtmlImageElement", "OffscreenCanvasRenderingContext2d", "TextMetrics", "HtmlElement", "HtmlInputElement", "HtmlTextAreaElement", "CssStyleDeclaration", "DomTokenList", "PointerEvent", "Node", "DomRect", "HtmlDivElement", "HtmlSpanElement", "DomStringMap", "EventTarget", "Document", "Window", "HtmlHeadElement",
 ]

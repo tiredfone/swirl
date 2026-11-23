@@ -10,7 +10,7 @@ const page = `<!doctype html><meta charset=utf-8><body style="margin:0;backgroun
 const srv = http.createServer((req, res) => {
   if (req.url.startsWith('/dist/')) {
     const f = path.join(dist, req.url.slice(6).split('?')[0]);
-    const types = { '.js': 'text/javascript', '.wasm': 'application/wasm', '.json': 'application/json' };
+    const types = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm', '.json': 'application/json', '.css': 'text/css', '.png': 'image/png', '.ttf': 'font/ttf', '.otf': 'font/otf', '.svg': 'image/svg+xml' };
     try {
       res.writeHead(200, { 'Content-Type': types[path.extname(f)] || 'application/octet-stream' });
       res.end(fs.readFileSync(f));
