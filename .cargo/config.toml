@@ -2,7 +2,11 @@
 jobs = 4
 
 [target.wasm32-unknown-unknown]
-rustflags = ["-C", "link-arg=--no-demangle", "-C", "link-arg=-zstack-size=1048576"]
+rustflags = ["-C", "link-arg=--no-demangle", "-C", "link-arg=-zstack-size=1048576", "-C", "link-arg=/var/www/swirl/.toolchain/wasi-sdk-34.0-x86_64-linux/share/wasi-sysroot/lib/wasm32-wasip1/libsetjmp.a", "-C", "link-arg=/var/www/swirl/.toolchain/wasi-sdk-34.0-x86_64-linux/share/wasi-sysroot/lib/wasm32-wasip1/libc.a"]
+
+[env]
+CC_wasm32_unknown_unknown = "/var/www/swirl/tools/wasm-cc.sh"
+AR_wasm32_unknown_unknown = "/var/www/swirl/.toolchain/wasi-sdk-34.0-x86_64-linux/bin/llvm-ar"
 
 [net]
 retry = 3

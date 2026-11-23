@@ -47,3 +47,6 @@ incremental = false
 inherits = "client"
 opt-level = "s"
 strip = true
+
+[patch.crates-io]
+lua-src = { path = "vendor-crates/lua-src" }

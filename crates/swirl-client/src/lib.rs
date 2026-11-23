@@ -48,6 +48,9 @@ impl Default for Scene {
 mod gl;
 
 #[cfg(target_arch = "wasm32")]
+mod luavm;
+
+#[cfg(target_arch = "wasm32")]
 pub use gl::Client;
 
 pub fn version() -> &'static str {

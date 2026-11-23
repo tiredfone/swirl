@@ -66,7 +66,7 @@ struct State {
     subs: HashSet<String>,
     logs: Vec<LogLine>,
     running: HashSet<u32>,
-    t0: std::time::Instant,
+    t0: crate::clock::Clock,
     settings: Option<u32>,
     user_settings: Option<u32>,
     handler: Option<Box<dyn ApiHandler>>,
@@ -699,7 +699,7 @@ fn after_parent_change(st: &Rc<RefCell<State>>, dm: &DataModel, id: InstId, old:
 impl Host {
     pub fn new(dm: Rc<RefCell<DataModel>>) -> mlua::Result<Host> {
         let lua = unsafe { Lua::unsafe_new() };
-        let st = Rc::new(RefCell::new(State { reqs: vec![], queue: vec![], subs: HashSet::new(), logs: vec![], running: HashSet::new(), t0: std::time::Instant::now(), settings: None, user_settings: None, handler: None, extra_methods: HashSet::new(), async_seq: 1 }));
+        let st = Rc::new(RefCell::new(State { reqs: vec![], queue: vec![], subs: HashSet::new(), logs: vec![], running: HashSet::new(), t0: crate::clock::Clock::new(), settings: None, user_settings: None, handler: None, extra_methods: HashSet::new(), async_seq: 1 }));
         let j = lua.create_table()?;
         {
             let dm = dm.clone();
@@ -1224,9 +1224,9 @@ impl Host {
                 "now",
                 lua.create_function(move |_, what: Option<String>| {
                     if what.as_deref() == Some("tick") {
-                        Ok(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0))
+                        Ok(crate::clock::wall())
                     } else {
-                        Ok(st2.borrow().t0.elapsed().as_secs_f64())
+                        Ok(st2.borrow().t0.elapsed())
                     }
                 })?,
             )?;

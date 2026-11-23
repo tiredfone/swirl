@@ -1,3 +1,4 @@
+pub mod clock;
 pub mod host;
 
 pub use host::{wire_from_json, wire_to_json, Host, LogLine, Req, Wire};

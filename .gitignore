@@ -4,3 +4,4 @@ tools/parity/php-ref/
 dist/client/chocolate/
 config.local.php
 data/store/
+.toolchain/

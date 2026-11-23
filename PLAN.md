@@ -179,6 +179,25 @@ When Swirl Studio is built it is desktop only: native, alongside `swirl-desktop`
 - `tools/compare-shots.cjs` now restarts the server per side so both join as the same user; `EVAL`, `EVALOUT`, `FAILS` env options; `tools/pair-diff.sh` prints mean abs diff and % pixels over 16.
 - Still different: gradient dome colours in 2018, smooth terrain (2018 atlas shader not ported), truss texture, Reflectance env map, wedge stud/UV details, mesh Offset on file meshes, package CharacterMesh limbs, R15 characters and animation pose timing, sun and moon sprites, vendor content2018/platform subset added (17 MB).
 
+## Client independence from Chocolate (owner decision, started in 1.19)
+
+Goal: port the remaining Chocolate client JavaScript to Rust and remove `vendor/chocolate`, matching Chocolate 1:1. Order: (1) Lua in the wasm build, (2) movement, cameras and animation, (3) GUI, (4) vendor removal and gate. Avatar fixes (clothing wrap, bending limbs, 2018 default sky, R15 in the client, truss, reflectance, wedge studs, mesh Offset, sun and moon) run alongside.
+
+### Step 1: Lua 5.1 inside the Rust wasm build (done in 1.19)
+
+Route chosen: mlua (lua51, vendored) compiled to `wasm32-unknown-unknown`, the same crate and Lua 5.1.5 the server uses, so `swirl-lua`'s `Host` and Swirl's own `runtime.lua` and `runtime2018.lua` run unchanged in the browser. Rejected: a pure Rust Lua (no faithful 5.1 with the Roblox runtime's metatable, coroutine and pcall behaviour; piccolo and similar target 5.3/5.4 semantics); keeping wasmoon (a JS dependency and a second Lua build the owner wants gone); a separate Lua wasm module (the host would cross a JS boundary on every Lua call).
+
+How it builds:
+- `.toolchain/` (git-ignored, `tools/setup-toolchain.sh` downloads wasi-sdk 34, run automatically by `build-client.sh`) provides clang and the wasi-libc archives. `tools/wasm-cc.sh` is `CC_wasm32_unknown_unknown` (set in `.cargo/config.toml` `[env]`): it compiles C for `wasm32-wasip1` with `-mexception-handling -mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=true`, so Lua's `setjmp`/`longjmp` error handling becomes wasm exceptions, and defines `L_tmpnam`.
+- `vendor-crates/lua-src` is `lua-src` 547.0.0 with only Lua 5.1.5 and a `wasm32-unknown-unknown` branch (`LUA_USE_LONGJMP`); `[patch.crates-io]` in the workspace `Cargo.toml` uses it for every target.
+- The wasm link adds `libsetjmp.a` and `libc.a` from the sysroot (rustflags in `.cargo/config.toml`). `tmpfile`, `clock`, `system` and `tmpnam` are stubbed in `luavm.rs` because `liolib` and `loslib` reference them. The libc imports (`wasi_snapshot_preview1`, 17 functions: environ, clock, fd_*, path_*, proc_exit) are satisfied by `swirlWasi()`, which `tools/patch-wasi.mjs` inserts into the generated `swirl_client.js` (wasm-bindgen emits `import ... from "wasi_snapshot_preview1"` otherwise, which a browser cannot resolve).
+- wasm-bindgen 0.2.100 cannot parse exception-handling wasm, so the crate and the installed CLI moved to 0.2.121 (`cargo install wasm-bindgen-cli --version 0.2.121`; the 0.2.100 binary is not kept in the repo).
+- `swirl-lua` no longer calls `Instant` or `SystemTime` (they panic on wasm): `clock.rs` keeps the native behaviour and, on wasm, reads a clock the client sets (`set_now`, `set_wall`).
+
+Result: `crates/swirl-client/src/luavm.rs` exposes `LuaVm` (a client `DataModel` plus `swirl_lua::Host`); `tools/luavm-test.mjs <dist>` runs a script in node (print, pcall with error, Instance.new, spawn/wait) and boots in about 50 ms. Build times: clean wasm client 53 s (was 27 s), incremental 1 s, `build-client.sh` end to end 5 s; wasm 1.63 MB (was 0.85 MB) before the host is wired in. Movement parity unchanged (18 scenarios, 3769 frames, 0 difference).
+
+Next in step 1: a client `DataModel` fed by `init` and `rep` (swirl-core), the Lua client host mirroring `luahost.js` (CoreScript loading, Mouse, UserInputService, RunService, RemoteEvents, GUI object API), then dropping wasmoon and `lua.js`'s DataModel.
+
 ## Server port: independence, config and feature inventory (server 4)
 
 Owner direction: Swirl is 1:1 with Chocolate and vanilla but in Rust and depends on neither. Done for the server:
