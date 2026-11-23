@@ -43,7 +43,7 @@ const srv = http.createServer((req, res) => {
   pg.on('pageerror', (e) => console.log('pageerror', String(e).slice(0, 400)));
   pg.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') console.log('console', m.type(), m.text().slice(0, 300)); });
   await pg.evaluateOnNewDocument(() => { window.__sent = []; const o = WebSocket.prototype.send; WebSocket.prototype.send = function (d) { try { const m = JSON.parse(d); if (m.t !== 'char' && m.t !== 'ping') window.__sent.push(String(d).slice(0, 160)); } catch (e) {} return o.call(this, d); }; });
-  await pg.goto('http://127.0.0.1:' + port + '/?swirlws=' + encodeURIComponent('ws://127.0.0.1:' + wsPort + '/ws'), { waitUntil: 'domcontentloaded' });
+  await pg.goto('http://127.0.0.1:' + port + '/?swirlws=' + encodeURIComponent('ws://127.0.0.1:' + wsPort + '/ws') + (process.env.QS || ''), { waitUntil: 'domcontentloaded' });
   await pg.waitForFunction('window.__ready === true || window.__failed', { timeout: 30000 });
   await pg.waitForFunction('window.solarLua && window.solarLua.ready() || window.solarLuaFailed', { timeout: 60000 }).catch(() => console.log('lua not ready'));
   console.log('luaFailed', await pg.evaluate(() => window.solarLuaFailed || null));

@@ -4,6 +4,8 @@ use std::collections::HashMap;
 
 pub type InstId = u32;
 
+pub const LOCAL_BASE: InstId = 0x4000_0000;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Val {
     Nil,
@@ -53,20 +55,29 @@ pub struct DataModel {
     pub side: String,
     pub era: i32,
     insts: Vec<Option<Instance>>,
+    high: HashMap<InstId, Instance>,
+    next_local: InstId,
+    pub local_alloc: bool,
+    pub local_player: Option<InstId>,
     pub root: InstId,
     pub services: HashMap<String, InstId>,
 }
 
 impl DataModel {
     pub fn new(side: &str) -> DataModel {
-        let mut dm = DataModel { journal: vec![], side: side.to_string(), era: 2012, insts: vec![], root: 0, services: HashMap::new() };
+        let mut dm = DataModel { journal: vec![], side: side.to_string(), era: 2012, insts: vec![], high: HashMap::new(), next_local: LOCAL_BASE, local_alloc: false, local_player: None, root: 0, services: HashMap::new() };
         let id = dm.alloc("DataModel", "Game");
         dm.root = id;
         dm
     }
 
     fn alloc(&mut self, class: &str, name: &str) -> InstId {
-        let id = self.insts.len() as InstId;
+        let id = if self.local_alloc {
+            self.next_local += 1;
+            self.next_local - 1
+        } else {
+            self.insts.len() as InstId
+        };
         let mut props = HashMap::new();
         if let Some(c) = classes::class_info(class) {
             for (k, p) in &c.all {
@@ -76,12 +87,76 @@ impl DataModel {
         if props.contains_key("Name") {
             props.insert("Name".to_string(), Val::Str(name.to_string()));
         }
-        self.insts.push(Some(Instance { id, class: class.to_string(), name: name.to_string(), parent: None, children: vec![], props, tags: vec![], destroyed: false }));
+        let inst = Instance { id, class: class.to_string(), name: name.to_string(), parent: None, children: vec![], props, tags: vec![], destroyed: false };
+        if id >= LOCAL_BASE {
+            self.high.insert(id, inst);
+        } else {
+            self.insts.push(Some(inst));
+        }
         id
     }
 
     pub fn get(&self, id: InstId) -> Option<&Instance> {
+        if id >= LOCAL_BASE {
+            return self.high.get(&id);
+        }
         self.insts.get(id as usize)?.as_ref()
+    }
+
+    pub fn adopt(&mut self, id: InstId, class: &str, props: Vec<(String, Val)>, tags: Vec<String>) {
+        let mut inst = Instance { id, class: class.to_string(), name: class.to_string(), parent: None, children: vec![], props: HashMap::new(), tags, destroyed: false };
+        if let Some(c) = classes::class_info(class) {
+            for (k, p) in &c.all {
+                inst.props.insert(k.clone(), Val::from_default(&p.ty, &p.def));
+            }
+        }
+        for (k, v) in props {
+            if k == "Name" {
+                if let Val::Str(n) = &v {
+                    inst.name = n.clone();
+                }
+            }
+            inst.props.insert(k, v);
+        }
+        if id >= LOCAL_BASE {
+            self.high.insert(id, inst);
+            return;
+        }
+        let i = id as usize;
+        if self.insts.len() <= i {
+            self.insts.resize_with(i + 1, || None);
+        }
+        self.insts[i] = Some(inst);
+    }
+
+    pub fn link_quiet(&mut self, id: InstId, parent: Option<InstId>) {
+        let old = self.get(id).and_then(|i| i.parent);
+        if let Some(o) = old {
+            if let Some(oi) = self.get_mut(o) {
+                oi.children.retain(|&c| c != id);
+            }
+        }
+        if let Some(p) = parent {
+            if let Some(pi) = self.get_mut(p) {
+                if !pi.children.contains(&id) {
+                    pi.children.push(id);
+                }
+            }
+        }
+        if let Some(i) = self.get_mut(id) {
+            i.parent = parent;
+        }
+    }
+
+    pub fn clear_wire(&mut self) {
+        self.insts.truncate(1);
+        let root = self.root;
+        if let Some(Some(r)) = self.insts.get_mut(root as usize) {
+            r.children.clear();
+        }
+        self.high.clear();
+        self.services.clear();
+        self.journal.clear();
     }
 
     pub fn get_mut_inst(&mut self, id: InstId) -> Option<&mut Instance> {
@@ -89,6 +164,9 @@ impl DataModel {
     }
 
     fn get_mut(&mut self, id: InstId) -> Option<&mut Instance> {
+        if id >= LOCAL_BASE {
+            return self.high.get_mut(&id);
+        }
         self.insts.get_mut(id as usize)?.as_mut()
     }
 
@@ -261,6 +339,17 @@ impl DataModel {
         let _ = self.set_parent(id, None);
         self.journal.retain(|c| !matches!(c, Change::Parent { id: i, new: None, .. } if *i == id));
         self.journal.push(Change::Destroy { id, old });
+        if let Some(i) = self.get_mut(id) {
+            i.destroyed = true;
+        }
+    }
+
+    pub fn destroy_quiet(&mut self, id: InstId) {
+        let kids: Vec<InstId> = self.get(id).map(|i| i.children.clone()).unwrap_or_default();
+        for k in kids {
+            self.destroy_quiet(k);
+        }
+        self.link_quiet(id, None);
         if let Some(i) = self.get_mut(id) {
             i.destroyed = true;
         }

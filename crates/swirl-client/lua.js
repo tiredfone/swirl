@@ -1,3 +1,4 @@
+import { LuaVm } from './swirl_client.js';
 
 const addImportMap = (pub) => {
   const map = {
@@ -632,12 +633,31 @@ export async function startLua(opts) {
   };
 
   const frame = (now) => {
+    if (window.solarVm && /[?&]swirlhost=1/.test(location.search)) {
+      try {
+        window.solarVm.tick(1 / 60);
+        for (const l of JSON.parse(window.solarVm.logs())) (window.solarRustLogs = window.solarRustLogs || []).push(l);
+      } catch (e) {
+        errors.push('vmtick: ' + e);
+      }
+    }
     for (const raw of JSON.parse(client.take_tap())) {
       let m;
       try {
         m = JSON.parse(raw);
       } catch (e) {
         continue;
+      }
+      if (m.t === 'init' || m.t === 'rep') {
+        try {
+          if (!window.solarVm || m.t === 'init') {
+            window.solarVm = new LuaVm(Date.now() / 1000);
+            window.solarVm.set_run(/[?&]swirlhost=1/.test(location.search));
+          }
+          window.solarVm.apply(raw);
+        } catch (e) {
+          errors.push('vm: ' + (e && e.stack ? e.stack : e));
+        }
       }
       if (m.t === 'init') {
         if (!booting) boot(m).catch((e) => {

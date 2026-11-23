@@ -6,6 +6,7 @@ pub mod math;
 pub mod meshconv;
 pub mod meshfile;
 pub mod rbx;
+pub mod wire;
 
 #[cfg(test)]
 mod tests {

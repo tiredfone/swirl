@@ -198,6 +198,13 @@ Result: `crates/swirl-client/src/luavm.rs` exposes `LuaVm` (a client `DataModel`
 
 Next in step 1: a client `DataModel` fed by `init` and `rep` (swirl-core), the Lua client host mirroring `luahost.js` (CoreScript loading, Mouse, UserInputService, RunService, RemoteEvents, GUI object API), then dropping wasmoon and `lua.js`'s DataModel.
 
+### Step 1b: Rust DataModel mirror and client Host (1.20)
+
+- `swirl_core::wire` decodes the server's `init` snapshot and `rep` ops (`p`, `m`, `n`, `d`) into a `DataModel` (`adopt`, `link_quiet`, `destroy_quiet`; typed values through `decode_value` from the class table). Wire ids keep their server numbers; instances Lua creates on the client get ids from `LOCAL_BASE` (0x40000000), kept in a side map. `DataModel.local_player` is the `you` id.
+- `swirl-lua`'s `Host` takes `side` from the DataModel (`runtime.lua` already supports `client`) and decides what runs with Chocolate's client rules (`can_run_client`: LocalScript under the local player, its Character or ReplicatedFirst; CoreScript anywhere; plain Script never).
+- `LuaVm` (wasm) owns both. `lua.js` feeds it every `init` and `rep` message beside the JS engine (always, as a shadow mirror) and, only with `?swirlhost=1`, creates the Host, ticks it each frame and collects its logs in `window.solarRustLogs`.
+- Check: on place 564 the class counts of the Workspace subtree in the Rust mirror equal the JS DataModel's wire-created instances (Part 10, SpawnLocation 3, Model 1, Humanoid 1, Motor6D 5, Attachment 16, Sound 6, Script 4, LocalScript 1 ...; JS has one extra locally created Camera). With `?swirlhost=1` the Rust host starts the real 2012 `Animate` LocalScript from the wire and stops at the first missing client API (`Motor6D:SetDesiredAngle`), which is the gap list to work through: port `luahost.js` handlers (Player, Mouse, UserInputService, Humanoid and Motor6D methods, CoreScript sources from `/asset`, GUI objects, remotes) into a client `ApiHandler`, then switch the shadow on by default, compare logs, and remove the JS DataModel.
+
 ## Server port: independence, config and feature inventory (server 4)
 
 Owner direction: Swirl is 1:1 with Chocolate and vanilla but in Rust and depends on neither. Done for the server:

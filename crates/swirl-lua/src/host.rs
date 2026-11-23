@@ -622,12 +622,41 @@ fn virtual_set(d: &mut DataModel, id: InstId, class: &str, key: &str, w: &Wire) 
     None
 }
 
+fn can_run_client(d: &DataModel, i: &swirl_core::instance::Instance) -> bool {
+    let in_model = |anc: InstId| d.is_descendant_of(i.id, anc);
+    match i.class.as_str() {
+        "CoreScript" => in_model(d.root),
+        "LocalScript" => {
+            let lp = match d.local_player {
+                Some(p) => p,
+                None => return false,
+            };
+            if in_model(lp) {
+                return true;
+            }
+            if let Some(Val::Ref(Some(ch))) = d.get_prop(lp, "Character") {
+                if i.id == *ch || in_model(*ch) {
+                    return true;
+                }
+            }
+            d.services.get("ReplicatedFirst").map(|rf| in_model(*rf)).unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
 fn can_run(d: &DataModel, id: InstId) -> bool {
     let i = match d.get(id) {
         Some(i) if !i.destroyed => i,
         _ => return false,
     };
-    if (i.class != "Script" && i.class != "CoreScript") || matches!(i.props.get("Disabled"), Some(Val::Bool(true))) {
+    if matches!(i.props.get("Disabled"), Some(Val::Bool(true))) {
+        return false;
+    }
+    if d.side == "client" {
+        return can_run_client(d, i);
+    }
+    if i.class != "Script" && i.class != "CoreScript" {
         return false;
     }
     let mut cur = i.parent;
@@ -1231,7 +1260,8 @@ impl Host {
                 })?,
             )?;
         }
-        j.set("side", "server")?;
+        let side = dm.borrow().side.clone();
+        j.set("side", side)?;
         j.set("data", include_str!("../data/luadata.lua"))?;
         let rt: Table = lua.load(include_str!("../data/runtime.lua")).set_name("=runtime").call(j)?;
         let step: Function = rt.get("step")?;

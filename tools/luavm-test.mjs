@@ -5,6 +5,7 @@ await m.default({ module_or_path: fs.readFileSync(dir + '/swirl_client_bg.wasm')
 const t0 = performance.now();
 const vm = new m.LuaVm(Date.now() / 1000);
 console.log('boot ms', Math.round(performance.now() - t0));
+vm.apply(JSON.stringify({ t: 'init', era: 2012, you: 3, snap: [[1, 'Workspace', 0, []], [2, 'Players', 0, []], [3, 'Player', 2, ['Name', 'Me']]] }));
 vm.run_script(`
 print("hello", _VERSION)
 local ok, e = pcall(function() error("boom") end)
