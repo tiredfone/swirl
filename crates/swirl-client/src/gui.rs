@@ -44,6 +44,10 @@ pub struct Gui {
     scale_key: String,
     pub focused: Rc<Cell<Option<InstId>>>,
     last_state: HashMap<InstId, (bool, bool)>,
+    hint: HtmlElement,
+    message: HtmlElement,
+    pub forced_message: Option<String>,
+    pending_focus: Option<(InstId, u32)>,
 }
 
 struct Kids {
@@ -146,7 +150,11 @@ impl Gui {
         };
         let overlay = mk("ch-gui", root)?;
         let screen = mk("ch-screen", &overlay)?;
-        Some(Gui { doc, overlay, screen, nodes: HashMap::new(), closures: vec![], events: Rc::new(RefCell::new(vec![])), dirty: Rc::new(Cell::new(true)), scale_key: String::new(), focused: Rc::new(Cell::new(None)), last_state: HashMap::new() })
+        let hint = mk("ch-hint", &overlay)?;
+        hint.set_hidden(true);
+        let message = mk("ch-message", &overlay)?;
+        message.set_hidden(true);
+        Some(Gui { doc, overlay, screen, nodes: HashMap::new(), closures: vec![], events: Rc::new(RefCell::new(vec![])), dirty: Rc::new(Cell::new(true)), scale_key: String::new(), focused: Rc::new(Cell::new(None)), last_state: HashMap::new(), hint, message, forced_message: None, pending_focus: None })
     }
 
     fn el(&self, tag: &str, cls: &str, parent: &HtmlElement) -> HtmlElement {
@@ -516,6 +524,35 @@ impl Gui {
             style(&el, "inset", &format!("{}px {}px {}px {}px", t, r, b, l));
             self.layout_children(d, sg, [l, t], [w, h], &mut live, fired);
         }
+        let mut hint_text: Option<String> = None;
+        let mut msg_text: Option<String> = self.forced_message.clone().filter(|m| !m.is_empty());
+        let pg = d.local_player.and_then(|p| d.find_child_of_class(p, "PlayerGui"));
+        for src in [d.services.get("Workspace").copied(), pg] {
+            if let Some(src) = src {
+                for c in d.get(src).map(|i| i.children.clone()).unwrap_or_default() {
+                    let cls = d.get(c).map(|i| i.class.clone()).unwrap_or_default();
+                    if cls == "Hint" {
+                        hint_text = Some(text(d, c));
+                    } else if cls == "Message" {
+                        msg_text = Some(text(d, c));
+                    }
+                }
+            }
+        }
+        let hint_text = hint_text.filter(|t| !t.is_empty());
+        let msg_text = msg_text.filter(|t| !t.is_empty());
+        self.hint.set_hidden(hint_text.is_none());
+        if let Some(t) = hint_text {
+            if self.hint.text_content().unwrap_or_default() != t {
+                self.hint.set_text_content(Some(&t));
+            }
+        }
+        self.message.set_hidden(msg_text.is_none());
+        if let Some(t) = msg_text {
+            if self.message.text_content().unwrap_or_default() != t {
+                self.message.set_text_content(Some(&t));
+            }
+        }
         let dead: Vec<InstId> = self.nodes.keys().copied().filter(|i| !live.contains(i)).collect();
         for i in dead {
             if let Some(n) = self.nodes.remove(&i) {
@@ -809,6 +846,45 @@ impl Gui {
 
     pub fn commit_text(&mut self, d: &mut DataModel, inst: InstId, value: &str) {
         d.set_prop_quiet(inst, "Text", Val::Str(value.to_string()));
+    }
+
+    pub fn pointer_over(&self, x: f64, y: f64) -> bool {
+        match self.doc.element_from_point(x as f32, y as f32) {
+            Some(e) => e.closest(".ch-g").ok().flatten().is_some() && e.closest("canvas").ok().flatten().is_none(),
+            None => false,
+        }
+    }
+
+    pub fn focus_box(&mut self, inst: InstId, on: bool) {
+        match self.nodes.get(&inst) {
+            Some(n) => {
+                if on {
+                    let _ = n.el.focus();
+                } else {
+                    let _ = n.el.blur();
+                }
+            }
+            None => {
+                if on {
+                    self.pending_focus = Some((inst, 30));
+                } else if matches!(self.pending_focus, Some((i, _)) if i == inst) {
+                    self.pending_focus = None;
+                }
+            }
+        }
+    }
+
+    pub fn apply_pending_focus(&mut self) {
+        if let Some((inst, tries)) = self.pending_focus {
+            let done = match self.nodes.get(&inst) {
+                Some(n) => {
+                    let _ = n.el.focus();
+                    self.doc.active_element().map(|a| a == *AsRef::<web_sys::Element>::as_ref(&n.el)).unwrap_or(false)
+                }
+                None => false,
+            };
+            self.pending_focus = if done || tries <= 1 { None } else { Some((inst, tries - 1)) };
+        }
     }
 
     pub fn node_ids(&self) -> Vec<InstId> {

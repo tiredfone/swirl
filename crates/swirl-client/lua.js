@@ -407,6 +407,7 @@ export async function startLua(opts) {
   };
 
   const world = new ClientWorld(net, hooks);
+  if (/[?&]swirlvislog=1/.test(location.search)) { const t0 = performance.now(); window.solarVisLog = []; world.dm.observe({ changed: (inst, name) => { if (name === 'Visible' && inst.props.get('Name') === 'BackpackButton') window.solarVisLog.push([Math.round(performance.now() - t0), String(inst.props.get('Visible'))]); } }); }
   state.world = world;
 
   const applyFs = (m) => {
@@ -859,6 +860,11 @@ export async function startLua(opts) {
             if (!state.rustGuiAttached) {
               state.rustGuiAttached = true;
               window.solarVm.attach_gui(root);
+              const vm = window.solarVm;
+              state.gui.pointerOverGui = (x, y) => vm.pointer_over_gui(x, y);
+              state.gui.isTyping = () => vm.is_typing();
+              state.gui.focusTextBox = (inst, on) => vm.focus_text_box(inst && inst.id, !!on);
+              state.gui.setHint = (text) => vm.set_gui_message(text || undefined);
             }
             state.gui.overlay.style.visibility = 'hidden';
             const ins = world.guiInset || [0, 0, 0, 0];

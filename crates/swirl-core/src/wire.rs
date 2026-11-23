@@ -76,8 +76,14 @@ pub fn apply_init(dm: &mut DataModel, snap: &[J]) {
     link(dm, pending);
 }
 
-pub fn apply_ops(dm: &mut DataModel, ops: &[J]) -> Vec<(InstId, Option<InstId>, Option<InstId>)> {
+pub struct Applied {
+    pub moved: Vec<(InstId, Option<InstId>, Option<InstId>)>,
+    pub props: Vec<(InstId, String, Option<Val>, Val)>,
+}
+
+pub fn apply_ops(dm: &mut DataModel, ops: &[J]) -> Applied {
     let mut moved = vec![];
+    let mut props: Vec<(InstId, String, Option<Val>, Val)> = vec![];
     for op in ops {
         let a = match op.as_array() {
             Some(a) if !a.is_empty() => a,
@@ -92,7 +98,12 @@ pub fn apply_ops(dm: &mut DataModel, ops: &[J]) -> Vec<(InstId, Option<InstId>, 
                     None => continue,
                 };
                 let ty = classes::prop_info(&class, name).map(|d| d.ty.clone()).unwrap_or_default();
-                let _ = dm.set_prop(id, name, decode_value(&ty, &a[3]));
+                let v = decode_value(&ty, &a[3]);
+                let old = dm.get_prop(id, name).cloned();
+                if old.as_ref() != Some(&v) {
+                    props.push((id, name.to_string(), old, v.clone()));
+                }
+                let _ = dm.set_prop(id, name, v);
             }
             "m" if a.len() >= 3 => {
                 let id = a[1].as_u64().unwrap_or(0) as InstId;
@@ -132,5 +143,5 @@ pub fn apply_ops(dm: &mut DataModel, ops: &[J]) -> Vec<(InstId, Option<InstId>, 
             _ => {}
         }
     }
-    moved
+    Applied { moved, props }
 }

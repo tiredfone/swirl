@@ -90,7 +90,9 @@ impl LuaVm {
             }
             Some("rep") => {
                 let ops = m["o"].as_array().cloned().unwrap_or_default();
-                let moved = swirl_core::wire::apply_ops(&mut dm, &ops);
+                let applied = swirl_core::wire::apply_ops(&mut dm, &ops);
+                let moved = applied.moved;
+                let prop_changes = applied.props;
                 let mouse = self.core.borrow().mouse;
                 if let (Some(ch), Some(mouse)) = (self.chars.as_mut(), mouse) {
                     for (id, old, _) in &moved {
@@ -131,6 +133,33 @@ impl LuaVm {
                 if let Some(h) = self.host.as_mut() {
                     for (id, old, new) in moved {
                         h.notify_parent(id, old, new);
+                    }
+                    let dmr = self.dm.clone();
+                    let dm = dmr.borrow();
+                    for (id, name, old, new) in prop_changes {
+                        let class = dm.get(id).map(|i| i.class.clone()).unwrap_or_default();
+                        if swirl_core::classes::is_a(&class, "ValueBase") && name == "Value" {
+                            h.fire(id, "Changed", vec![val_to_wire_simple(&new)]);
+                        } else {
+                            h.fire(id, "Changed", vec![swirl_lua::host::Wire::S(name.clone())]);
+                        }
+                        let key = intern(&format!("P:{}", name));
+                        h.fire(id, key, vec![]);
+                        if class == "Player" && name == "Character" {
+                            if let (Val::Ref(Some(o)), true) = (old.clone().unwrap_or(Val::Ref(None)), old != Some(new.clone())) {
+                                if dm.get(o).map(|i| !i.destroyed).unwrap_or(false) {
+                                    h.fire(id, "CharacterRemoving", vec![swirl_lua::host::Wire::I(o)]);
+                                }
+                            }
+                            if let Val::Ref(Some(n)) = new {
+                                h.fire(id, "CharacterAdded", vec![swirl_lua::host::Wire::I(n)]);
+                            }
+                        }
+                        if class == "Humanoid" && name == "Health" {
+                            if let Val::Num(hp) = new {
+                                h.fire(id, "HealthChanged", vec![swirl_lua::host::Wire::N(hp)]);
+                            }
+                        }
                     }
                 }
                 true
@@ -295,6 +324,7 @@ impl LuaVm {
                 let mut dm = self.dm.borrow_mut();
                 g.layout(&mut dm, vw, vh, k, [l, t, r, b], &mut fired);
             }
+            g.apply_pending_focus();
             count = g.node_count();
         }
         if let Some(h) = self.host.as_mut() {
@@ -304,6 +334,27 @@ impl LuaVm {
         }
         self.core.borrow_mut().out.extend(out);
         count
+    }
+
+    pub fn set_gui_message(&mut self, text: Option<String>) {
+        if let Some(g) = self.gui_dom.as_mut() {
+            g.forced_message = text;
+        }
+        self.gui_dirty = true;
+    }
+
+    pub fn is_typing(&self) -> bool {
+        self.gui_dom.as_ref().map(|g| g.focused.get().is_some()).unwrap_or(false)
+    }
+
+    pub fn pointer_over_gui(&self, x: f64, y: f64) -> bool {
+        self.gui_dom.as_ref().map(|g| g.pointer_over(x, y)).unwrap_or(false)
+    }
+
+    pub fn focus_text_box(&mut self, inst: u32, on: bool) {
+        if let Some(g) = self.gui_dom.as_mut() {
+            g.focus_box(inst, on);
+        }
     }
 
     pub fn set_screen(&mut self, w: f64, h: f64) {
@@ -532,6 +583,14 @@ impl LuaVm {
             Some(g) => g.node_ids().into_iter().map(|i| d.full_name(i)).collect(),
             None => vec![],
         };
+        serde_json::to_string(&v).unwrap_or_default()
+    }
+
+    pub fn children_of(&self, path: &str) -> String {
+        let d = self.dm.borrow();
+        let mut all = vec![];
+        d.descendants(d.root, &mut all);
+        let v: Vec<Vec<String>> = all.into_iter().filter(|i| d.full_name(*i) == path).map(|i| d.get(i).map(|x| x.children.iter().map(|c| format!("{}:{}", d.name(*c), d.get(*c).map(|k| k.class.clone()).unwrap_or_default())).collect()).unwrap_or_default()).collect();
         serde_json::to_string(&v).unwrap_or_default()
     }
 
@@ -774,4 +833,40 @@ fn boot(dm: &mut DataModel, screen: [f64; 2]) -> Option<u32> {
 
 fn flag_true(dm: &DataModel, id: u32, k: &str) -> bool {
     matches!(dm.get_prop(id, k), Some(Val::Bool(true)))
+}
+
+fn val_to_wire_simple(v: &Val) -> swirl_lua::host::Wire {
+    use swirl_lua::host::Wire;
+    match v {
+        Val::Nil => Wire::Nil,
+        Val::Bool(b) => Wire::B(*b),
+        Val::Num(n) => Wire::N(*n),
+        Val::Str(s) => Wire::S(s.clone()),
+        Val::Ref(Some(i)) => Wire::I(*i),
+        Val::Ref(None) => Wire::Nil,
+        Val::Arr(a) if a.len() == 3 => Wire::V3([a[0], a[1], a[2]]),
+        Val::Arr(a) if a.len() == 2 => Wire::V2([a[0], a[1]]),
+        Val::Arr(a) if a.len() == 12 => {
+            let mut c = [0.0; 12];
+            c.copy_from_slice(a);
+            Wire::Cf(c)
+        }
+        Val::Arr(a) if a.len() == 4 => Wire::Ud2([a[0], a[1], a[2], a[3]]),
+        Val::Arr(_) => Wire::Nil,
+    }
+}
+
+fn intern(s: &str) -> &'static str {
+    thread_local! {
+        static NAMES: RefCell<std::collections::HashMap<String, &'static str>> = RefCell::new(std::collections::HashMap::new());
+    }
+    NAMES.with(|n| {
+        let mut n = n.borrow_mut();
+        if let Some(v) = n.get(s) {
+            return *v;
+        }
+        let leaked: &'static str = Box::leak(s.to_string().into_boxed_str());
+        n.insert(s.to_string(), leaked);
+        leaked
+    })
 }
