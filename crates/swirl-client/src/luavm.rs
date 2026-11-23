@@ -11,6 +11,7 @@ pub struct LuaVm {
     run: bool,
     core: Rc<RefCell<swirl_lua::client_api::CoreState>>,
     anim: Rc<RefCell<swirl_lua::client_api::AnimState>>,
+    chars: Option<crate::clientchars::ClientChars>,
     t: f64,
 }
 
@@ -23,7 +24,7 @@ impl LuaVm {
         let mut dm = DataModel::new("client");
         dm.local_alloc = true;
         let dm = Rc::new(RefCell::new(dm));
-        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), t: 0.0 })
+        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), chars: None, t: 0.0 })
     }
 
     pub fn apply(&mut self, text: &str) -> bool {
@@ -49,6 +50,7 @@ impl LuaVm {
                     self.host = Host::new(self.dm.clone()).ok();
                     if let Some(h) = self.host.as_mut() {
                         h.set_handler(Box::new(swirl_lua::client_api::ClientApi { core: self.core.clone(), anim: self.anim.clone() }));
+                        self.chars = Some(crate::clientchars::ClientChars::new(&mut self.dm.borrow_mut()));
                         h.scan_scripts();
                     }
                 }
@@ -57,6 +59,21 @@ impl LuaVm {
             Some("rep") => {
                 let ops = m["o"].as_array().cloned().unwrap_or_default();
                 let moved = swirl_core::wire::apply_ops(&mut dm, &ops);
+                if let Some(ch) = self.chars.as_mut() {
+                    ch.track(&dm);
+                    for a in m["after"].as_array().cloned().unwrap_or_default() {
+                        let c: Vec<f64> = a["c"].as_array().map(|c| c.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect()).unwrap_or_default();
+                        match a["t"].as_str() {
+                            Some("own") if c.len() >= 12 => {
+                                let mut cf = [0.0; 12];
+                                cf.copy_from_slice(&c[..12]);
+                                ch.take_own(&dm, a["id"].as_u64().unwrap_or(0) as u32, cf);
+                            }
+                            Some("tp") => ch.teleport(&dm, &c),
+                            _ => {}
+                        }
+                    }
+                }
                 drop(dm);
                 if let Some(h) = self.host.as_mut() {
                     for (id, old, new) in moved {
@@ -193,18 +210,42 @@ impl LuaVm {
     }
 
     pub fn tick(&mut self, dt: f64) {
+        self.update(dt, 0.0, 0.0, false);
+    }
+
+    pub fn phys_parts(&self) -> String {
+        let d = self.dm.borrow();
+        match self.chars.as_ref() {
+            Some(c) => serde_json::to_string(&c.ph.part_ids().into_iter().map(|i| format!("{}:{}", d.name(i), d.full_name(i))).collect::<Vec<_>>()).unwrap_or_default(),
+            None => "[]".into(),
+        }
+    }
+
+    pub fn own_state(&self) -> String {
+        match self.chars.as_ref().and_then(|c| c.own.as_ref()) {
+            Some(o) => serde_json::json!({"model": o.model, "cf": o.cf, "state": o.state, "vel": o.vel}).to_string(),
+            None => "null".into(),
+        }
+    }
+
+    pub fn update(&mut self, dt: f64, mx: f64, mz: f64, jump: bool) {
         self.t += dt;
         swirl_lua::clock::set_now(self.t);
         self.drain_core();
-        if self.host.is_some() {
-            let mut dm = self.dm.borrow_mut();
-            if let Some(ws) = dm.services.get("Workspace").copied() {
-                let kids: Vec<u32> = dm.get(ws).map(|i| i.children.clone()).unwrap_or_default();
-                for m in kids {
-                    if dm.find_child_of_class(m, "Humanoid").is_some() {
-                        swirl_physics::animator::step_motors(&mut dm, m, dt);
-                    }
-                }
+        if let Some(h) = self.host.as_mut() {
+            h.tick(self.t);
+        }
+        let fired = match self.chars.as_mut() {
+            Some(ch) => {
+                ch.input = ([mx, 0.0, mz], jump);
+                let mut dm = self.dm.borrow_mut();
+                ch.update(&mut dm, dt)
+            }
+            None => vec![],
+        };
+        if let Some(h) = self.host.as_mut() {
+            for (inst, name, args) in fired {
+                h.fire(inst, name, args);
             }
         }
         let events = {
@@ -218,8 +259,21 @@ impl LuaVm {
                 h.fire(e.inst, e.name, args);
             }
         }
-        if let Some(h) = self.host.as_mut() {
-            h.tick(self.t);
+        if self.host.is_some() {
+            let mut dm = self.dm.borrow_mut();
+            if let Some(ws) = dm.services.get("Workspace").copied() {
+                let kids: Vec<u32> = dm.get(ws).map(|i| i.children.clone()).unwrap_or_default();
+                for m in kids {
+                    if dm.find_child_of_class(m, "Humanoid").is_some() {
+                        swirl_physics::animator::step_motors(&mut dm, m, dt);
+                    }
+                }
+            }
+        }
+        if let Some(ch) = self.chars.as_mut() {
+            let mut dm = self.dm.borrow_mut();
+            ch.pose(&mut dm);
+            ch.step_physics(&mut dm);
         }
     }
 

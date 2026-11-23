@@ -256,6 +256,10 @@ impl Physics {
         groups::collide(&self.group_tbl, a, b)
     }
 
+    pub fn part_ids(&self) -> Vec<InstId> {
+        self.parts.keys().copied().collect()
+    }
+
     pub fn stir(&mut self) {
         self.stir = true;
     }

@@ -663,6 +663,21 @@ export async function startLua(opts) {
   };
 
   const cmp = (window.solarAnimCmp = { angFrames: 0, angN: 0, angSum: 0, angMax: 0, frames: 0, both: 0, onlyJs: 0, onlyRs: 0, sum: 0, max: 0 });
+  const pos = (window.solarPosCmp = { n: 0, sum: 0, max: 0, stateMismatch: 0, last: null });
+  const comparePos = () => {
+    const o = world.own;
+    if (!o || !o.rec) return;
+    const r = JSON.parse(window.solarVm.own_state());
+    if (!r) return;
+    const a = o.rec.cf;
+    const d = Math.hypot(a[0] - r.cf[0], a[1] - r.cf[1], a[2] - r.cf[2]);
+    if (pos.n < 14 || pos.n % 20 === 0) (pos.trace = pos.trace || []).push([pos.n, +a[1].toFixed(3), +r.cf[1].toFixed(3), r.state, o.rec.state]);
+    pos.n++;
+    pos.sum += d;
+    pos.max = Math.max(pos.max, d);
+    if (o.rec.state !== r.state) pos.stateMismatch++;
+    pos.last = { js: [a[0], a[1], a[2]], rs: [r.cf[0], r.cf[1], r.cf[2]], jsState: o.rec.state, rsState: r.state };
+  };
   const compareAnim = () => {
     const o = world.own;
     if (!o || !o.rec || !o.rec.model) return;
@@ -677,6 +692,7 @@ export async function startLua(opts) {
     cmp.frames++;
     const ra = JSON.parse(window.solarVm.motor_angles());
     cmp.angFrames++;
+    let frameMax = 0;
     for (const j of o.rec.model.findChild('Torso') ? o.rec.model.findChild('Torso').children : []) {
       if (!j.isA('Motor')) continue;
       const b = ra[mid + ':' + j.props.get('Name')];
@@ -685,6 +701,7 @@ export async function startLua(opts) {
       cmp.angN++;
       cmp.angSum += dd;
       cmp.angMax = Math.max(cmp.angMax, dd);
+      frameMax = Math.max(frameMax, dd);
     }
     for (const [n, a] of js) {
       const b = rs[mid + ':' + n];
@@ -698,13 +715,13 @@ export async function startLua(opts) {
       cmp.sum += m;
       cmp.max = Math.max(cmp.max, m);
     }
+    (cmp.perFrame = cmp.perFrame || []).push(+frameMax.toFixed(3));
     for (const k of Object.keys(rs)) if (k.startsWith(mid + ':') && !js.has(k.slice(String(mid).length + 1))) cmp.onlyRs++;
   };
 
   const frame = (now) => {
     if (window.solarVm && /[?&]swirlhost=1/.test(location.search)) {
       try {
-        window.solarVm.tick(1 / 60);
         compareAnim();
         for (const id of JSON.parse(window.solarVm.take_wanted_anims())) {
           fetch('/asset/?id=' + id, { credentials: 'same-origin' }).then((r) => (r.ok ? r.arrayBuffer() : null)).then((b) => {
@@ -729,6 +746,7 @@ export async function startLua(opts) {
       } catch (e) {
         continue;
       }
+      if (/[?&]swirltap=1/.test(location.search)) (window.solarTapLog = window.solarTapLog || []).push(raw);
       if (m.t === 'init' || m.t === 'rep') {
         try {
           if (!window.solarVm || m.t === 'init') {
@@ -775,6 +793,14 @@ export async function startLua(opts) {
       state.renderer.camera.updateProjectionMatrix();
       world.camera.props.set('ViewportSize', [w, h]);
       world.update(dt, input);
+      if (window.solarVm && /[?&]swirlhost=1/.test(location.search)) {
+        try {
+          window.solarVm.update(dt, input.move[0], input.move[2], !!input.jump);
+          comparePos();
+        } catch (e) {
+          errors.push('vmupdate: ' + e);
+        }
+      }
       camera.update(dt);
       if (camera.aimCentered()) {
         const cr = canvas.getBoundingClientRect();

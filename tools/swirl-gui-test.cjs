@@ -59,6 +59,19 @@ const srv = http.createServer((req, res) => {
   });
   console.log(JSON.stringify(await info(), null, 1));
   await pg.screenshot({ path: out + '-1.png' });
+  if (process.env.HOLD) {
+    await pg.focus('#swirl-canvas');
+    for (const step of process.env.HOLD.split(',')) {
+      const [k, ms] = step.split(':');
+      if (k === 'wait') await wait(+ms);
+      else {
+        await pg.keyboard.down(k);
+        await wait(+ms);
+        await pg.keyboard.up(k);
+      }
+    }
+  }
+  if (process.env.TAPOUT) fs.writeFileSync(process.env.TAPOUT, JSON.stringify(await pg.evaluate(() => window.solarTapLog || [])));
   if (process.env.EVAL) console.log(JSON.stringify(await pg.evaluate(process.env.EVAL), null, 1));
   if (process.env.CHAT) {
     await pg.focus('#swirl-canvas');

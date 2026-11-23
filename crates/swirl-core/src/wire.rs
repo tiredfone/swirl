@@ -1,5 +1,5 @@
 use crate::classes;
-use crate::instance::{DataModel, InstId, Val};
+use crate::instance::{Change, DataModel, InstId, Val};
 use serde_json::Value as J;
 
 pub fn decode_value(ty: &str, v: &J) -> Val {
@@ -99,6 +99,7 @@ pub fn apply_ops(dm: &mut DataModel, ops: &[J]) -> Vec<(InstId, Option<InstId>, 
                 let np = a[2].as_u64().map(|v| v as InstId);
                 let old = dm.get(id).and_then(|i| i.parent);
                 dm.link_quiet(id, np);
+                dm.journal.push(Change::Parent { id, old, new: np });
                 moved.push((id, old, np));
             }
             "n" if a.len() >= 2 => {
@@ -112,13 +113,20 @@ pub fn apply_ops(dm: &mut DataModel, ops: &[J]) -> Vec<(InstId, Option<InstId>, 
                     for (id, parent) in &pending {
                         moved.push((*id, None, *parent));
                     }
+                    let ids: Vec<(InstId, Option<InstId>)> = pending.clone();
                     link(dm, pending);
+                    for (id, parent) in ids {
+                        if dm.get(id).and_then(|i| i.parent) == parent && parent.is_some() {
+                            dm.journal.push(Change::Parent { id, old: None, new: parent });
+                        }
+                    }
                 }
             }
             "d" if a.len() >= 2 => {
                 let id = a[1].as_u64().unwrap_or(0) as InstId;
                 let old = dm.get(id).and_then(|i| i.parent);
                 dm.destroy_quiet(id);
+                dm.journal.push(Change::Destroy { id, old });
                 moved.push((id, old, None));
             }
             _ => {}
