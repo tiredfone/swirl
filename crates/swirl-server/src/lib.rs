@@ -10,6 +10,7 @@ pub mod game;
 pub mod instance;
 pub mod npc;
 pub mod r15;
+pub mod saveinst;
 pub mod seat;
 pub mod redeem;
 pub mod terrain_api;

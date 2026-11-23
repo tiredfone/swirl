@@ -503,11 +503,157 @@ async fn restart_self(sup: &Rc<RefCell<Sup>>, env: &Rc<Env>) {
     std::process::exit(0);
 }
 
+const MAX_SOCKETS_PER_IP: u32 = 40;
+const MAX_PENDING_PER_IP: u32 = 8;
+const MAX_CONNECTS_PER_MIN: usize = 90;
+const MAX_BAD_TICKETS: u32 = 20;
+const MAX_REDEEMS_INFLIGHT: u32 = 24;
+
+struct IpEntry {
+    open: u32,
+    pending: u32,
+    connects: Vec<Instant>,
+    bad: u32,
+    bad_at: Option<Instant>,
+}
+
+thread_local! {
+    static IPS: RefCell<HashMap<String, IpEntry>> = RefCell::new(HashMap::new());
+    static REDEEMS: std::cell::Cell<u32> = std::cell::Cell::new(0);
+}
+
+fn private_ip(s: &str) -> bool {
+    let t = s.to_ascii_lowercase();
+    t.starts_with("127.") || t.starts_with("10.") || t.starts_with("192.168.") || t == "::1" || t.starts_with("fc") || t.starts_with("fd")
+        || (t.starts_with("172.") && t.split('.').nth(1).and_then(|x| x.parse::<u32>().ok()).map(|n| (16..=31).contains(&n)).unwrap_or(false))
+}
+
+fn client_ip(peer: &str, xff: &str, real: &str) -> String {
+    let peer = peer.trim_start_matches("::ffff:").to_string();
+    if private_ip(&peer) {
+        let src = if xff.is_empty() { real } else { xff };
+        let hops: Vec<String> = src
+            .split(',')
+            .map(|h| h.trim().trim_start_matches("::ffff:").to_string())
+            .filter(|h| h.len() >= 3 && h.len() <= 45 && h.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.'))
+            .collect();
+        for h in hops.iter().rev() {
+            if !private_ip(h) {
+                return h.clone();
+            }
+        }
+        if let Some(h) = hops.first() {
+            return h.clone();
+        }
+    }
+    if peer.is_empty() { "unknown".into() } else { peer }
+}
+
+fn ip_gate(ip: &str) -> bool {
+    IPS.with(|m| {
+        let mut m = m.borrow_mut();
+        let now = Instant::now();
+        m.retain(|_, e| {
+            e.connects.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
+            if e.bad_at.map(|t| now.duration_since(t) > Duration::from_secs(60)).unwrap_or(true) {
+                e.bad = 0;
+            }
+            e.open > 0 || e.pending > 0 || !e.connects.is_empty() || e.bad > 0
+        });
+        let e = m.entry(ip.to_string()).or_insert(IpEntry { open: 0, pending: 0, connects: vec![], bad: 0, bad_at: None });
+        if e.open >= MAX_SOCKETS_PER_IP || e.pending >= MAX_PENDING_PER_IP || e.connects.len() >= MAX_CONNECTS_PER_MIN || e.bad >= MAX_BAD_TICKETS {
+            log(&format!("refused connection from {}: open {}, pending {}, recent {}, bad tickets {}", ip, e.open, e.pending, e.connects.len(), e.bad));
+            return false;
+        }
+        e.connects.push(now);
+        true
+    })
+}
+
+struct IpGuard {
+    ip: String,
+    pending: std::cell::Cell<bool>,
+}
+
+impl IpGuard {
+    fn new(ip: String) -> IpGuard {
+        IPS.with(|m| {
+            if let Some(e) = m.borrow_mut().get_mut(&ip) {
+                e.open += 1;
+                e.pending += 1;
+            }
+        });
+        IpGuard { ip, pending: std::cell::Cell::new(true) }
+    }
+
+    fn release(&self) {
+        if self.pending.replace(false) {
+            IPS.with(|m| {
+                if let Some(e) = m.borrow_mut().get_mut(&self.ip) {
+                    e.pending = e.pending.saturating_sub(1);
+                }
+            });
+        }
+    }
+
+    fn bad(&self) {
+        IPS.with(|m| {
+            if let Some(e) = m.borrow_mut().get_mut(&self.ip) {
+                e.bad += 1;
+                e.bad_at = Some(Instant::now());
+            }
+        });
+    }
+}
+
+impl Drop for IpGuard {
+    fn drop(&mut self) {
+        self.release();
+        IPS.with(|m| {
+            if let Some(e) = m.borrow_mut().get_mut(&self.ip) {
+                e.open = e.open.saturating_sub(1);
+            }
+        });
+    }
+}
+
+struct RedeemSlot;
+
+impl RedeemSlot {
+    fn take() -> Option<RedeemSlot> {
+        REDEEMS.with(|c| {
+            if c.get() >= MAX_REDEEMS_INFLIGHT {
+                None
+            } else {
+                c.set(c.get() + 1);
+                Some(RedeemSlot)
+            }
+        })
+    }
+}
+
+impl Drop for RedeemSlot {
+    fn drop(&mut self) {
+        REDEEMS.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
 async fn ws_connection(stream: TcpStream, cid: u32, sup: Rc<RefCell<Sup>>, env: Rc<Env>) {
     let uri = Rc::new(RefCell::new(String::new()));
     let u2 = uri.clone();
+    let peer = stream.peer_addr().map(|a| a.ip().to_string()).unwrap_or_default();
+    let ip = Rc::new(RefCell::new(String::new()));
+    let ip2 = ip.clone();
     let ws = match tokio_tungstenite::accept_hdr_async(stream, move |req: &tokio_tungstenite::tungstenite::handshake::server::Request, resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
         *u2.borrow_mut() = req.uri().to_string();
+        let h = |n: &str| req.headers().get(n).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+        let cip = client_ip(&peer, &h("x-forwarded-for"), &h("x-real-ip"));
+        if !ip_gate(&cip) {
+            let mut r = tokio_tungstenite::tungstenite::handshake::server::ErrorResponse::new(None);
+            *r.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::TOO_MANY_REQUESTS;
+            return Err(r);
+        }
+        *ip2.borrow_mut() = cip;
         Ok(resp)
     })
     .await
@@ -515,18 +661,37 @@ async fn ws_connection(stream: TcpStream, cid: u32, sup: Rc<RefCell<Sup>>, env: 
         Ok(w) => w,
         Err(_) => return,
     };
+    let guard = IpGuard::new(ip.borrow().clone());
     let (mut tx, mut rx) = ws.split();
     let ticket = uri.borrow().split("ticket=").nth(1).map(|s| s.split('&').next().unwrap_or("").to_string()).unwrap_or_default();
     let kick = |reason: String| serde_json::json!({"t": "kick", "m": reason}).to_string();
     let info: J = match &env.redeemer {
-        Some(r) => match r.redeem(&ticket).await {
+        Some(r) => {
+            let valid = ticket.len() == 64 && ticket.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'));
+            if !valid {
+                guard.bad();
+                let _ = tx.close().await;
+                return;
+            }
+            let slot = RedeemSlot::take();
+            if slot.is_none() {
+                let _ = tx.send(Message::Text(kick("The server is busy. Try again in a moment.".into()))).await;
+                let _ = tx.close().await;
+                return;
+            }
+            let res = r.redeem(&ticket).await;
+            drop(slot);
+            guard.release();
+            match res {
             Some(j) => j,
             None => {
+                guard.bad();
                 let _ = tx.send(Message::Text(kick("Your join ticket is invalid or has expired. Reload the page to try again.".into()))).await;
                 let _ = tx.close().await;
                 return;
             }
-        },
+            }
+        }
         None => json!({"ok": true, "mode": "play", "placeId": env.default_place.unwrap_or(0), "userId": 1000 + cid as i64, "username": format!("Player{}", cid), "clientVersion": env.default_era, "maxPlayers": 20, "allowGear": true}),
     };
     if info["mode"].as_str().map(|m| m != "play").unwrap_or(false) {
@@ -599,6 +764,7 @@ async fn ws_connection(stream: TcpStream, cid: u32, sup: Rc<RefCell<Sup>>, env: 
         p.members.insert(cid, Member { id: user.id, name: user.name.clone(), joined: now, last_active: now, acts: 0, kinds: HashSet::new(), cells: HashSet::new(), px: None });
         let t = p.handle.tx.clone();
         let _ = t.send(Cmd::Join { cid, user: user.clone(), look, out: otx.clone() });
+        guard.release();
         s.presence_dirty = true;
         t
     };

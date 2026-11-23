@@ -52,6 +52,8 @@ pub struct ApiState {
     pub info_cache: HashMap<String, (std::time::Instant, Option<J>)>,
     pub kicks: Vec<(InstId, String)>,
     pub hum_state: HashMap<InstId, u8>,
+    pub mice: HashMap<InstId, InstId>,
+    pub invoke_out: HashMap<u32, (InstId, f64)>,
 }
 
 #[derive(Default, Clone)]
@@ -71,6 +73,9 @@ pub enum SocialKind {
     Pending(InstId),
     Grant,
     Report,
+    Friend(i64),
+    FriendsOnline,
+    Fire,
 }
 
 pub struct SocialReq {
@@ -120,6 +125,8 @@ pub fn new_state(assets_dir: &str, data_dir: &str, place_id: u64, era: i32) -> S
         info_cache: HashMap::new(),
         kicks: vec![],
         hum_state: HashMap::new(),
+        mice: HashMap::new(),
+        invoke_out: HashMap::new(),
     }))
 }
 
@@ -210,6 +217,12 @@ impl ApiState {
                 let msg = r.as_ref().and_then(|j| if awarded { j["message"].as_str().map(|m| m.to_string()) } else { None });
                 (Ok(vec![Wire::B(awarded)]), msg)
             }
+            SocialKind::Friend(other) => (Ok(vec![Wire::B(r.map(|j| j["statuses"][other.to_string()].as_i64() == Some(2)).unwrap_or(false))]), None),
+            SocialKind::FriendsOnline => {
+                let list = r.and_then(|j| j["friends"].as_array().cloned()).unwrap_or_default();
+                (Ok(vec![Wire::List(list.iter().map(json_wire).collect())]), None)
+            }
+            SocialKind::Fire => (Ok(vec![]), None),
             SocialKind::Mkt(..) | SocialKind::Pending(_) | SocialKind::Grant | SocialKind::Report => (Ok(vec![]), None),
             SocialKind::Info => match r.and_then(|j| if j["info"].is_null() { None } else { Some(j["info"].clone()) }) {
                 Some(info) => (Ok(vec![json_wire(&info)]), None),
@@ -335,6 +348,12 @@ impl ApiState {
     }
 
     pub fn step_tracks(&mut self, dt: f64, dm: &mut DataModel) {
+        let now = self.now_ms;
+        let lapsed: Vec<u32> = self.invoke_out.iter().filter(|(_, (_, at))| *at <= now).map(|(k, _)| *k).collect();
+        for k in lapsed {
+            self.invoke_out.remove(&k);
+            self.completions.push((k, Ok(vec![Wire::B(false), Wire::S("InvokeClient timed out".into())])));
+        }
         let ids: Vec<InstId> = self.tracks.keys().copied().collect();
         for id in ids {
             let gone = dm.get(id).map(|i| i.destroyed).unwrap_or(true);
@@ -978,7 +997,21 @@ impl ApiHandler for Api {
                     "LoadString" => return Some(Res::Ok(vec![Wire::S(bag.s.get(&k).cloned().unwrap_or_default())])),
                     "LoadBoolean" => return Some(Res::Ok(vec![Wire::B(bag.b.get(&k).copied().unwrap_or(false))])),
                     "SaveInstance" => {
-                        return Some(Res::Ok(vec![]));
+                        let xml = match args.get(1) {
+                            Some(Wire::I(i)) => crate::saveinst::write_model(d, *i),
+                            _ => String::new(),
+                        };
+                        let bag = st.bag(uid);
+                        if xml.is_empty() {
+                            bag.i.remove(&k);
+                        } else {
+                            bag.i.insert(k, xml);
+                        }
+                    }
+                    "LoadInstance" => {
+                        let xml = bag.i.get(&k).cloned();
+                        let r = xml.and_then(|x| crate::saveinst::load_model(d, &x));
+                        return Some(Res::Ok(vec![r.map(Wire::I).unwrap_or(Wire::Nil)]));
                     }
                     _ => return Some(Res::Ok(vec![Wire::Nil])),
                 }

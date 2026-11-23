@@ -540,6 +540,10 @@ fn virtual_get(d: &DataModel, id: InstId, class: &str, key: &str) -> Option<Wire
             _ => None,
         };
     }
+    if class == "Players" && (key == "NumPlayers" || key == "numPlayers") {
+        let n = d.get(id).map(|p| p.children.iter().filter(|c| d.get(**c).map(|x| x.class == "Player" && !x.destroyed).unwrap_or(false)).count()).unwrap_or(0);
+        return Some(Wire::N(n as f64));
+    }
     if class == "Player" && key == "Team" {
         if matches!(d.get_prop(id, "Neutral"), Some(Val::Bool(true))) {
             return Some(Wire::Nil);

@@ -409,6 +409,13 @@ impl Game {
     }
 
     fn mouse_of(&mut self, player: InstId) -> InstId {
+        let shared = self.api.borrow().mice.get(&player).copied();
+        if let Some(m) = shared {
+            if self.dm.borrow().get(m).map(|i| !i.destroyed).unwrap_or(false) {
+                self.mice.insert(player, m);
+                return m;
+            }
+        }
         if let Some(m) = self.mice.get(&player) {
             if self.dm.borrow().get(*m).map(|i| !i.destroyed).unwrap_or(false) {
                 return *m;
@@ -421,6 +428,7 @@ impl Game {
         dm.set_prop_quiet(m, "ViewSizeX", Val::Num(1024.0));
         dm.set_prop_quiet(m, "ViewSizeY", Val::Num(768.0));
         self.mice.insert(player, m);
+        self.api.borrow_mut().mice.insert(player, m);
         m
     }
 
@@ -879,6 +887,18 @@ impl Game {
                     }
                 }
             }
+            "rfr" if self.era == 2018 => {
+                let k = v["k"].as_u64().unwrap_or(0) as u32;
+                let mut a = self.api.borrow_mut();
+                if a.invoke_out.get(&k).map(|(p, _)| *p) == Some(player) {
+                    a.invoke_out.remove(&k);
+                    let args = match v["a"].as_array() {
+                        Some(x) if x.len() <= 20000 => wire_from_json(x),
+                        _ => vec![],
+                    };
+                    a.completions.push((k, Ok(args)));
+                }
+            }
             "re" | "rf" if self.era == 2018 => {
                 let id = match tool {
                     Some(i) => i,
@@ -949,7 +969,7 @@ impl Game {
             }
             "chat" => {
                 let raw = v["m"].as_str().unwrap_or("");
-                let msg: String = raw.chars().filter(|c| !c.is_control()).take(200).collect::<String>().trim().to_string();
+                let msg: String = raw.chars().map(|c| if (c as u32) < 0x20 || c as u32 == 0x7f { ' ' } else { c }).take(200).collect::<String>().trim().to_string();
                 if msg.is_empty() || self.t - self.last_chat.get(&player).copied().unwrap_or(-10.0) < 0.6 {
                     return;
                 }
