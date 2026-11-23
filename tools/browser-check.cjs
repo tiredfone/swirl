@@ -43,7 +43,7 @@ const pass = acct.password || acct.Password;
     config: !!window.solarClientConfig,
     luaFailed: window.solarLuaFailed || null,
   }));
-  await pg.waitForFunction('(window.solarLua && window.solarLua.ready()) || (window.solarApp && window.solarApp.vm && document.querySelector("[data-ipath]"))', { timeout: 40000 }).catch(() => {});
+  await pg.waitForFunction('(window.solarLua && window.solarLua.ready()) || (window.solarApp && window.solarApp.vm && document.querySelector("[data-ipath$=PlayerListScreen]") && document.querySelector("[data-ipath$=CurrentLoadout]"))', { timeout: 40000 }).catch(() => {});
   await new Promise((r) => setTimeout(r, 4000));
   const appMode = await pg.evaluate(() => !!window.solarApp);
   const lua = appMode ? await pg.evaluate(() => {
