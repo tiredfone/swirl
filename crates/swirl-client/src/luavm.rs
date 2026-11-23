@@ -5,6 +5,30 @@ use swirl_lua::Host;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
+struct WebMeasure {
+    ctx: Option<web_sys::OffscreenCanvasRenderingContext2d>,
+}
+
+impl WebMeasure {
+    fn new() -> WebMeasure {
+        let ctx = web_sys::OffscreenCanvas::new(1, 1).ok().and_then(|c| c.get_context("2d").ok().flatten()).and_then(|c| c.dyn_into::<web_sys::OffscreenCanvasRenderingContext2d>().ok());
+        WebMeasure { ctx }
+    }
+}
+
+impl swirl_lua::gui_layout::Measure for WebMeasure {
+    fn width(&self, font: &str, text: &str) -> f64 {
+        match self.ctx.as_ref() {
+            Some(c) => {
+                c.set_font(font);
+                c.measure_text(text).map(|m| m.width()).unwrap_or(0.0)
+            }
+            None => text.chars().count() as f64 * 7.0,
+        }
+    }
+}
+
+#[wasm_bindgen]
 pub struct LuaVm {
     dm: Rc<RefCell<DataModel>>,
     host: Option<Host>,
@@ -55,7 +79,7 @@ impl LuaVm {
                     drop(dm);
                     self.host = Host::new(self.dm.clone()).ok();
                     if let Some(h) = self.host.as_mut() {
-                        h.set_handler(Box::new(swirl_lua::client_api::ClientApi { core: self.core.clone(), anim: self.anim.clone(), gui: self.gui.clone() }));
+                        h.set_handler(Box::new(swirl_lua::client_api::ClientApi { core: self.core.clone(), anim: self.anim.clone(), gui: self.gui.clone(), measure: Some(Rc::new(WebMeasure::new())) }));
                         self.chars = Some(crate::clientchars::ClientChars::new(&mut self.dm.borrow_mut()));
                         h.scan_scripts();
                     }
@@ -392,6 +416,49 @@ impl LuaVm {
         let mut all = vec![];
         d.descendants(root, &mut all);
         let v: Vec<String> = all.into_iter().filter(|i| d.get(*i).map(|x| x.class == class).unwrap_or(false)).map(|i| d.full_name(i)).collect();
+        serde_json::to_string(&v).unwrap_or_default()
+    }
+
+    pub fn dump_named(&self, name: &str) -> String {
+        let d = self.dm.borrow();
+        let mut all = vec![];
+        d.descendants(d.root, &mut all);
+        let v: Vec<serde_json::Value> = all
+            .into_iter()
+            .filter(|i| d.name(*i) == name)
+            .map(|i| {
+                let t = match d.get_prop(i, "Text") {
+                    Some(Val::Str(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                let pos = match d.get_prop(i, "Position") {
+                    Some(Val::Arr(a)) => serde_json::json!(a),
+                    _ => serde_json::Value::Null,
+                };
+                serde_json::json!({"n": d.full_name(i), "c": d.get(i).map(|x| x.class.clone()), "t": t, "p": pos, "id": i})
+            })
+            .collect();
+        serde_json::to_string(&v).unwrap_or_default()
+    }
+
+    pub fn text_bounds_all(&self) -> String {
+        let d = self.dm.borrow();
+        let m = WebMeasure::new();
+        let (w, h) = self.core.borrow().screen;
+        let mut all = vec![];
+        d.descendants(d.root, &mut all);
+        let v: Vec<serde_json::Value> = all
+            .into_iter()
+            .filter(|i| d.is_a(*i, "TextLabel") || d.is_a(*i, "TextButton") || d.is_a(*i, "TextBox"))
+            .map(|i| {
+                let b = swirl_lua::gui_layout::text_bounds(&d, i, &m, [w, h]);
+                let t = match d.get_prop(i, "Text") {
+                    Some(Val::Str(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                serde_json::json!([d.full_name(i), t, b[0], b[1]])
+            })
+            .collect();
         serde_json::to_string(&v).unwrap_or_default()
     }
 

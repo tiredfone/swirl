@@ -715,6 +715,16 @@ fn after_parent_change(st: &Rc<RefCell<State>>, dm: &DataModel, id: InstId, old:
     if let Some(o) = old {
         if Some(o) != new {
             push_event(st, o, "ChildRemoved", vec![Wire::I(id)]);
+            let mut cur = Some(o);
+            let mut guard = 0;
+            while let Some(c) = cur {
+                push_event(st, c, "DescendantRemoving", vec![Wire::I(id)]);
+                cur = dm.get(c).and_then(|i| i.parent);
+                guard += 1;
+                if guard > 10000 {
+                    break;
+                }
+            }
         }
     }
     if new.is_some() {
@@ -723,16 +733,29 @@ fn after_parent_change(st: &Rc<RefCell<State>>, dm: &DataModel, id: InstId, old:
     if let Some(n) = new {
         if Some(n) != old {
             push_event(st, n, "ChildAdded", vec![Wire::I(id)]);
-            let mut a = dm.get(n).and_then(|i| i.parent);
             let mut cur = Some(n);
+            let mut guard = 0;
             while let Some(c) = cur {
                 push_event(st, c, "DescendantAdded", vec![Wire::I(id)]);
                 cur = dm.get(c).and_then(|i| i.parent);
-                if cur == a {
-                    a = None;
+                guard += 1;
+                if guard > 10000 {
+                    break;
                 }
             }
         }
+    }
+    if old != new {
+        let mut all = vec![id];
+        dm.descendants(id, &mut all);
+        let parent = match new {
+            Some(p) => Wire::I(p),
+            None => Wire::Nil,
+        };
+        for x in all {
+            push_event(st, x, "AncestryChanged", vec![Wire::I(id), parent.clone()]);
+        }
+        push_event(st, id, "Changed", vec![Wire::S("Parent".into())]);
     }
 }
 
