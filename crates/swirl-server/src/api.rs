@@ -54,6 +54,7 @@ pub struct ApiState {
     pub hum_state: HashMap<InstId, u8>,
     pub mice: HashMap<InstId, InstId>,
     pub invoke_out: HashMap<u32, (InstId, f64)>,
+    pub explosions: HashSet<InstId>,
 }
 
 #[derive(Default, Clone)]
@@ -127,6 +128,7 @@ pub fn new_state(assets_dir: &str, data_dir: &str, place_id: u64, era: i32) -> S
         hum_state: HashMap::new(),
         mice: HashMap::new(),
         invoke_out: HashMap::new(),
+        explosions: HashSet::new(),
     }))
 }
 

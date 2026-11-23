@@ -776,7 +776,7 @@ impl Host {
                 lua.create_function(move |lua, (id, key): (u32, String)| {
                     let d = dm.borrow();
                     let inst = match d.get(id) {
-                        Some(i) if !i.destroyed => i,
+                        Some(i) => i,
                         _ => return Ok(Value::Table(tagged(lua, &[s(lua, "err")?, s(lua, "Instance no longer exists")?])?)),
                     };
                     if key == "Parent" {
@@ -863,8 +863,11 @@ impl Host {
                     let args = decode_args(&rest);
                     let w = args.first().cloned().unwrap_or(Wire::Nil);
                     let mut d = dm.borrow_mut();
-                    if d.get(id).map(|i| i.destroyed).unwrap_or(true) {
+                    if d.get(id).is_none() {
                         return Ok(Value::String(lua.create_string("Instance no longer exists")?));
+                    }
+                    if key == "Parent" && d.get(id).map(|i| i.destroyed).unwrap_or(false) {
+                        return Ok(Value::String(lua.create_string(&format!("The Parent property of {} is locked", d.name(id)))?));
                     }
                     if key == "Parent" {
                         let np = match w {
@@ -931,7 +934,7 @@ impl Host {
                     let args = decode_args(&rest);
                     let mut d = dm.borrow_mut();
                     let err = |m: &str| -> mlua::Result<Value> { Ok(Value::Table(tagged(lua, &[s(lua, "err")?, s(lua, m)?])?)) };
-                    if d.get(id).map(|i| i.destroyed).unwrap_or(true) {
+                    if d.get(id).is_none() {
                         return err("Instance no longer exists");
                     }
                     let ok = |w: Wire| -> mlua::Result<Value> {

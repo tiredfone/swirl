@@ -1250,6 +1250,7 @@ impl Game {
         }
         self.scan_npcs_journal();
         self.update_npcs(1.0 / 30.0);
+        self.handle_explosions();
         {
             let mut dm = self.dm.borrow_mut();
             self.physics.borrow_mut().step(&mut dm, 1.0 / 30.0);

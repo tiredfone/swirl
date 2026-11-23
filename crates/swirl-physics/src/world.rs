@@ -1214,6 +1214,58 @@ impl Physics {
                     body.add_force(Vector::new(f[0] as f32, f[1] as f32, f[2] as f32), true);
                     self.forced.insert(bh);
                 }
+                "BodyThrust" => {
+                    let f = g("Force");
+                    let loc = g("Location");
+                    let cf = Self::get_cf(dm, parent);
+                    let wf = cf::vector(&cf, f[0], f[1], f[2]);
+                    let wp = cf::point(&cf, loc[0], loc[1], loc[2]);
+                    body.apply_impulse_at_point(Vector::new((wf[0] * dt) as f32, (wf[1] * dt) as f32, (wf[2] * dt) as f32), Vector::new(wp[0] as f32, wp[1] as f32, wp[2] as f32), true);
+                }
+                "BodyGyro" => {
+                    let target = Self::get_cf(dm, m);
+                    let mt = g("MaxTorque");
+                    if mt[0] + mt[1] + mt[2] <= 0.0 {
+                        continue;
+                    }
+                    let p = Self::get_num(dm, m, "P", 3000.0).max(0.0);
+                    let d = Self::get_num(dm, m, "D", 500.0).max(0.0);
+                    let cur = Self::get_cf(dm, parent);
+                    let err = cf::mul(&cf::rot_only(&target), &cf::inv(&cf::rot_only(&cur)));
+                    let mut q = cf::to_quat(&err);
+                    if q[3] < 0.0 {
+                        q = [-q[0], -q[1], -q[2], -q[3]];
+                    }
+                    let ang = 2.0 * q[3].clamp(-1.0, 1.0).acos();
+                    let sn = (1e-9f64).max(1.0 - q[3] * q[3]).sqrt();
+                    let rot = if ang > 1e-6 { [q[0] / sn * ang, q[1] / sn * ang, q[2] / sn * ang] } else { [0.0; 3] };
+                    let w = body.angvel();
+                    let wv = [w.x as f64, w.y as f64, w.z as f64];
+                    let mut want = [0.0f64; 3];
+                    for i in 0..3 {
+                        want[i] = (wv[i] + dt * p * rot[i]) / (1.0 + dt * d + dt * dt * p) - wv[i];
+                    }
+                    let r = body.rotation();
+                    let bq = [r.x as f64, r.y as f64, r.z as f64, r.w as f64];
+                    let conj = [-bq[0], -bq[1], -bq[2], bq[3]];
+                    let qrot = |qq: [f64; 4], vv: [f64; 3]| -> [f64; 3] {
+                        let [x, y, z, ww] = qq;
+                        let tx = 2.0 * (y * vv[2] - z * vv[1]);
+                        let ty = 2.0 * (z * vv[0] - x * vv[2]);
+                        let tz = 2.0 * (x * vv[1] - y * vv[0]);
+                        [vv[0] + ww * tx + (y * tz - z * ty), vv[1] + ww * ty + (z * tx - x * tz), vv[2] + ww * tz + (x * ty - y * tx)]
+                    };
+                    let inertia = body.mass_properties().local_mprops.principal_inertia();
+                    let dl = qrot(conj, want);
+                    let tl = [dl[0] * inertia.x as f64, dl[1] * inertia.y as f64, dl[2] * inertia.z as f64];
+                    let tw = qrot(bq, tl);
+                    let mut tq = [0.0f64; 3];
+                    for i in 0..3 {
+                        tq[i] = (tw[i] / dt).min(mt[i]).max(-mt[i]);
+                    }
+                    body.add_torque(Vector::new(tq[0] as f32, tq[1] as f32, tq[2] as f32), true);
+                    self.forced.insert(bh);
+                }
                 "BodyAngularVelocity" => {
                     let tv = g("AngularVelocity");
                     let mt = g("MaxTorque");
@@ -1473,6 +1525,53 @@ impl Physics {
 
     pub fn awake_assemblies(&self) -> usize {
         self.assemblies.values().filter(|a| a.body.and_then(|b| self.bodies.get(b)).map(|b| !b.is_sleeping()).unwrap_or(false)).count()
+    }
+
+    pub fn explode_query(&self, dm: &DataModel, center: [f64; 3], radius: f64) -> Vec<(InstId, f64)> {
+        let lo = Vector::new((center[0] - radius) as f32, (center[1] - radius) as f32, (center[2] - radius) as f32);
+        let hi = Vector::new((center[0] + radius) as f32, (center[1] + radius) as f32, (center[2] + radius) as f32);
+        let aabb = rapier3d::parry::bounding_volume::Aabb::new(lo, hi);
+        let qp = self.broad.as_query_pipeline(&rapier3d::parry::query::DefaultQueryDispatcher, &self.bodies, &self.colliders, QueryFilter::default());
+        let mut hits: Vec<InstId> = vec![];
+        for (h, _c) in qp.intersect_aabb_conservative(aabb) {
+            if let Some(id) = self.by_handle.get(&h) {
+                hits.push(*id);
+            }
+        }
+        let mut touched = vec![];
+        for p in hits {
+            let c = Self::get_cf(dm, p);
+            let d = ((c[0] - center[0]).powi(2) + (c[1] - center[1]).powi(2) + (c[2] - center[2]).powi(2)).sqrt();
+            if d > radius {
+                continue;
+            }
+            touched.push((p, d));
+        }
+        touched
+    }
+
+    pub fn explode_apply(&mut self, dm: &mut DataModel, touched: &[(InstId, f64)], center: [f64; 3], radius: f64, pressure: f64) {
+        for (p, _) in touched {
+            if matches!(dm.get_prop(*p, "Anchored"), Some(Val::Bool(true))) {
+                continue;
+            }
+            self.break_joints(dm, *p);
+        }
+        self.flush(dm);
+        for (p, d) in touched {
+            let bh = match self.parts.get(p).and_then(|r| r.asm).and_then(|a| self.assemblies.get(&a)).and_then(|a| a.body) {
+                Some(b) => b,
+                None => continue,
+            };
+            let c = Self::get_cf(dm, *p);
+            let dir = [c[0] - center[0], c[1] - center[1], c[2] - center[2]];
+            let l = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+            let l = if l == 0.0 { 1.0 } else { l };
+            if let Some(body) = self.bodies.get_mut(bh) {
+                let k = (pressure / 500000.0) * 120.0 * (1.0 - d / (radius + 1.0)) * body.mass() as f64;
+                body.apply_impulse(Vector::new((dir[0] / l * k) as f32, (dir[1] / l * k + k * 0.3) as f32, (dir[2] / l * k) as f32), true);
+            }
+        }
     }
 
     pub fn raycast(&self, dm: &DataModel, origin: [f64; 3], dir: [f64; 3], ignore: &[InstId], filter: Option<&dyn Fn(InstId) -> bool>) -> RayHit {

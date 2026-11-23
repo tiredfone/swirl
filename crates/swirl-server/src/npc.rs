@@ -397,6 +397,70 @@ impl Game {
         }
     }
 
+    pub fn handle_explosions(&mut self) {
+        let (ws, list) = {
+            let dm = self.dm.borrow();
+            let ws = dm.services["Workspace"];
+            let list: Vec<InstId> = dm.get(ws).map(|w| w.children.iter().copied().filter(|c| dm.get(*c).map(|i| i.class == "Explosion" && !i.destroyed).unwrap_or(false)).collect()).unwrap_or_default();
+            (ws, list)
+        };
+        let _ = ws;
+        for e in list {
+            if !self.api.borrow_mut().explosions.insert(e) {
+                continue;
+            }
+            let (center, radius, pressure) = {
+                let dm = self.dm.borrow();
+                let c = match dm.get_prop(e, "Position") {
+                    Some(Val::Arr(a)) if a.len() >= 3 => [a[0], a[1], a[2]],
+                    _ => [0.0; 3],
+                };
+                let num = |n: &str, d: f64| match dm.get_prop(e, n) {
+                    Some(Val::Num(v)) => *v,
+                    _ => d,
+                };
+                (c, num("BlastRadius", 4.0), num("BlastPressure", 500000.0))
+            };
+            let touched = {
+                let dm = self.dm.borrow();
+                self.physics.borrow().explode_query(&dm, center, radius)
+            };
+            let mut killed: Vec<InstId> = vec![];
+            for (part, d) in &touched {
+                self.host.fire(e, "Hit", vec![Wire::I(*part), Wire::N(*d)]);
+                let model = {
+                    let dm = self.dm.borrow();
+                    let mut cur = dm.get(*part).and_then(|i| i.parent);
+                    let mut found = None;
+                    while let Some(c) = cur {
+                        if self.npcs.get(&c).map(|n| !n.dead).unwrap_or(false) {
+                            found = Some(c);
+                            break;
+                        }
+                        cur = dm.get(c).and_then(|i| i.parent);
+                    }
+                    found
+                };
+                if let Some(m) = model {
+                    let ff = self.dm.borrow().find_child_of_class(m, "ForceField").is_some();
+                    if !ff && !killed.contains(&m) {
+                        killed.push(m);
+                        let hum = self.npcs.get(&m).map(|n| n.hum);
+                        if let Some(h) = hum {
+                            let _ = self.dm.borrow_mut().set_prop(h, "Health", Val::Num(0.0));
+                        }
+                        self.die_npc(m);
+                    }
+                }
+            }
+            {
+                let mut dm = self.dm.borrow_mut();
+                self.physics.borrow_mut().explode_apply(&mut dm, &touched, center, radius, pressure);
+            }
+            self.debris.push((self.t + 2.0, e));
+        }
+    }
+
     pub fn update_npcs(&mut self, dt: f64) {
         let models: Vec<InstId> = self.npcs.keys().copied().collect();
         let (destroy_y, ws) = {
