@@ -107,7 +107,33 @@ impl LuaVm {
                     }
                 }
                 if let Some(ch) = self.chars.as_mut() {
+                    if !moved.is_empty() {
+                        ch.rig_dirty = true;
+                    }
+                    if let Some(rows) = m["ph"].as_array() {
+                        for r in rows {
+                            if let Some(a) = r.as_array() {
+                                if a.len() >= 16 {
+                                    let id = a[0].as_u64().unwrap_or(0) as u32;
+                                    if !dm.get(id).map(|i| !i.destroyed).unwrap_or(false) || !dm.is_a(id, "BasePart") {
+                                        continue;
+                                    }
+                                    if let Some(own) = ch.own.as_ref() {
+                                        if dm.is_descendant_of(id, own.model) {
+                                            continue;
+                                        }
+                                    }
+                                    let cf: Vec<f64> = a[1..13].iter().map(|v| v.as_f64().unwrap_or(0.0)).collect();
+                                    let _ = dm.set_prop(id, "CFrame", Val::Arr(cf));
+                                    dm.set_prop_quiet(id, "Velocity", Val::Arr(vec![a[13].as_f64().unwrap_or(0.0), a[14].as_f64().unwrap_or(0.0), a[15].as_f64().unwrap_or(0.0)]));
+                                }
+                            }
+                        }
+                    }
                     ch.track(&dm);
+                    if let Some(rows) = m["ch"].as_array() {
+                        ch.apply_ch(rows, self.t);
+                    }
                     for a in m["after"].as_array().cloned().unwrap_or_default() {
                         let c: Vec<f64> = a["c"].as_array().map(|c| c.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect()).unwrap_or_default();
                         match a["t"].as_str() {
@@ -693,7 +719,7 @@ impl LuaVm {
             if let Some(ws) = dm.services.get("Workspace").copied() {
                 let kids: Vec<u32> = dm.get(ws).map(|i| i.children.clone()).unwrap_or_default();
                 for m in kids {
-                    if dm.find_child_of_class(m, "Humanoid").is_some() {
+                    if dm.find_child_of_class(m, "Humanoid").is_some() && !self.chars.as_ref().map(|c| c.remotes.contains_key(&m)).unwrap_or(false) {
                         swirl_physics::animator::step_motors(&mut dm, m, dt);
                     }
                 }
@@ -702,6 +728,7 @@ impl LuaVm {
         if let Some(ch) = self.chars.as_mut() {
             let mut dm = self.dm.borrow_mut();
             ch.pose(&mut dm);
+            ch.step_remotes(&mut dm, dt);
             if dm.journal.iter().any(|c| match c {
                 swirl_core::instance::Change::Prop(id, _) => dm.get(*id).map(|i| matches!(i.class.as_str(), "Player" | "Humanoid") || dm.is_a(*id, "GuiBase") || dm.is_a(*id, "ValueBase") || dm.is_a(*id, "GuiObject")).unwrap_or(false),
                 _ => true,

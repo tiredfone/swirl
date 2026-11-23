@@ -186,14 +186,19 @@ pub struct CharacterProxy {
     pub solid: Option<ColliderHandle>,
     pub limbs: IndexMap<InstId, ColliderHandle>,
     pub seated: bool,
+    pub sensors: bool,
 }
 
 impl CharacterProxy {
     pub fn new(ph: &mut Physics, dm: &DataModel, model: InstId) -> CharacterProxy {
+        Self::with_sensors(ph, dm, model, true)
+    }
+
+    pub fn with_sensors(ph: &mut Physics, dm: &DataModel, model: InstId, sensors: bool) -> CharacterProxy {
         let t0 = root_of(dm, model).map(|t| Physics::get_cf(dm, t)).unwrap_or(cf::IDENTITY);
         let body = RigidBodyBuilder::kinematic_position_based().position(pose_of(&t0)).build();
         let bh = ph.bodies.insert(body);
-        let mut p = CharacterProxy { model, body: bh, solid: None, limbs: IndexMap::new(), seated: false };
+        let mut p = CharacterProxy { model, body: bh, solid: None, limbs: IndexMap::new(), seated: false, sensors };
         p.refresh(ph, dm);
         p
     }
@@ -229,13 +234,13 @@ impl CharacterProxy {
                 continue;
             }
             let s = Physics::get_v3(dm, p, "Size", [1.0; 3]);
-            let pad = 0.12;
+            let pad = if self.sensors { 0.12 } else { 0.0 };
             let local = cf::mul(&inv, &Physics::get_cf(dm, p));
             let c = ColliderBuilder::cuboid((s[0] / 2.0 + pad) as f32, (s[1] / 2.0 + pad) as f32, (s[2] / 2.0 + pad) as f32)
                 .position(pose_of(&local))
                 .sensor(true)
                 .active_collision_types(ActiveCollisionTypes::all())
-                .active_events(ActiveEvents::COLLISION_EVENTS)
+                .active_events(if self.sensors { ActiveEvents::COLLISION_EVENTS } else { ActiveEvents::empty() })
                 .build();
             let ch = ph.colliders.insert_with_parent(c, self.body, &mut ph.bodies);
             self.limbs.insert(p, ch);

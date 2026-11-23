@@ -608,3 +608,82 @@ pub fn step_motors(d: &mut DataModel, model: InstId, dt: f64) {
         let _ = d.set_prop(j, "CurrentAngle", Val::Num(next));
     }
 }
+
+pub fn set_motor(d: &mut DataModel, model: InstId, name: &str, desired: f64, max_vel: f64) {
+    let torso = match d.find_child(model, "Torso", false) {
+        Some(t) => t,
+        None => return,
+    };
+    let j = match d.find_child(torso, name, false) {
+        Some(j) if d.is_a(j, "Motor") => j,
+        _ => return,
+    };
+    d.set_prop_quiet(j, "DesiredAngle", Val::Num(desired));
+    d.set_prop_quiet(j, "MaxVelocity", Val::Num(max_vel));
+}
+
+pub fn holds_tool(d: &DataModel, model: InstId) -> bool {
+    d.get(model).map(|i| i.children.iter().any(|c| d.get(*c).map(|x| x.class == "Tool").unwrap_or(false))).unwrap_or(false)
+}
+
+pub fn apply_limb_angles(d: &mut DataModel, model: InstId, angles: &[f64]) {
+    let torso = match d.find_child(model, "Torso", false) {
+        Some(t) => t,
+        None => return,
+    };
+    for (i, name) in ["Right Shoulder", "Left Shoulder", "Right Hip", "Left Hip"].iter().enumerate() {
+        let a = match angles.get(i) {
+            Some(a) if a.is_finite() => *a,
+            _ => continue,
+        };
+        if let Some(j) = d.find_child(torso, name, false) {
+            if d.is_a(j, "Motor") {
+                d.set_prop_quiet(j, "CurrentAngle", Val::Num((-7.0f64).max(7.0f64.min(a))));
+            }
+        }
+    }
+}
+
+pub fn animate_procedural(d: &mut DataModel, model: InstId, state: u8, speed: f64, t: f64, holding: bool) {
+    let pi = std::f64::consts::PI;
+    let mv = 0.15;
+    match state {
+        2 | 3 => {
+            set_motor(d, model, "Right Shoulder", if holding { pi / 2.0 } else { pi }, 0.5);
+            set_motor(d, model, "Left Shoulder", -pi, 0.5);
+            set_motor(d, model, "Right Hip", 0.0, 0.5);
+            set_motor(d, model, "Left Hip", 0.0, 0.5);
+            return;
+        }
+        8 => {
+            let sw = (if speed > 0.5 { 0.9 } else { 0.25 }) * (t * if speed > 0.5 { 7.0 } else { 2.0 }).sin();
+            set_motor(d, model, "Right Shoulder", if holding { pi / 2.0 } else { pi - sw }, 0.4);
+            set_motor(d, model, "Left Shoulder", -(pi - sw), 0.4);
+            set_motor(d, model, "Right Hip", sw * 0.6, 0.4);
+            set_motor(d, model, "Left Hip", -sw * 0.6, 0.4);
+            return;
+        }
+        4 => {
+            set_motor(d, model, "Right Shoulder", pi / 2.0, 0.15);
+            set_motor(d, model, "Left Shoulder", -pi / 2.0, 0.15);
+            set_motor(d, model, "Right Hip", pi / 2.0, 0.15);
+            set_motor(d, model, "Left Hip", -pi / 2.0, 0.15);
+            return;
+        }
+        5 => {
+            let dd = (t * 9.0).sin();
+            set_motor(d, model, "Right Shoulder", pi - dd, 0.5);
+            set_motor(d, model, "Left Shoulder", -(pi - dd), 0.5);
+            set_motor(d, model, "Right Hip", dd, 0.5);
+            set_motor(d, model, "Left Hip", dd, 0.5);
+            return;
+        }
+        _ => {}
+    }
+    let (amp, freq) = if state == 1 && speed > 0.5 { (1.0, 9.0) } else { (0.1, 1.0) };
+    let dd = amp * (t * freq).sin();
+    set_motor(d, model, "Right Shoulder", if holding { pi / 2.0 } else { dd }, if holding { 0.5 } else { mv });
+    set_motor(d, model, "Left Shoulder", dd, mv);
+    set_motor(d, model, "Right Hip", -dd, mv);
+    set_motor(d, model, "Left Hip", -dd, mv);
+}
