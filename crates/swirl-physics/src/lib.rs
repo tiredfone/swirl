@@ -1,3 +1,4 @@
+pub mod animator;
 pub mod cf;
 pub mod groups;
 pub mod humanoid;

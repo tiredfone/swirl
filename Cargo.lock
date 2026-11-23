@@ -2416,12 +2416,13 @@ dependencies = [
 
 [[package]]
 name = "swirl-client"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "serde_json",
  "swirl-core",
  "swirl-lua",
  "swirl-net",
+ "swirl-physics",
  "wasm-bindgen",
  "web-sys",
 ]
@@ -2457,6 +2458,7 @@ dependencies = [
  "mlua",
  "serde_json",
  "swirl-core",
+ "swirl-physics",
 ]
 
 [[package]]

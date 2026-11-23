@@ -5,5 +5,6 @@ edition = "2021"
 
 [dependencies]
 swirl-core = { path = "../swirl-core" }
+swirl-physics = { path = "../swirl-physics" }
 mlua = { version = "0.10", features = ["lua51", "vendored"] }
 serde_json = "1"

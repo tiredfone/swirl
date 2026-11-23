@@ -10,6 +10,7 @@ pub struct LuaVm {
     host: Option<Host>,
     run: bool,
     core: Rc<RefCell<swirl_lua::client_api::CoreState>>,
+    anim: Rc<RefCell<swirl_lua::client_api::AnimState>>,
     t: f64,
 }
 
@@ -22,7 +23,7 @@ impl LuaVm {
         let mut dm = DataModel::new("client");
         dm.local_alloc = true;
         let dm = Rc::new(RefCell::new(dm));
-        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), t: 0.0 })
+        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), t: 0.0 })
     }
 
     pub fn apply(&mut self, text: &str) -> bool {
@@ -47,7 +48,7 @@ impl LuaVm {
                     drop(dm);
                     self.host = Host::new(self.dm.clone()).ok();
                     if let Some(h) = self.host.as_mut() {
-                        h.set_handler(Box::new(swirl_lua::client_api::ClientApi { core: self.core.clone() }));
+                        h.set_handler(Box::new(swirl_lua::client_api::ClientApi { core: self.core.clone(), anim: self.anim.clone() }));
                         h.scan_scripts();
                     }
                 }
@@ -101,6 +102,52 @@ impl LuaVm {
         serde_json::to_string(&w).unwrap_or_default()
     }
 
+    pub fn take_wanted_anims(&mut self) -> String {
+        let w = std::mem::take(&mut self.anim.borrow_mut().an.wanted);
+        serde_json::to_string(&w).unwrap_or_default()
+    }
+
+    pub fn provide_anim(&mut self, id: f64, bytes: Option<Vec<u8>>) {
+        self.anim.borrow_mut().an.provide(id as u64, bytes.as_deref());
+    }
+
+    pub fn anim_pose(&self) -> String {
+        let d = self.dm.borrow();
+        let st = self.anim.borrow();
+        let mut m: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
+        for (j, c) in &st.an.anim {
+            let name = match d.get_prop(*j, "Part1") {
+                Some(Val::Ref(Some(p))) => d.name(*p).to_string(),
+                _ => continue,
+            };
+            let model = d.get(*j).and_then(|i| i.parent).unwrap_or(0);
+            m.insert(format!("{}:{}", model, name), c.iter().map(|v| (v * 1e4).round() / 1e4).collect());
+        }
+        serde_json::to_string(&m).unwrap_or_default()
+    }
+
+    pub fn motor_angles(&self) -> String {
+        let d = self.dm.borrow();
+        let mut m: std::collections::BTreeMap<String, f64> = Default::default();
+        if let Some(ws) = d.services.get("Workspace") {
+            for model in d.get(*ws).map(|i| i.children.clone()).unwrap_or_default() {
+                if d.find_child_of_class(model, "Humanoid").is_none() {
+                    continue;
+                }
+                if let Some(t) = d.find_child(model, "Torso", false) {
+                    for j in d.get(t).map(|i| i.children.clone()).unwrap_or_default() {
+                        if d.is_a(j, "Motor") {
+                            if let Some(Val::Num(a)) = d.get_prop(j, "CurrentAngle") {
+                                m.insert(format!("{}:{}", model, d.name(j)), *a);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        serde_json::to_string(&m).unwrap_or_default()
+    }
+
     pub fn set_run(&mut self, run: bool) {
         self.run = run;
     }
@@ -149,6 +196,28 @@ impl LuaVm {
         self.t += dt;
         swirl_lua::clock::set_now(self.t);
         self.drain_core();
+        if self.host.is_some() {
+            let mut dm = self.dm.borrow_mut();
+            if let Some(ws) = dm.services.get("Workspace").copied() {
+                let kids: Vec<u32> = dm.get(ws).map(|i| i.children.clone()).unwrap_or_default();
+                for m in kids {
+                    if dm.find_child_of_class(m, "Humanoid").is_some() {
+                        swirl_physics::animator::step_motors(&mut dm, m, dt);
+                    }
+                }
+            }
+        }
+        let events = {
+            let mut st = self.anim.borrow_mut();
+            let mut dm = self.dm.borrow_mut();
+            st.an.step(&mut dm, dt)
+        };
+        if let Some(h) = self.host.as_mut() {
+            for e in events {
+                let args = e.arg.map(|a| vec![swirl_lua::host::Wire::S(a)]).unwrap_or_default();
+                h.fire(e.inst, e.name, args);
+            }
+        }
         if let Some(h) = self.host.as_mut() {
             h.tick(self.t);
         }

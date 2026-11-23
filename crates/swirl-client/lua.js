@@ -662,10 +662,57 @@ export async function startLua(opts) {
     }, { passive: false });
   };
 
+  const cmp = (window.solarAnimCmp = { angFrames: 0, angN: 0, angSum: 0, angMax: 0, frames: 0, both: 0, onlyJs: 0, onlyRs: 0, sum: 0, max: 0 });
+  const compareAnim = () => {
+    const o = world.own;
+    if (!o || !o.rec || !o.rec.model) return;
+    const rs = JSON.parse(window.solarVm.anim_pose());
+    const mid = o.rec.model.id;
+    const js = new Map();
+    for (const d of o.rec.model.descendants()) {
+      if (!d.anim || !(d.isA('Motor') || d.ClassName === 'VelocityMotor')) continue;
+      const p1 = d.props.get('Part1');
+      if (p1) js.set(p1.props.get('Name'), d.anim);
+    }
+    cmp.frames++;
+    const ra = JSON.parse(window.solarVm.motor_angles());
+    cmp.angFrames++;
+    for (const j of o.rec.model.findChild('Torso') ? o.rec.model.findChild('Torso').children : []) {
+      if (!j.isA('Motor')) continue;
+      const b = ra[mid + ':' + j.props.get('Name')];
+      if (b === undefined) continue;
+      const dd = Math.abs((j.props.get('CurrentAngle') || 0) - b);
+      cmp.angN++;
+      cmp.angSum += dd;
+      cmp.angMax = Math.max(cmp.angMax, dd);
+    }
+    for (const [n, a] of js) {
+      const b = rs[mid + ':' + n];
+      if (!b) {
+        cmp.onlyJs++;
+        continue;
+      }
+      cmp.both++;
+      let m = 0;
+      for (let i = 0; i < 12; i++) m = Math.max(m, Math.abs(a[i] - b[i]));
+      cmp.sum += m;
+      cmp.max = Math.max(cmp.max, m);
+    }
+    for (const k of Object.keys(rs)) if (k.startsWith(mid + ':') && !js.has(k.slice(String(mid).length + 1))) cmp.onlyRs++;
+  };
+
   const frame = (now) => {
     if (window.solarVm && /[?&]swirlhost=1/.test(location.search)) {
       try {
         window.solarVm.tick(1 / 60);
+        compareAnim();
+        for (const id of JSON.parse(window.solarVm.take_wanted_anims())) {
+          fetch('/asset/?id=' + id, { credentials: 'same-origin' }).then((r) => (r.ok ? r.arrayBuffer() : null)).then((b) => {
+            let u = b ? new Uint8Array(b) : null;
+            if (u && u[0] === 0x25) u = u.subarray(u.indexOf(10) + 1);
+            window.solarVm.provide_anim(id, u);
+          }, () => window.solarVm.provide_anim(id, null));
+        }
         for (const id of JSON.parse(window.solarVm.take_wanted())) {
           fetchCoreTree(id).then((tree) => {
             for (const [k, v] of [...tree].reverse()) window.solarVm.provide_core_source(k, v);
