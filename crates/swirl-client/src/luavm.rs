@@ -271,6 +271,7 @@ impl LuaVm {
                         let st = v.as_f64().unwrap_or(1.0);
                         let prev = self.friends.get(&id).copied().unwrap_or(1.0);
                         self.friends.insert(id, st);
+                        self.core.borrow_mut().friends.insert(id, st);
                         if prev != st && dm.get(id).is_some() {
                             changes.push((id, st));
                         }
@@ -622,6 +623,10 @@ impl LuaVm {
         }
     }
 
+    pub fn take_kicked(&mut self) -> Option<String> {
+        self.core.borrow_mut().kicked.take()
+    }
+
     pub fn set_screen(&mut self, w: f64, h: f64) {
         self.screen = [w, h];
         self.core.borrow_mut().screen = (w, h);
@@ -930,6 +935,16 @@ impl LuaVm {
         swirl_lua::clock::set_now(self.t);
         self.drain_core();
         self.drain_market();
+        {
+            let reqs = std::mem::take(&mut self.core.borrow_mut().focus_req);
+            if let Some(g) = self.gui_dom.as_mut() {
+                for (i, on) in reqs {
+                    g.focus_box(i, on);
+                }
+            }
+            let st = self.chars.as_ref().and_then(|c| c.own.as_ref()).map(|o| (o.hum, o.state));
+            self.core.borrow_mut().own_state = st;
+        }
         {
             let mut g = self.gui.borrow_mut();
             g.now = self.t;

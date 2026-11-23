@@ -892,6 +892,10 @@ impl Host {
                         },
                         _ => w,
                     };
+                    let w = match (&pn[..], &w) {
+                        ("Size", Wire::V3(v)) if d.is_a(id, "BasePart") => Wire::V3(snap_size(&d, id, &class, *v)),
+                        _ => w,
+                    };
                     match wire_to_val(&ty, &w) {
                         Some(v) => {
                             let _ = d.set_prop(id, &pn, v);
@@ -1407,4 +1411,44 @@ impl Host {
     pub fn lua(&self) -> &Lua {
         &self.lua
     }
+}
+
+fn snap_size(d: &DataModel, id: InstId, class: &str, v: [f64; 3]) -> [f64; 3] {
+    let fin = |n: f64| if n.is_finite() { n.abs() } else { 1.0 };
+    let (mut x, mut y, mut z) = (fin(v[0]), fin(v[1]), fin(v[2]));
+    if class == "TrussPart" {
+        let f = |n: f64| ((n / 2.0).round() * 2.0).max(2.0);
+        return [f(x), f(y), f(z)];
+    }
+    let ff = if classes::prop_info(class, "FormFactor").is_some() {
+        match d.get_prop(id, "FormFactor") {
+            Some(Val::Num(n)) => *n as i32,
+            _ => 1,
+        }
+    } else {
+        3
+    };
+    match ff {
+        0 => {
+            x = x.round().max(1.0);
+            y = y.round().max(1.0);
+            z = z.round().max(1.0);
+        }
+        1 => {
+            x = x.round().max(1.0);
+            y = ((y / 1.2).round() * 1.2).max(1.2);
+            z = z.round().max(1.0);
+        }
+        2 => {
+            x = x.round().max(1.0);
+            y = ((y / 0.4).round() * 0.4).max(0.4);
+            z = z.round().max(1.0);
+        }
+        _ => {
+            x = x.max(0.2);
+            y = y.max(0.2);
+            z = z.max(0.2);
+        }
+    }
+    [x, y, z]
 }

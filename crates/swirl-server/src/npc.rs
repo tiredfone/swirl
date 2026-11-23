@@ -571,6 +571,7 @@ impl Game {
                 self.physics.borrow_mut().stir();
                 n.last_step_cf = Some(n.torso_cf);
             }
+            self.api.borrow_mut().hum_state.insert(n.hum, n.state);
             self.npcs.insert(model, n);
             if let Some(nh) = healed {
                 self.host.fire(hum, "Changed", vec![Wire::S("Health".into())]);

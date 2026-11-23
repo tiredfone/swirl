@@ -167,6 +167,8 @@ pub fn spawn(spec: Spec) -> Handle {
                                     }
                                 }
                             }
+                            let queued = std::mem::take(&mut game.api.borrow_mut().kicks);
+                            game.kicks.extend(queued);
                             for (target, reason) in std::mem::take(&mut game.kicks) {
                                 for (pl, tx) in clients.values() {
                                     if *pl == target {

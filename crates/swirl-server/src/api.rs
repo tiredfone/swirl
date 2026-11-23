@@ -50,6 +50,8 @@ pub struct ApiState {
     pub path_cache: HashMap<String, (f64, (i32, Vec<([f64; 3], bool)>))>,
     pub now_ms: f64,
     pub info_cache: HashMap<String, (std::time::Instant, Option<J>)>,
+    pub kicks: Vec<(InstId, String)>,
+    pub hum_state: HashMap<InstId, u8>,
 }
 
 #[derive(Default, Clone)]
@@ -116,6 +118,8 @@ pub fn new_state(assets_dir: &str, data_dir: &str, place_id: u64, era: i32) -> S
         path_cache: HashMap::new(),
         now_ms: 0.0,
         info_cache: HashMap::new(),
+        kicks: vec![],
+        hum_state: HashMap::new(),
     }))
 }
 
@@ -423,6 +427,12 @@ impl ApiHandler for Api {
     fn call(&mut self, d: &mut DataModel, id: InstId, method: &str, args: &[Wire]) -> Option<Res> {
         if crate::terrain_api::METHODS.contains(&method) {
             return crate::terrain_api::call(&mut self.1.borrow_mut(), d, id, method, args);
+        }
+        if crate::extra_api::METHODS.contains(&method) {
+            let r = crate::extra_api::call(&mut self.0.borrow_mut(), d, id, method, args);
+            if r.is_some() {
+                return r;
+            }
         }
         if !METHODS.contains(&method) && !matches!(method, "Play" | "play" | "Stop" | "stop") {
             return None;

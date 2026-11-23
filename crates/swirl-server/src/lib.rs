@@ -2,6 +2,7 @@ pub mod api;
 pub mod appearance;
 pub mod config;
 pub mod core2018;
+pub mod extra_api;
 pub mod character;
 pub mod codec;
 pub mod fetch;
