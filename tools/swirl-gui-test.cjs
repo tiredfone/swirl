@@ -71,6 +71,13 @@ const srv = http.createServer((req, res) => {
       }
     }
   }
+  if (process.env.MCLICK) {
+    const [x, y, n] = process.env.MCLICK.split(',').map(Number);
+    for (let i = 0; i < (n || 1); i++) {
+      await pg.mouse.click(x, y);
+      await wait(400);
+    }
+  }
   if (process.env.TAPOUT) fs.writeFileSync(process.env.TAPOUT, JSON.stringify(await pg.evaluate(() => window.solarTapLog || [])));
   if (process.env.EVAL) console.log(JSON.stringify(await pg.evaluate(process.env.EVAL), null, 1));
   if (process.env.CHAT) {

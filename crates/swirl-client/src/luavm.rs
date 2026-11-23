@@ -11,8 +11,13 @@ pub struct LuaVm {
     run: bool,
     core: Rc<RefCell<swirl_lua::client_api::CoreState>>,
     anim: Rc<RefCell<swirl_lua::client_api::AnimState>>,
+    gui: Rc<RefCell<swirl_lua::client_api::GuiState>>,
     chars: Option<crate::clientchars::ClientChars>,
     mouse_state: crate::clientchars::MouseState,
+    screen: [f64; 2],
+    tools: crate::clientchars::Tools,
+    remote_moved: std::collections::HashSet<u32>,
+    fired_later: Vec<(u32, &'static str, Vec<swirl_lua::host::Wire>)>,
     t: f64,
 }
 
@@ -25,7 +30,7 @@ impl LuaVm {
         let mut dm = DataModel::new("client");
         dm.local_alloc = true;
         let dm = Rc::new(RefCell::new(dm));
-        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), t: 0.0 })
+        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), gui: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), screen: [800.0, 600.0], tools: Default::default(), remote_moved: Default::default(), fired_later: vec![], t: 0.0 })
     }
 
     pub fn apply(&mut self, text: &str) -> bool {
@@ -41,7 +46,7 @@ impl LuaVm {
                 swirl_core::wire::apply_init(&mut dm, &snap);
                 dm.local_player = m["you"].as_u64().map(|v| v as u32);
                 if self.run {
-                    let mouse = boot(&mut dm);
+                    let mouse = boot(&mut dm, self.screen);
                     self.core.borrow_mut().mouse = mouse;
                     if dm.era != 2018 {
                         let sc = dm.services.get("ScriptContext").copied();
@@ -50,7 +55,7 @@ impl LuaVm {
                     drop(dm);
                     self.host = Host::new(self.dm.clone()).ok();
                     if let Some(h) = self.host.as_mut() {
-                        h.set_handler(Box::new(swirl_lua::client_api::ClientApi { core: self.core.clone(), anim: self.anim.clone() }));
+                        h.set_handler(Box::new(swirl_lua::client_api::ClientApi { core: self.core.clone(), anim: self.anim.clone(), gui: self.gui.clone() }));
                         self.chars = Some(crate::clientchars::ClientChars::new(&mut self.dm.borrow_mut()));
                         h.scan_scripts();
                     }
@@ -60,6 +65,17 @@ impl LuaVm {
             Some("rep") => {
                 let ops = m["o"].as_array().cloned().unwrap_or_default();
                 let moved = swirl_core::wire::apply_ops(&mut dm, &ops);
+                let mouse = self.core.borrow().mouse;
+                if let (Some(ch), Some(mouse)) = (self.chars.as_mut(), mouse) {
+                    for (id, old, _) in &moved {
+                        if dm.get(*id).map(|i| i.class == "Tool" || i.class == "HopperBin").unwrap_or(false) {
+                            self.remote_moved.insert(*id);
+                            let mut fired = vec![];
+                            ch.tool_moved(&mut dm, &mut self.tools, mouse, *id, *old, false, &mut fired);
+                            self.fired_later.extend(fired);
+                        }
+                    }
+                }
                 if let Some(ch) = self.chars.as_mut() {
                     ch.track(&dm);
                     for a in m["after"].as_array().cloned().unwrap_or_default() {
@@ -68,7 +84,17 @@ impl LuaVm {
                             Some("own") if c.len() >= 12 => {
                                 let mut cf = [0.0; 12];
                                 cf.copy_from_slice(&c[..12]);
-                                ch.take_own(&dm, a["id"].as_u64().unwrap_or(0) as u32, cf, a["s"].as_i64().unwrap_or(1));
+                                let mid = a["id"].as_u64().unwrap_or(0) as u32;
+                                ch.take_own(&dm, mid, cf, a["s"].as_i64().unwrap_or(1));
+                                self.core.borrow_mut().own_model = Some(mid);
+                                if let (Some(held), Some(mouse)) = (dm.get(mid).and_then(|i| i.children.iter().copied().find(|c| dm.get(*c).map(|x| x.class == "Tool").unwrap_or(false))), mouse) {
+                                    if self.tools.equipped != Some(held) {
+                                        self.tools.equipped = Some(held);
+                                        let mut fired = vec![];
+                                        ch.tool_moved(&mut dm, &mut self.tools, mouse, held, None, false, &mut fired);
+                                        self.fired_later.extend(fired);
+                                    }
+                                }
                             }
                             Some("tp") => ch.teleport(&dm, &c, a["s"].as_i64().unwrap_or(0)),
                             _ => {}
@@ -120,6 +146,32 @@ impl LuaVm {
         serde_json::to_string(&w).unwrap_or_default()
     }
 
+    pub fn take_wanted_models(&mut self) -> String {
+        let w = std::mem::take(&mut self.core.borrow_mut().models_wanted);
+        serde_json::to_string(&w).unwrap_or_default()
+    }
+
+    pub fn provide_model(&mut self, token: u32, bytes: Option<Vec<u8>>) {
+        let result: Result<Vec<swirl_lua::host::Wire>, String> = match bytes.as_deref().and_then(|b| swirl_core::rbx::parse(b).ok()) {
+            Some(tree) => {
+                let mut dm = self.dm.borrow_mut();
+                match dm.create_any("Model", None) {
+                    Ok(m) => {
+                        dm.set_prop_quiet(m, "Name", Val::Str("Model".into()));
+                        dm.get_mut_name(m, "Model");
+                        dm.load_tree(&tree, m);
+                        Ok(vec![swirl_lua::host::Wire::I(m)])
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            None => Err("asset is not a model".to_string()),
+        };
+        if let Some(h) = self.host.as_mut() {
+            h.resolve(token, result);
+        }
+    }
+
     pub fn take_wanted_anims(&mut self) -> String {
         let w = std::mem::take(&mut self.anim.borrow_mut().an.wanted);
         serde_json::to_string(&w).unwrap_or_default()
@@ -164,6 +216,11 @@ impl LuaVm {
             }
         }
         serde_json::to_string(&m).unwrap_or_default()
+    }
+
+    pub fn set_screen(&mut self, w: f64, h: f64) {
+        self.screen = [w, h];
+        self.core.borrow_mut().screen = (w, h);
     }
 
     pub fn set_run(&mut self, run: bool) {
@@ -229,6 +286,7 @@ impl LuaVm {
         };
         self.mouse_state.x = x;
         self.mouse_state.y = y;
+        self.core.borrow_mut().mouse_pos = [x, y];
         if let Some(ch) = self.chars.as_mut() {
             let mut dm = self.dm.borrow_mut();
             ch.update_mouse(&mut dm, mouse, &mut self.mouse_state, [ox, oy, oz], [dx, dy, dz], over_gui, k);
@@ -251,8 +309,102 @@ impl LuaVm {
     }
 
     pub fn take_out(&mut self) -> String {
+        let mut out: Vec<String> = match self.chars.as_mut() {
+            Some(c) => std::mem::take(&mut c.out),
+            None => vec![],
+        };
+        let extra = std::mem::take(&mut self.core.borrow_mut().out);
+        for e in extra {
+            if e.contains("\"id\":-1") {
+                if let Some(t) = self.tools.equipped {
+                    out.push(format!("{{\"t\":\"unequip\",\"id\":{}}}", t));
+                }
+            } else {
+                out.push(e);
+            }
+        }
+        serde_json::to_string(&out).unwrap_or_default()
+    }
+
+    pub fn mouse_button(&mut self, button: i32, down: bool) {
+        let mouse = match self.core.borrow().mouse {
+            Some(m) => m,
+            None => return,
+        };
+        if let Some(ch) = self.chars.as_mut() {
+            let mut dm = self.dm.borrow_mut();
+            let mut fired = vec![];
+            if down {
+                ch.mouse_down(&mut dm, &mut self.tools, mouse, &mut self.mouse_state, button as i64, &mut fired);
+            } else {
+                ch.mouse_up(&mut dm, &mut self.tools, mouse, &mut self.mouse_state, button as i64, &mut fired);
+            }
+            self.fired_later.extend(fired);
+        }
+    }
+
+    pub fn key_event(&mut self, k: &str, down: bool) {
+        {
+            let mut c = self.core.borrow_mut();
+            if down {
+                c.keys.insert(k.to_lowercase());
+            } else {
+                c.keys.remove(&k.to_lowercase());
+            }
+        }
+        let mouse = match self.core.borrow().mouse {
+            Some(m) => m,
+            None => return,
+        };
+        if let Some(ch) = self.chars.as_mut() {
+            let mut fired = vec![];
+            ch.key(&self.tools, mouse, k, down, &mut fired);
+            self.fired_later.extend(fired);
+        }
+    }
+
+    pub fn toggle_slot(&mut self, item: u32) {
+        let mouse = match self.core.borrow().mouse {
+            Some(m) => m,
+            None => return,
+        };
+        if let Some(ch) = self.chars.as_mut() {
+            let mut dm = self.dm.borrow_mut();
+            let mut fired = vec![];
+            ch.toggle_slot(&mut dm, &mut self.tools, mouse, item, &mut fired);
+            self.fired_later.extend(fired);
+        }
+    }
+
+    pub fn drop_tool(&mut self) {
+        if let Some(ch) = self.chars.as_mut() {
+            let dm = self.dm.borrow();
+            ch.drop_tool(&dm, &self.tools);
+        }
+    }
+
+    pub fn names_under(&self, service: &str, class: &str) -> String {
+        let d = self.dm.borrow();
+        let root = match d.services.get(service) {
+            Some(r) => *r,
+            None => return "[]".into(),
+        };
+        let mut all = vec![];
+        d.descendants(root, &mut all);
+        let v: Vec<String> = all.into_iter().filter(|i| d.get(*i).map(|x| x.class == class).unwrap_or(false)).map(|i| d.full_name(i)).collect();
+        serde_json::to_string(&v).unwrap_or_default()
+    }
+
+    pub fn tools_json(&self) -> String {
+        serde_json::json!({"equipped": self.tools.equipped, "bin": self.tools.selected_bin, "order": self.tools.slot_order}).to_string()
+    }
+
+    pub fn backpack_items(&mut self) -> String {
         match self.chars.as_mut() {
-            Some(c) => serde_json::to_string(&std::mem::take(&mut c.out)).unwrap_or_default(),
+            Some(ch) => {
+                let dm = self.dm.borrow();
+                serde_json::to_string(&ch.backpack_items(&dm, &mut self.tools)).unwrap_or_default()
+            }
             None => "[]".into(),
         }
     }
@@ -268,6 +420,11 @@ impl LuaVm {
         self.t += dt;
         swirl_lua::clock::set_now(self.t);
         self.drain_core();
+        {
+            let mut g = self.gui.borrow_mut();
+            g.now = self.t;
+            g.step(&mut self.dm.borrow_mut());
+        }
         if let Some(h) = self.host.as_mut() {
             h.tick(self.t);
         }
@@ -309,7 +466,36 @@ impl LuaVm {
         if let Some(ch) = self.chars.as_mut() {
             let mut dm = self.dm.borrow_mut();
             ch.pose(&mut dm);
+            let mouse = self.core.borrow().mouse;
+            if let Some(mouse) = mouse {
+                let moves: Vec<(u32, Option<u32>)> = dm
+                    .journal
+                    .iter()
+                    .filter_map(|c| match c {
+                        swirl_core::instance::Change::Parent { id, old, .. } => Some((*id, *old)),
+                        _ => None,
+                    })
+                    .collect();
+                let mut fired = vec![];
+                for (id, old) in moves {
+                    if self.remote_moved.contains(&id) {
+                        continue;
+                    }
+                    if dm.get(id).map(|i| i.class == "Tool" || i.class == "HopperBin").unwrap_or(false) {
+                        ch.tool_moved(&mut dm, &mut self.tools, mouse, id, old, true, &mut fired);
+                    }
+                }
+                self.fired_later.extend(fired);
+                self.tools.mouse_send_acc += dt;
+                ch.send_mouse(&dm, &mut self.tools, mouse, &self.mouse_state, false);
+            }
+            self.remote_moved.clear();
             ch.step_physics(&mut dm);
+        }
+        if let Some(h) = self.host.as_mut() {
+            for (inst, name, args) in std::mem::take(&mut self.fired_later) {
+                h.fire(inst, name, args);
+            }
         }
     }
 
@@ -367,7 +553,47 @@ impl LuaVm {
     }
 }
 
-fn boot(dm: &mut DataModel) -> Option<u32> {
+fn gui(dm: &mut DataModel, class: &str, name: &str, parent: Option<u32>, props: &[(&str, Val)]) -> Option<u32> {
+    let g = dm.create_any(class, None).ok()?;
+    dm.set_prop_quiet(g, "Name", Val::Str(name.into()));
+    dm.get_mut_name(g, name);
+    for (k, v) in props {
+        dm.set_prop_quiet(g, k, v.clone());
+    }
+    dm.link_quiet(g, parent);
+    Some(g)
+}
+
+fn ud(a: [f64; 4]) -> Val {
+    Val::Arr(a.to_vec())
+}
+
+fn control_button(dm: &mut DataModel, parent: u32, name: &str, image: &str, pos: [f64; 4], size: [f64; 4]) {
+    gui(dm, "ImageButton", name, Some(parent), &[("Image", Val::Str(format!("rbxasset://textures/{}.png", image))), ("BackgroundTransparency", Val::Num(1.0)), ("Position", ud(pos)), ("Size", ud(size)), ("ZIndex", Val::Num(2.0))]);
+}
+
+fn build_control_frame(dm: &mut DataModel, robloxgui: u32) {
+    let t = |v: f64| ("BackgroundTransparency", Val::Num(v));
+    let cf = match gui(dm, "Frame", "ControlFrame", Some(robloxgui), &[t(1.0), ("Size", ud([1.0, 0.0, 1.0, 0.0]))]) {
+        Some(c) => c,
+        None => return,
+    };
+    if let Some(bl) = gui(dm, "Frame", "BottomLeftControl", Some(cf), &[t(1.0), ("Position", ud([0.0, 0.0, 1.0, -50.0])), ("Size", ud([0.0, 130.0, 0.0, 50.0]))]) {
+        control_button(dm, bl, "Exit", "Exit", [0.0, 0.0, 0.0, -1.0], [0.0, 70.0, 0.0, 51.0]);
+    }
+    if let Some(br) = gui(dm, "Frame", "BottomRightControl", Some(cf), &[t(1.0), ("Position", ud([1.0, -50.0, 1.0, -48.0])), ("Size", ud([0.0, 48.0, 0.0, 46.0]))]) {
+        control_button(dm, br, "CameraTiltUp", "CameraTiltUp", [0.0, 2.0, 0.0, 0.0], [0.0, 22.0, 0.0, 22.0]);
+        control_button(dm, br, "CameraTiltDown", "CameraTiltDown", [0.0, 2.0, 0.0, 23.0], [0.0, 22.0, 0.0, 22.0]);
+        control_button(dm, br, "CameraZoomIn", "CameraZoomIn", [0.0, 25.0, 0.0, 0.0], [0.0, 22.0, 0.0, 22.0]);
+        control_button(dm, br, "CameraZoomOut", "CameraZoomOut", [0.0, 25.0, 0.0, 23.0], [0.0, 22.0, 0.0, 22.0]);
+    }
+    if let Some(tl) = gui(dm, "Frame", "TopLeftControl", Some(cf), &[t(1.0), ("Position", ud([0.0, 0.0, 0.0, 0.0])), ("Size", ud([0.0, 115.0, 0.0, 51.0]))]) {
+        control_button(dm, tl, "Help", "Help", [0.0, 0.0, 0.0, 0.0], [0.0, 45.0, 0.0, 51.0]);
+        control_button(dm, tl, "Exit", "Exit", [0.0, 45.0, 0.0, 0.0], [0.0, 70.0, 0.0, 51.0]);
+    }
+}
+
+fn boot(dm: &mut DataModel, screen: [f64; 2]) -> Option<u32> {
     let mut mouse_id = None;
     for s in ["ScriptContext", "GuiService", "LogService", "MarketplaceService", "TeleportService", "InsertService", "ChangeHistoryService", "PersonalServerService", "PointsService", "HttpService", "ContextActionService", "NetworkClient", "CollectionService", "LocalBackpack", "CoreGui", "UserInputService", "RunService"] {
         let _ = dm.service(s);
@@ -391,10 +617,10 @@ fn boot(dm: &mut DataModel) -> Option<u32> {
         }
     }
     if let Some(cg) = dm.services.get("CoreGui").copied() {
-        if let Ok(g) = dm.create_any("ScreenGui", None) {
-            dm.set_prop_quiet(g, "Name", Val::Str("RobloxGui".into()));
-            dm.get_mut_name(g, "RobloxGui");
-            dm.link_quiet(g, Some(cg));
+        if let Some(g) = gui(dm, "ScreenGui", "RobloxGui", Some(cg), &[("AbsoluteSize", Val::Arr(vec![screen[0], screen[1]]))]) {
+            if dm.era != 2018 {
+                build_control_frame(dm, g);
+            }
         }
     }
     mouse_id

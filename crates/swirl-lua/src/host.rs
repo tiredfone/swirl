@@ -25,6 +25,7 @@ pub enum Wire {
     C3([f64; 3]),
     V2([f64; 2]),
     Ud2([f64; 4]),
+    Bc(f64),
     E(String, f64),
     List(Vec<Wire>),
     Dict(Vec<(String, Wire)>),
@@ -251,6 +252,10 @@ fn enc_into(lua: &Lua, out: &mut Vec<Value>, w: &Wire) -> mlua::Result<()> {
                 out.push(Value::Number(*x));
             }
         }
+        Wire::Bc(v) => {
+            out.push(s(lua, "bc")?);
+            out.push(Value::Number(*v));
+        }
         Wire::Ud2(v) => {
             out.push(s(lua, "ud2")?);
             for x in v {
@@ -364,7 +369,7 @@ fn one_wire(a: &[J], i: &mut usize) -> Option<Wire> {
             let v = take(i, 4);
             Wire::Ud2([v[0], v[1], v[2], v[3]])
         }
-        "bc" => Wire::N(take(i, 1)[0]),
+        "bc" => Wire::Bc(take(i, 1)[0]),
         "e" => {
             let ty = a.get(*i).and_then(|x| x.as_str()).unwrap_or("").to_string();
             *i += 1;
@@ -437,6 +442,7 @@ fn wire_push(out: &mut Vec<J>, w: &Wire) {
             out.push(J::from("v2"));
             out.extend(v.iter().map(|x| n(*x)));
         }
+        Wire::Bc(v) => out.push(n(*v)),
         Wire::Ud2(v) => {
             out.push(J::from("ud2"));
             out.extend(v.iter().map(|x| n(*x)));
@@ -471,7 +477,8 @@ fn val_to_wire(ty: &str, enum_type: Option<&str>, v: &Val) -> Wire {
         ("UD2", Val::Arr(a)) if a.len() >= 4 => Wire::Ud2([a[0], a[1], a[2], a[3]]),
         ("bool", Val::Bool(b)) => Wire::B(*b),
         ("string", Val::Str(x)) | ("Content", Val::Str(x)) => Wire::S(x.clone()),
-        ("int", Val::Num(n)) | ("number", Val::Num(n)) | ("BC", Val::Num(n)) | ("enum", Val::Num(n)) => Wire::N(*n),
+        ("BC", Val::Num(n)) => Wire::Bc(*n),
+        ("int", Val::Num(n)) | ("number", Val::Num(n)) | ("enum", Val::Num(n)) => Wire::N(*n),
         ("V3", Val::Arr(a)) if a.len() >= 3 => Wire::V3([a[0], a[1], a[2]]),
         ("C3", Val::Arr(a)) if a.len() >= 3 => Wire::C3([a[0], a[1], a[2]]),
         ("CF", Val::Arr(a)) if a.len() >= 12 => {
@@ -487,10 +494,14 @@ fn val_to_wire(ty: &str, enum_type: Option<&str>, v: &Val) -> Wire {
 fn wire_to_val(ty: &str, w: &Wire) -> Option<Val> {
     Some(match (ty, w) {
         ("bool", Wire::B(b)) => Val::Bool(*b),
+        ("bool", Wire::Nil) => Val::Bool(false),
+        ("bool", Wire::N(n)) => Val::Bool(*n != 0.0 && !n.is_nan()),
+        ("bool", Wire::S(x)) => Val::Bool(!x.is_empty()),
+        ("bool", Wire::I(_)) | ("bool", Wire::V3(_)) | ("bool", Wire::Cf(_)) | ("bool", Wire::C3(_)) | ("bool", Wire::V2(_)) | ("bool", Wire::Ud2(_)) | ("bool", Wire::E(_, _)) | ("bool", Wire::Bc(_)) | ("bool", Wire::List(_)) | ("bool", Wire::Dict(_)) => Val::Bool(true),
         ("string", Wire::S(x)) | ("Content", Wire::S(x)) => Val::Str(x.clone()),
         ("string", Wire::N(n)) => Val::Str(n.to_string()),
         ("int", Wire::N(n)) => Val::Num(n.trunc()),
-        ("number", Wire::N(n)) | ("enum", Wire::N(n)) | ("BC", Wire::N(n)) => Val::Num(*n),
+        ("number", Wire::N(n)) | ("enum", Wire::N(n)) | ("BC", Wire::N(n)) | ("BC", Wire::Bc(n)) => Val::Num(*n),
         ("enum", Wire::E(_, v)) => Val::Num(*v),
         ("V3", Wire::V3(a)) | ("C3", Wire::C3(a)) => Val::Arr(a.to_vec()),
         ("V2", Wire::V2(a)) => Val::Arr(a.to_vec()),
@@ -777,7 +788,12 @@ impl Host {
                         enc_into(lua, &mut out, &w)?;
                         return Ok(Value::Table(tagged(lua, &out)?));
                     }
-                    if METHODS.contains(&key.as_str()) || st_get.borrow().extra_methods.contains(&key) || method_known(&d, id, &inst.class, &key) {
+                    let class_gated = match key.as_str() {
+                        "Play" | "play" | "Stop" | "stop" | "Pause" | "pause" | "Resume" => Some(classes::is_a(&inst.class, "Sound") || classes::is_a(&inst.class, "AnimationTrack")),
+                        "Move" => Some(classes::is_a(&inst.class, "Humanoid")),
+                        _ => None,
+                    };
+                    if class_gated != Some(false) && (METHODS.contains(&key.as_str()) || st_get.borrow().extra_methods.contains(&key) || method_known(&d, id, &inst.class, &key)) {
                         return Ok(Value::Table(tagged(lua, &[s(lua, "m")?, s(lua, &key)?])?));
                     }
                     let cap = {
@@ -845,6 +861,14 @@ impl Host {
                         None => return Ok(Value::String(lua.create_string(&format!("{} is not a valid member of {}", key, class))?)),
                     };
                     let ty = classes::prop_info(&class, &pn).map(|p| p.ty.clone()).unwrap_or_default();
+                    let enum_ty = classes::prop_info(&class, &pn).and_then(|p| p.enum_type.clone());
+                    let w = match (&ty[..], &w, enum_ty) {
+                        ("enum", Wire::S(name), Some(et)) => match classes::enum_value(&et, name) {
+                            Some(v) => Wire::N(v as f64),
+                            None => w,
+                        },
+                        _ => w,
+                    };
                     match wire_to_val(&ty, &w) {
                         Some(v) => {
                             let _ = d.set_prop(id, &pn, v);
@@ -1096,6 +1120,21 @@ impl Host {
                             match d.create_any("GlobalSettings", None) {
                                 Ok(g) => {
                                     d.set_prop_quiet(g, "Name", Val::Str("Settings".into()));
+                                    d.get_mut_name(g, "Settings");
+                                    if let Ok(r) = d.create_any("RenderSettings", Some(g)) {
+                                        d.set_prop_quiet(r, "Name", Val::Str("Rendering".into()));
+                                        d.get_mut_name(r, "Rendering");
+                                    }
+                                    for n in ["Network", "Physics", "Diagnostics", "Game"] {
+                                        if let Ok(c) = d.create_any("Instance", Some(g)) {
+                                            d.set_prop_quiet(c, "Name", Val::Str(n.into()));
+                                            d.get_mut_name(c, n);
+                                        }
+                                    }
+                                    if let Ok(c) = d.create_any("GameSettings", Some(g)) {
+                                        d.set_prop_quiet(c, "Name", Val::Str("Game Options".into()));
+                                        d.get_mut_name(c, "Game Options");
+                                    }
                                     st2.borrow_mut().settings = Some(g);
                                     ok(Wire::I(g))
                                 }
@@ -1118,8 +1157,10 @@ impl Host {
                             match d.create_any("UserSettings", None) {
                                 Ok(g) => {
                                     d.set_prop_quiet(g, "Name", Val::Str("UserSettings".into()));
+                                    d.get_mut_name(g, "UserSettings");
                                     if let Ok(gs) = d.create_any("UserGameSettings", Some(g)) {
                                         d.set_prop_quiet(gs, "Name", Val::Str("GameSettings".into()));
+                                        d.get_mut_name(gs, "GameSettings");
                                     }
                                     st2.borrow_mut().user_settings = Some(g);
                                     ok(Wire::I(g))

@@ -109,8 +109,10 @@ export async function startLua(opts) {
   const gameErrors = [];
   const logs = [];
   const jsChars = [];
+  const jsOther = [];
   const send = (o) => {
     if (o && o.t === 'char') jsChars.push(JSON.stringify(o));
+    else if (o && o.t !== 'ping') jsOther.push(o);
     client.send(JSON.stringify(o));
   };
   const net = { send, bytesIn: 0, bytesOut: 0, close() {} };
@@ -518,6 +520,29 @@ export async function startLua(opts) {
   };
 
   const ms = world.mouseState;
+  const shadowOn = () => window.solarVm && /[?&]swirlhost=1/.test(location.search);
+  for (const [name, fn] of [
+    ['mouseDown', (vm, b) => vm.mouse_button(b, true)],
+    ['mouseUp', (vm, b) => vm.mouse_button(b, false)],
+    ['keyDown', (vm, k) => vm.key_event(k, true)],
+    ['keyUp', (vm, k) => vm.key_event(k, false)],
+    ['toggleSlot', (vm, item) => item && vm.toggle_slot(item.id)],
+    ['dropTool', (vm) => vm.drop_tool()],
+  ]) {
+    const orig = world[name].bind(world);
+    world[name] = (...a) => {
+      const r = orig(...a);
+      (window.solarWrapLog = window.solarWrapLog || []).push(name + ':' + shadowOn());
+      if (shadowOn()) {
+        try {
+          fn(window.solarVm, ...a);
+        } catch (e) {
+          errors.push('vm' + name + ': ' + e);
+        }
+      }
+      return r;
+    };
+  }
   const wire = (gui, camera) => {
     const held = state.held;
     const codes = state.codes;
@@ -740,6 +765,13 @@ export async function startLua(opts) {
     if (window.solarVm && /[?&]swirlhost=1/.test(location.search)) {
       try {
         compareAnim();
+        for (const [tok, id] of JSON.parse(window.solarVm.take_wanted_models())) {
+          fetch('/asset/?id=' + id, { credentials: 'same-origin' }).then((r) => (r.ok ? r.arrayBuffer() : null)).then((b) => {
+            let u = b ? new Uint8Array(b) : null;
+            if (u && u[0] === 0x25) u = u.subarray(u.indexOf(10) + 1);
+            window.solarVm.provide_model(tok, u);
+          }, () => window.solarVm.provide_model(tok, null));
+        }
         for (const id of JSON.parse(window.solarVm.take_wanted_anims())) {
           fetch('/asset/?id=' + id, { credentials: 'same-origin' }).then((r) => (r.ok ? r.arrayBuffer() : null)).then((b) => {
             let u = b ? new Uint8Array(b) : null;
@@ -748,7 +780,9 @@ export async function startLua(opts) {
           }, () => window.solarVm.provide_anim(id, null));
         }
         for (const id of JSON.parse(window.solarVm.take_wanted())) {
+          (window.solarCoreLog = window.solarCoreLog || []).push('want ' + id);
           fetchCoreTree(id).then((tree) => {
+            window.solarCoreLog.push('got ' + id + ' ' + [...tree].map(([k, v]) => k + ':' + (v ? v.length : 'null')).join(','));
             for (const [k, v] of [...tree].reverse()) window.solarVm.provide_core_source(k, v);
           });
         }
@@ -769,6 +803,7 @@ export async function startLua(opts) {
           if (!window.solarVm || m.t === 'init') {
             window.solarVm = new LuaVm(Date.now() / 1000);
             window.solarVm.set_run(/[?&]swirlhost=1/.test(location.search));
+            window.solarVm.set_screen(canvas.clientWidth || 800, canvas.clientHeight || 600);
           }
           window.solarVm.apply(raw);
         } catch (e) {
@@ -813,8 +848,24 @@ export async function startLua(opts) {
       if (window.solarVm && /[?&]swirlhost=1/.test(location.search)) {
         try {
           window.solarVm.update(dt, input.move[0], input.move[2], !!input.jump);
+          for (const l of JSON.parse(window.solarVm.logs())) (window.solarRustLogs = window.solarRustLogs || []).push(l);
           comparePos();
-          const rsOut = JSON.parse(window.solarVm.take_out());
+          const rsAll = JSON.parse(window.solarVm.take_out());
+          const rsOut = rsAll.filter((x) => JSON.parse(x).t === 'char');
+          const canon = (o) => JSON.stringify(Object.keys(o).sort().map((k) => [k, typeof o[k] === 'number' ? Math.round(o[k] * 100) / 100 : o[k]]));
+          const oc = (window.solarMsgCmp = window.solarMsgCmp || { js: 0, rs: 0, equal: 0, onlyJs: [], onlyRs: [] });
+          const jsO = jsOther.splice(0).map(canon);
+          const rsO = rsAll.map((x) => JSON.parse(x)).filter((x) => x.t !== 'char').map(canon);
+          oc.js += jsO.length;
+          oc.rs += rsO.length;
+          for (const x of jsO) {
+            const i = rsO.indexOf(x);
+            if (i >= 0) {
+              rsO.splice(i, 1);
+              oc.equal++;
+            } else if (oc.onlyJs.length < 5) oc.onlyJs.push(x);
+          }
+          for (const x of rsO) if (oc.onlyRs.length < 5) oc.onlyRs.push(x);
           const cc = (window.solarCharCmp = window.solarCharCmp || { js: 0, rs: 0, equal: 0, diff: [] });
           const jsOut = jsChars.splice(0);
           cc.js += jsOut.length;
