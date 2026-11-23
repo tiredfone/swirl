@@ -98,14 +98,18 @@ fn attach(dm: &mut DataModel, model: InstId, acc: InstId) {
     let _ = dm.set_parent(w, Some(handle));
 }
 
-fn wearable(dm: &mut DataModel, model: InstId, inst: InstId) {
+fn wearable(dm: &mut DataModel, model: InstId, inst: InstId, scale: Option<crate::r15::Scale>) {
     let class = match dm.get(inst) {
         Some(i) => i.class.clone(),
         None => return,
     };
     let name = dm.get(inst).map(|i| i.name.clone()).unwrap_or_default();
     if swirl_core::classes::is_a(&class, "Accoutrement") {
-        attach(dm, model, inst);
+        crate::r15::attach_accessory(dm, model, inst, scale);
+    } else if class == "Folder" && name.to_ascii_uppercase().starts_with("R15") {
+        dm.destroy(inst);
+    } else if class == "CharacterMesh" && dm.find_child(model, "UpperTorso", false).is_some() {
+        dm.destroy(inst);
     } else if class == "Decal" && name.to_ascii_lowercase().contains("face") {
         if let Some(head) = dm.find_child(model, "Head", false) {
             if let Some(old) = dm.find_child(head, "face", false) {
@@ -132,13 +136,13 @@ fn wearable(dm: &mut DataModel, model: InstId, inst: InstId) {
         let kids: Vec<InstId> = dm.get(inst).map(|i| i.children.clone()).unwrap_or_default();
         for c in kids {
             let _ = dm.set_parent(c, Some(model));
-            wearable(dm, model, c);
+            wearable(dm, model, c, scale);
         }
         dm.destroy(inst);
     }
 }
 
-pub fn apply(dm: &mut DataModel, model: InstId, look: &Look) {
+pub fn apply(dm: &mut DataModel, model: InstId, look: &Look, scale: Option<crate::r15::Scale>) {
     for (id, bytes) in &look.assets {
         let tree = match swirl_core::rbx::parse(bytes) {
             Ok(t) => t,
@@ -149,7 +153,7 @@ pub fn apply(dm: &mut DataModel, model: InstId, look: &Look) {
         };
         let made = dm.load_tree(&tree, model);
         for m in made {
-            wearable(dm, model, m);
+            wearable(dm, model, m, scale);
         }
     }
 }

@@ -101,37 +101,46 @@ fn add_joints(dm: &mut DataModel, model: InstId, torso: InstId, era: i32, parts:
     Ok(())
 }
 
-pub fn build(dm: &mut DataModel, workspace: InstId, player: InstId, name: &str, origin: [f64; 3], look: Option<&crate::appearance::Look>, era: i32) -> Result<Char, String> {
-    let model = dm.create_any("Model", None)?;
-    dm.set_prop_quiet(model, "Name", Val::Str(name.to_string()));
-    dm.get_mut_name(model, name);
-    let hum = dm.create_any("Humanoid", Some(model))?;
-    dm.set_prop_quiet(hum, "Name", Val::Str("Humanoid".into()));
-    dm.get_mut_name(hum, "Humanoid");
-    dm.set_prop_quiet(hum, "Health", Val::Num(100.0));
-    dm.set_prop_quiet(hum, "MaxHealth", Val::Num(100.0));
-    dm.set_prop_quiet(hum, "WalkSpeed", Val::Num(16.0));
-    dm.set_prop_quiet(hum, "JumpPower", Val::Num(50.0));
-    let (torso, torso_off) = make_part(dm, model, "Torso", [2.0, 2.0, 1.0], [0.0, 0.0, 0.0], origin, 23)?;
-    let mut parts = vec![(torso, torso_off)];
-    let defs: [(&str, [f64; 3], [f64; 3], i64); 5] = [
-        ("Head", [2.0, 1.0, 1.0], [0.0, 1.5, 0.0], 24),
-        ("Left Arm", [1.0, 2.0, 1.0], [-1.5, 0.0, 0.0], 24),
-        ("Right Arm", [1.0, 2.0, 1.0], [1.5, 0.0, 0.0], 24),
-        ("Left Leg", [1.0, 2.0, 1.0], [-0.5, -2.0, 0.0], 119),
-        ("Right Leg", [1.0, 2.0, 1.0], [0.5, -2.0, 0.0], 119),
-    ];
-    for (n, size, off, b) in defs {
-        let (id, o) = make_part(dm, model, n, size, off, origin, b)?;
-        parts.push((id, o));
-        if n == "Head" {
-            let mesh = dm.create_any("SpecialMesh", Some(id))?;
-            dm.set_prop_quiet(mesh, "MeshType", Val::Num(0.0));
-            dm.set_prop_quiet(mesh, "Scale", Val::Arr(vec![1.25, 1.25, 1.25]));
+pub fn build(dm: &mut DataModel, workspace: InstId, player: InstId, name: &str, origin: [f64; 3], look: Option<&crate::appearance::Look>, era: i32, r15: Option<(crate::r15::Scale, Vec<u8>)>) -> Result<(Char, Vec<(String, InstId)>), String> {
+    let is_r15 = r15.is_some();
+    let scale_of = r15.as_ref().map(|(s, _)| *s);
+    let (model, torso, parts, anim) = if let Some((sc, tpl)) = r15 {
+        let (ch, anim) = crate::r15::build(dm, workspace, player, name, origin, look, sc, &tpl)?;
+        (ch.model, ch.torso, ch.parts, anim)
+    } else {
+        let model = dm.create_any("Model", None)?;
+        dm.set_prop_quiet(model, "Name", Val::Str(name.to_string()));
+        dm.get_mut_name(model, name);
+        let hum = dm.create_any("Humanoid", Some(model))?;
+        dm.set_prop_quiet(hum, "Name", Val::Str("Humanoid".into()));
+        dm.get_mut_name(hum, "Humanoid");
+        dm.set_prop_quiet(hum, "Health", Val::Num(100.0));
+        dm.set_prop_quiet(hum, "MaxHealth", Val::Num(100.0));
+        dm.set_prop_quiet(hum, "WalkSpeed", Val::Num(16.0));
+        dm.set_prop_quiet(hum, "JumpPower", Val::Num(50.0));
+        let (torso, torso_off) = make_part(dm, model, "Torso", [2.0, 2.0, 1.0], [0.0, 0.0, 0.0], origin, 23)?;
+        let mut parts = vec![(torso, torso_off)];
+        let defs: [(&str, [f64; 3], [f64; 3], i64); 5] = [
+            ("Head", [2.0, 1.0, 1.0], [0.0, 1.5, 0.0], 24),
+            ("Left Arm", [1.0, 2.0, 1.0], [-1.5, 0.0, 0.0], 24),
+            ("Right Arm", [1.0, 2.0, 1.0], [1.5, 0.0, 0.0], 24),
+            ("Left Leg", [1.0, 2.0, 1.0], [-0.5, -2.0, 0.0], 119),
+            ("Right Leg", [1.0, 2.0, 1.0], [0.5, -2.0, 0.0], 119),
+        ];
+        for (n, size, off, b) in defs {
+            let (id, o) = make_part(dm, model, n, size, off, origin, b)?;
+            parts.push((id, o));
+            if n == "Head" {
+                let mesh = dm.create_any("SpecialMesh", Some(id))?;
+                dm.set_prop_quiet(mesh, "MeshType", Val::Num(0.0));
+                dm.set_prop_quiet(mesh, "Scale", Val::Arr(vec![1.25, 1.25, 1.25]));
+            }
         }
-    }
-    dm.set_prop_quiet(model, "PrimaryPart", Val::Ref(Some(torso)));
-    add_joints(dm, model, torso, era, &mut parts, origin)?;
+        dm.set_prop_quiet(model, "PrimaryPart", Val::Ref(Some(torso)));
+        add_joints(dm, model, torso, era, &mut parts, origin)?;
+        crate::r15::r6_attachments(dm, model);
+        (model, torso, parts, vec![])
+    };
     if let Some(l) = look {
         if let Some(c) = l.colors {
             let order = ["Head", "Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg"];
@@ -140,17 +149,23 @@ pub fn build(dm: &mut DataModel, workspace: InstId, player: InstId, name: &str, 
             dm.set_prop_quiet(bc, "Name", Val::Str("Body Colors".into()));
             dm.get_mut_name(bc, "Body Colors");
             for k in 0..6 {
-                if let Some(p) = dm.find_child(model, order[k], false) {
-                    brick_color(dm, p, c[k]);
+                if !is_r15 {
+                    if let Some(p) = dm.find_child(model, order[k], false) {
+                        brick_color(dm, p, c[k]);
+                    }
                 }
                 dm.set_prop_quiet(bc, props[k], Val::Num(c[k] as f64));
             }
         }
-        crate::appearance::apply(dm, model, l);
+        if is_r15 {
+            crate::r15::color_parts(dm, model);
+        }
+        crate::appearance::apply(dm, model, l, scale_of);
     }
     dm.set_parent(model, Some(workspace))?;
     dm.set_prop(player, "Character", Val::Ref(Some(model)))?;
-    Ok(Char { player, model, torso, parts, cf: id12(origin), vel: [0.0; 3], state: 7, seq: 1, j: None })
+    let cf = if is_r15 { cf_prop(dm, torso, "CFrame") } else { id12(origin) };
+    Ok((Char { player, model, torso, parts, cf, vel: [0.0; 3], state: 7, seq: 1, j: None }, anim))
 }
 
 pub fn assign_team(dm: &mut DataModel, player: InstId) {
@@ -180,7 +195,7 @@ pub fn assign_team(dm: &mut DataModel, player: InstId) {
     let _ = dm.set_prop(player, "TeamColor", col);
 }
 
-pub fn spawn_origin(dm: &DataModel, workspace: InstId, player: InstId) -> [f64; 3] {
+pub fn spawn_origin(dm: &DataModel, workspace: InstId, player: InstId) -> ([f64; 3], Option<InstId>) {
     let mut all = vec![];
     dm.descendants(workspace, &mut all);
     let spawns: Vec<InstId> = all
@@ -205,15 +220,21 @@ pub fn spawn_origin(dm: &DataModel, workspace: InstId, player: InstId) -> [f64; 
         }
     };
     let pool = if pool.is_empty() { spawns } else { pool };
-    if let Some(&s) = pool.first() {
+    let pick = if pool.is_empty() {
+        None
+    } else {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos() as usize).unwrap_or(0);
+        Some(pool[n % pool.len()])
+    };
+    if let Some(s) = pick {
         if let (Some(Val::Arr(cf)), Some(Val::Arr(sz))) = (dm.get_prop(s, "CFrame"), dm.get_prop(s, "Size")) {
             if cf.len() >= 12 && sz.len() >= 3 {
                 let top = cf[1] + cf[7].abs() * sz[1] / 2.0 + cf[6].abs() * sz[0] / 2.0 + cf[8].abs() * sz[2] / 2.0;
-                return [cf[0], top + 3.2, cf[2]];
+                return ([cf[0], top + 3.2, cf[2]], Some(s));
             }
         }
     }
-    [0.0, 5.0, 0.0]
+    ([0.0, 5.0, 0.0], None)
 }
 
 pub fn mul12(a: &[f64; 12], b: &[f64; 12]) -> [f64; 12] {
@@ -328,6 +349,32 @@ fn load_scripts(dm: &mut DataModel, model: InstId, path: &str, only: Option<&str
             if let Some(tray) = dm.find_child(gui, "Tray", false) {
                 let _ = dm.set_prop(tray, "Visible", Val::Bool(false));
             }
+        }
+    }
+}
+
+pub fn add_scripts_r15(dm: &mut DataModel, model: InstId) {
+    let dir = match CONTENT_DIR.get() {
+        Some(d) => d.clone(),
+        None => return,
+    };
+    load_scripts_except(dm, model, &format!("{}/character/humanoidAnimateLocalKeyframe.rbxm", dir), "Animate");
+    load_scripts(dm, model, &format!("{}/character/humanoidHealth.rbxm", dir), Some("Health"));
+    load_scripts(dm, model, &format!("{}/character/humanoidAnimateR15.rbxm", dir), None);
+}
+
+fn load_scripts_except(dm: &mut DataModel, model: InstId, path: &str, skip: &str) {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    let tree = match swirl_core::rbx::parse(&bytes) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    for m in dm.load_tree(&tree, model) {
+        if dm.name(m) == skip {
+            dm.destroy(m);
         }
     }
 }

@@ -19,7 +19,7 @@ const game = new Game(placeId, {
   log: (line) => lines.push(line.replace(/^\[place [^\]]+\] /, '')),
 });
 await game.start();
-await game.join(1, { id: 132, name: 'TestingAccount', membership: 0, age: 100, dev: true, perks: null, avatarType: 'R6', scale: null, animations: [] });
+await game.join(1, { id: +(process.env.UID || 132), name: 'TestingAccount', membership: 0, age: 100, dev: true, perks: null, avatarType: process.env.AVATAR || 'R6', scale: process.env.SCALE ? JSON.parse(process.env.SCALE) : null, animations: [] });
 if (process.env.RUNFILE) { await new Promise((r) => setTimeout(r, 2000)); game.runCode(fs0.readFileSync(process.env.RUNFILE, 'utf8'), 'parity'); }
 await new Promise((r) => setTimeout(r, ms));
 if (process.env.FINDCOIN) { const w = game.dm.root; const cs = w.descendants().filter((d) => d.props.get('Name') === 'Coin'); console.log('coins', cs.length, cs.slice(0,3).map((c) => { const p = []; for (let x = c; x; x = x.parent) p.push(x.props.get('Name')); return c.ClassName + ' ' + p.join('<'); }).join(' ; ')); }

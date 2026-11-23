@@ -80,6 +80,7 @@ pub struct Game {
     pub(crate) pre_logs: Vec<LogLine>,
     pub kicks: Vec<(InstId, String)>,
     pub(crate) last_sit: HashMap<InstId, f64>,
+    pub(crate) avatars: HashMap<InstId, (bool, [f64; 4])>,
 }
 
 impl Game {
@@ -172,7 +173,7 @@ impl Game {
                 host.scan_subtree(id);
             }
         }
-        let mut g = Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], anim_state: HashMap::new(), last_chat: HashMap::new(), api, job: String::new(), chat_log: vec![], last_report: HashMap::new(), mkt_ids: HashMap::new(), bought: HashMap::new(), receipt_busy: HashSet::new(), receipt_queue: HashMap::new(), receipt_wait: HashMap::new(), receipt_seq: 0, receipt_retry: vec![], mkt_window: HashMap::new(), physics, npcs: crate::npc::Npcs::new(), frame: 0, ph_cache: vec![], asm_sent: HashMap::new(), asm_seen: 0, asm_diff: None, ph_far: HashMap::new(), ph_n: HashMap::new(), flush_at: 0.0, allow_gear: true, pre_logs: vec![], kicks: vec![], last_sit: HashMap::new() };
+        let mut g = Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], anim_state: HashMap::new(), last_chat: HashMap::new(), api, job: String::new(), chat_log: vec![], last_report: HashMap::new(), mkt_ids: HashMap::new(), bought: HashMap::new(), receipt_busy: HashSet::new(), receipt_queue: HashMap::new(), receipt_wait: HashMap::new(), receipt_seq: 0, receipt_retry: vec![], mkt_window: HashMap::new(), physics, npcs: crate::npc::Npcs::new(), frame: 0, ph_cache: vec![], asm_sent: HashMap::new(), asm_seen: 0, asm_diff: None, ph_far: HashMap::new(), ph_n: HashMap::new(), flush_at: 0.0, allow_gear: true, pre_logs: vec![], kicks: vec![], last_sit: HashMap::new(), avatars: HashMap::new() };
         g.scan_npcs_all();
         for _ in 0..3 {
             g.host.tick(0.0);
@@ -252,6 +253,8 @@ impl Game {
             (player, snap)
         };
         self.looks.insert(player, look);
+        let sc = |k: &str| user.scale.get(k).and_then(|v| v.as_f64()).unwrap_or(1.0);
+        self.avatars.insert(player, (user.r15 && self.era == 2018, [sc("width"), sc("height"), sc("depth"), sc("head")]));
         if self.era == 2018 {
             self.receipt_retry.push((self.t + 8.0, player));
         }
@@ -273,11 +276,49 @@ impl Game {
         {
             let mut dm = self.dm.borrow_mut();
             let ws = dm.services["Workspace"];
-            let origin = character::spawn_origin(&dm, ws, player);
+            let (origin, spawn_loc) = character::spawn_origin(&dm, ws, player);
             let look = self.looks.get(&player);
-            match character::build(&mut dm, ws, player, name, origin, look, self.era) {
-                Ok(ch) => {
-                    character::add_scripts(&mut dm, ch.model, self.era);
+            let (is_r15, sc) = self.avatars.get(&player).copied().unwrap_or((false, [1.0; 4]));
+            let tpl = if is_r15 { character::chocolate_dir().and_then(|d| std::fs::read(format!("{}/character/characterR15V2.rbxm", d)).ok()) } else { None };
+            let r15 = tpl.map(|t| (sc, t));
+            let is_r15 = r15.is_some();
+            match character::build(&mut dm, ws, player, name, origin, look, self.era, r15) {
+                Ok((ch, anim)) => {
+                    if let Some(sp) = spawn_loc {
+                        if let Some(Val::Num(d)) = dm.get_prop(sp, "Duration").cloned() {
+                            if d > 0.0 {
+                                if let Ok(ff) = dm.create_any("ForceField", Some(ch.model)) {
+                                    dm.set_prop_quiet(ff, "Name", Val::Str("ForceField".into()));
+                                    dm.get_mut_name(ff, "ForceField");
+                                    self.debris.push((self.t + d, ff));
+                                }
+                            }
+                        }
+                    }
+                    if is_r15 {
+                        character::add_scripts_r15(&mut dm, ch.model);
+                        if let Some(animate) = dm.find_child(ch.model, "Animate", false) {
+                            for (slot, sv) in anim {
+                                let target = match dm.find_child(animate, &slot, false) {
+                                    Some(t) => t,
+                                    None => continue,
+                                };
+                                let kids: Vec<InstId> = dm.get(sv).map(|i| i.children.clone()).unwrap_or_default();
+                                if kids.is_empty() {
+                                    continue;
+                                }
+                                let old: Vec<InstId> = dm.get(target).map(|i| i.children.clone()).unwrap_or_default();
+                                for o in old {
+                                    dm.destroy(o);
+                                }
+                                for k in kids {
+                                    let _ = dm.set_parent(k, Some(target));
+                                }
+                            }
+                        }
+                    } else {
+                        character::add_scripts(&mut dm, ch.model, self.era);
+                    }
                     if self.era == 2018 {
                         character::copy_character_scripts(&mut dm, ch.model);
                     }

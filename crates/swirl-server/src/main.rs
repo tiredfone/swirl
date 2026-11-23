@@ -109,6 +109,9 @@ fn clean_hex(v: &J) -> Option<String> {
 }
 
 fn user_from(info: &J) -> UserInfo {
+    let dev_avatar = std::env::var("SWIRL_DEV_R15").is_ok();
+    let dev_scale: J = if dev_avatar { std::env::var("SWIRL_DEV_SCALE").ok().and_then(|v| serde_json::from_str(&v).ok()).unwrap_or(J::Null) } else { J::Null };
+    let info = &if dev_scale.is_object() { let mut i = info.clone(); i["scale"] = dev_scale; i } else { info.clone() };
     let perks = &info["perks"];
     let badge = perks["badge"].as_str().filter(|b| b.starts_with("/asset/?id=") && b[11..].len() <= 12 && b[11..].bytes().all(|c| c.is_ascii_digit()) && b.len() > 11).unwrap_or("").to_string();
     let mut scale = json!({"height": 1.0, "width": 1.0, "depth": 1.0, "head": 1.0});
@@ -129,7 +132,7 @@ fn user_from(info: &J) -> UserInfo {
         membership: info["membership"].as_i64().unwrap_or(0),
         age: info["age"].as_i64().unwrap_or(0),
         dev: info["dev"].as_bool().unwrap_or(false),
-        r15: info["avatarType"] == "R15",
+        r15: info["avatarType"] == "R15" || dev_avatar,
         scale,
         perks_badge: badge,
         perks_chat: clean_hex(&perks["chatColor"]),
