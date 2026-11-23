@@ -538,6 +538,39 @@ fn virtual_get(d: &DataModel, id: InstId, class: &str, key: &str) -> Option<Wire
         let found = d.get(teams)?.children.iter().copied().find(|c| d.get(*c).map(|i| i.class == "Team").unwrap_or(false) && d.get_prop(*c, "TeamColor").cloned() == tc);
         return Some(found.map(Wire::I).unwrap_or(Wire::Nil));
     }
+    if class == "Humanoid" && matches!(key, "Torso" | "LeftLeg" | "RightLeg" | "RootPart" | "SeatPart") {
+        let model = d.get(id).and_then(|i| i.parent);
+        let found = |n: &str| model.and_then(|m| d.find_child(m, n, false));
+        let r = match key {
+            "Torso" if d.era == 2018 => found("HumanoidRootPart").or_else(|| found("Torso")),
+            "Torso" => found("Torso").or_else(|| found("HumanoidRootPart")),
+            "RootPart" => found("HumanoidRootPart").or_else(|| found("Torso")),
+            "LeftLeg" => found("Left Leg"),
+            "RightLeg" => found("Right Leg"),
+            _ => {
+                let torso = found("Torso").or_else(|| found("HumanoidRootPart"));
+                let mut seat = None;
+                if let (Some(t), Some(m)) = (torso, model) {
+                    let _ = m;
+                    let ws = d.services.get("Workspace").copied();
+                    let mut all = vec![];
+                    if let Some(ws) = ws {
+                        d.descendants(ws, &mut all);
+                    }
+                    for w in all {
+                        if d.get(w).map(|i| i.name == "SeatWeld").unwrap_or(false) && matches!(d.get_prop(w, "Part1"), Some(Val::Ref(Some(p))) if *p == t) {
+                            if let Some(Val::Ref(Some(s))) = d.get_prop(w, "Part0") {
+                                seat = Some(*s);
+                            }
+                            break;
+                        }
+                    }
+                }
+                seat
+            }
+        };
+        return Some(r.map(Wire::I).unwrap_or(Wire::Nil));
+    }
     if class == "Player" && (key == "Backpack" || key == "PlayerGui") {
         return Some(d.find_child_of_class(id, key).map(Wire::I).unwrap_or(Wire::Nil));
     }

@@ -1,0 +1,45 @@
+import math,sys
+rid=[0]
+def ref():
+    rid[0]+=1
+    return f"RBX{rid[0]}"
+def rot(rx,ry,rz):
+    cx,sx,cy,sy,cz,sz=math.cos(rx),math.sin(rx),math.cos(ry),math.sin(ry),math.cos(rz),math.sin(rz)
+    return [cy*cz,-cy*sz,sy,cz*sx*sy+cx*sz,cx*cz-sx*sy*sz,-cy*sx,sx*sz-cx*cz*sy,cz*sx+cx*sy*sz,cx*cy]
+def cfx(pos,r=None):
+    R=r or [1,0,0,0,1,0,0,0,1]
+    return "".join(f"<{k}>{v}</{k}>" for k,v in zip(["X","Y","Z","R00","R01","R02","R10","R11","R12","R20","R21","R22"],list(pos)+R))
+def part(name,pos,size,anchored,extra="",r=None,kids=""):
+    r=r or ref()
+    return f'<Item class="Part" referent="{r}"><Properties><string name="Name">{name}</string><CoordinateFrame name="CFrame">{cfx(pos)}</CoordinateFrame><Vector3 name="size"><X>{size[0]}</X><Y>{size[1]}</Y><Z>{size[2]}</Z></Vector3><bool name="Anchored">{"true" if anchored else "false"}</bool>{extra}</Properties>{kids}</Item>',r
+PI=math.pi
+def A(x,y,z,rx,ry,rz):
+    return cfx((x,y,z),rot(rx,ry,rz))
+joints=[("Neck","Head",A(0,1,0,-PI/2,0,PI),A(0,-0.5,0,-PI/2,0,PI)),("Right Shoulder","Right Arm",A(1,0.5,0,0,PI/2,0),A(-0.5,0.5,0,0,PI/2,0)),("Left Shoulder","Left Arm",A(-1,0.5,0,0,-PI/2,0),A(0.5,0.5,0,0,-PI/2,0)),("Right Hip","Right Leg",A(1,-1,0,0,PI/2,0),A(0.5,1,0,0,PI/2,0)),("Left Hip","Left Leg",A(-1,-1,0,0,-PI/2,0),A(-0.5,1,0,0,-PI/2,0))]
+specs={"Head":((0,4.5,0),(2,1,1)),"Torso":((0,3,0),(2,2,1)),"Left Arm":((-1.5,3,0),(1,2,1)),"Right Arm":((1.5,3,0),(1,2,1)),"Left Leg":((-0.5,1,0),(1,2,1)),"Right Leg":((0.5,1,0),(1,2,1))}
+def npc(name,ox,oz):
+    refs={}
+    ps={}
+    for n,(p,s) in specs.items():
+        r=ref();refs[n]=r;ps[n]=(p,s)
+    items=[]
+    for n,(p,s) in ps.items():
+        kids=""
+        if n=="Torso":
+            for jn,p1,c0,c1 in joints:
+                kids+=f'<Item class="Motor6D" referent="{ref()}"><Properties><string name="Name">{jn}</string><Ref name="Part0">{refs["Torso"]}</Ref><Ref name="Part1">{refs[p1]}</Ref><CoordinateFrame name="C0">{c0}</CoordinateFrame><CoordinateFrame name="C1">{c1}</CoordinateFrame></Properties></Item>'
+        it,_=part(n,(p[0]+ox,p[1],p[2]+oz),s,False,"",refs[n],kids)
+        items.append(it)
+    items.append(f'<Item class="Humanoid" referent="{ref()}"><Properties><string name="Name">Humanoid</string></Properties></Item>')
+    return f'<Item class="Model" referent="{ref()}"><Properties><string name="Name">{name}</string></Properties>{"".join(items)}</Item>'
+out=[part("Baseplate",(0,-1,0),(300,2,300),True)[0]]
+seat,_=part("TheSeat",(0,0.5,0),(2,1,2),True)
+seat=seat.replace('class="Part"','class="Seat"')
+out.append(seat)
+out.append(npc("Dummy",-10,0))
+tool_h,_=part("Handle",(30,1,30),(1,1,4),False)
+tool='<Item class="Tool" referent="RBT"><Properties><string name="Name">Stick</string><bool name="CanBeDropped">true</bool></Properties>'+tool_h+'</Item>'
+out.append(tool)
+script='<Item class="Script" referent="RBS"><Properties><string name="Name">T</string><string name="Source">local m = workspace.Dummy\nlocal h = m.Humanoid\nlocal seat = workspace.TheSeat\nh.Seated:connect(function(a, s) print("seated", a, s and s.Name) end)\nseat.Changed:connect(function(p) if p == "Occupant" then print("occupant", seat.Occupant and seat.Occupant.Parent.Name) end end)\nseat.Touched:connect(function(o) print("touched", o.Name, o:GetDebugId()) end)\nwait(1)\nh:MoveTo(Vector3.new(0, 3, 0))\nwait(4)\nprint("seatpart", h.SeatPart and h.SeatPart.Name, h.Sit)\nwait(1)\nh.Jump = true\nwait(2)\nprint("after", h.SeatPart, h.Sit)\nfor _, c in ipairs(workspace:GetChildren()) do print("child", c.Name, c.ClassName) end\nh:EquipTool(workspace.Stick)\nwait(1)\nprint("tool", m.Stick.Parent.Name, m:FindFirstChild("Right Arm"):FindFirstChild("RightGrip") ~= nil)\nwait(1)\nh:MoveTo(Vector3.new(10, 3, 5))\nwait(3)\nh:UnequipTools()\nprint("unequipped", m:FindFirstChild("Stick"), workspace:FindFirstChild("Stick"))\nwait(1)\nprint("done", m.Stick.Parent, m.Stick.Name)</string></Properties></Item>'
+xml='<roblox version="4"><Item class="Workspace" referent="RBW"><Properties><string name="Name">Workspace</string></Properties>'+"".join(out)+script+'</Item></roblox>'
+open(sys.argv[1],'w').write(xml)

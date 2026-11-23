@@ -8,7 +8,7 @@ use swirl_core::classes;
 use swirl_core::instance::{Change, DataModel, InstId, Val};
 use swirl_lua::host::Wire;
 use swirl_lua::{wire_from_json, wire_to_json, Host, LogLine, Req};
-use crate::touch::{overlap, Box3};
+use crate::touch::Box3;
 
 #[derive(Clone, Default, Debug)]
 pub struct UserInfo {
@@ -79,6 +79,7 @@ pub struct Game {
     pub allow_gear: bool,
     pub(crate) pre_logs: Vec<LogLine>,
     pub kicks: Vec<(InstId, String)>,
+    pub(crate) last_sit: HashMap<InstId, f64>,
 }
 
 impl Game {
@@ -148,6 +149,14 @@ impl Game {
         }
         let mut physics = swirl_physics::Physics::new();
         physics.attach_workspace(&mut dm, ws);
+        if let Some(t) = dm.find_child_of_class(ws, "Terrain") {
+            let mut td = swirl_physics::terrain::TerrainData::new(era);
+            if let Some(Val::Str(raw)) = dm.get(t).and_then(|i| i.props.get("ChocolateTerrain")) {
+                let _ = td.decode(raw);
+            }
+            td.take_dirty();
+            physics.set_terrain(t, td);
+        }
         dm.journal.clear();
         physics.reset_cursor();
         let physics = Rc::new(RefCell::new(physics));
@@ -163,12 +172,19 @@ impl Game {
                 host.scan_subtree(id);
             }
         }
-        let mut g = Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], anim_state: HashMap::new(), last_chat: HashMap::new(), api, job: String::new(), chat_log: vec![], last_report: HashMap::new(), mkt_ids: HashMap::new(), bought: HashMap::new(), receipt_busy: HashSet::new(), receipt_queue: HashMap::new(), receipt_wait: HashMap::new(), receipt_seq: 0, receipt_retry: vec![], mkt_window: HashMap::new(), physics, npcs: crate::npc::Npcs::new(), frame: 0, ph_cache: vec![], asm_sent: HashMap::new(), asm_seen: 0, asm_diff: None, ph_far: HashMap::new(), ph_n: HashMap::new(), flush_at: 0.0, allow_gear: true, pre_logs: vec![], kicks: vec![] };
+        let mut g = Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], anim_state: HashMap::new(), last_chat: HashMap::new(), api, job: String::new(), chat_log: vec![], last_report: HashMap::new(), mkt_ids: HashMap::new(), bought: HashMap::new(), receipt_busy: HashSet::new(), receipt_queue: HashMap::new(), receipt_wait: HashMap::new(), receipt_seq: 0, receipt_retry: vec![], mkt_window: HashMap::new(), physics, npcs: crate::npc::Npcs::new(), frame: 0, ph_cache: vec![], asm_sent: HashMap::new(), asm_seen: 0, asm_diff: None, ph_far: HashMap::new(), ph_n: HashMap::new(), flush_at: 0.0, allow_gear: true, pre_logs: vec![], kicks: vec![], last_sit: HashMap::new() };
         g.scan_npcs_all();
         for _ in 0..3 {
             g.host.tick(0.0);
         }
         Ok(g)
+    }
+
+    fn terrain_init(&self) -> J {
+        match self.physics.borrow().terrain.as_ref() {
+            Some(t) if !t.chunks.is_empty() => J::String(t.encode(None)),
+            _ => J::Null,
+        }
     }
 
     pub fn join(&mut self, name: &str, user: Option<i64>, look: crate::appearance::Look) -> (J, InstId) {
@@ -247,7 +263,7 @@ impl Game {
         self.spawn_character(player, name);
         let msg = json!({
             "t": "init", "place": self.place_id, "era": self.era, "you": player,
-            "user": { "id": uid, "name": name }, "snap": snap, "asm": [], "anims": [], "terrain": J::Null
+            "user": { "id": uid, "name": name }, "snap": snap, "asm": [], "anims": [], "terrain": self.terrain_init()
         });
         (msg, player)
     }
@@ -280,6 +296,7 @@ impl Game {
         }
         if let Some(m) = spawned {
             self.physics.borrow_mut().exclude_model(&self.dm.borrow(), m);
+            self.track_char(m, Some(player));
             self.host.scan_subtree(m);
             self.host.scan_subtree(player);
         }
@@ -382,16 +399,24 @@ impl Game {
     }
 
     pub fn equip(&mut self, player: InstId, tool: InstId) {
-        let model = match self.char_of(player) {
-            Some(m) => m,
-            None => return,
-        };
+        if let Some(model) = self.char_of(player) {
+            self.equip_in(Some(player), model, tool);
+        }
+    }
+
+    pub fn unequip(&mut self, player: InstId, tool: InstId) {
+        if let Some(model) = self.char_of(player) {
+            self.unequip_in(Some(player), model, tool);
+        }
+    }
+
+    pub fn equip_in(&mut self, player: Option<InstId>, model: InstId, tool: InstId) {
         let others: Vec<InstId> = {
             let dm = self.dm.borrow();
             dm.get(model).map(|m| m.children.iter().copied().filter(|c| *c != tool && dm.get(*c).map(|i| i.class == "Tool").unwrap_or(false)).collect()).unwrap_or_default()
         };
         for o in others {
-            self.unequip(player, o);
+            self.unequip_in(player, model, o);
         }
         let old_parent = self.dm.borrow().get(tool).and_then(|i| i.parent);
         {
@@ -407,7 +432,7 @@ impl Game {
             let mut dm = self.dm.borrow_mut();
             let requires = !matches!(dm.get_prop(tool, "RequiresHandle"), Some(Val::Bool(false)));
             let handle = dm.find_child(tool, "Handle", false);
-            let arm = character::arm_of(&dm, model);
+            let arm = character::arm_of(&dm, model).or_else(|| dm.find_child(model, "RightHand", false));
             match (requires, handle, arm) {
                 (true, Some(h), Some(a)) if dm.get(h).map(|i| swirl_core::classes::is_a(&i.class, "BasePart")).unwrap_or(false) => {
                     if let Some(old) = dm.find_child(a, "RightGrip", false) {
@@ -418,15 +443,20 @@ impl Game {
                     dm.get_mut_name(w, "RightGrip");
                     dm.set_prop_quiet(w, "Part0", Val::Ref(Some(a)));
                     dm.set_prop_quiet(w, "Part1", Val::Ref(Some(h)));
-                    dm.set_prop_quiet(w, "C0", Val::Arr(character::RIGHT_GRIP_C0.to_vec()));
+                    let c0 = if dm.name(a) == "RightHand" {
+                        match dm.find_child(a, "RightGripAttachment", false).and_then(|g| dm.get_prop(g, "CFrame").cloned()) {
+                            Some(Val::Arr(v)) if v.len() == 12 => v,
+                            _ => swirl_physics::cf::angles(-std::f64::consts::FRAC_PI_2, 0.0, 0.0).iter().enumerate().map(|(i, x)| if i == 1 { -0.15 } else { *x }).collect(),
+                        }
+                    } else {
+                        character::RIGHT_GRIP_C0.to_vec()
+                    };
+                    dm.set_prop_quiet(w, "C0", Val::Arr(c0));
                     let grip = character::cf_prop(&dm, tool, "Grip");
                     dm.set_prop_quiet(w, "C1", Val::Arr(grip.to_vec()));
                     let _ = dm.set_parent(w, Some(a));
                     dm.set_prop_quiet(h, "CanCollide", Val::Bool(false));
                     dm.set_prop_quiet(h, "Anchored", Val::Bool(false));
-                    if let Some(ch) = self.chars.get(&model) {
-                        character::sync_tools(&mut dm, ch);
-                    }
                     Some((w, a))
                 }
                 _ => None,
@@ -436,15 +466,14 @@ impl Game {
             self.host.notify_parent(w, None, Some(a));
         }
         self.dirty.insert(model);
-        let mouse = self.mouse_of(player);
-        self.host.fire(tool, "Equipped", vec![Wire::I(mouse)]);
+        if let Some(n) = self.npcs.get_mut(&model) {
+            n.dirty = true;
+        }
+        let mouse = player.map(|p| Wire::I(self.mouse_of(p))).unwrap_or(Wire::Nil);
+        self.host.fire(tool, "Equipped", vec![mouse]);
     }
 
-    pub fn unequip(&mut self, player: InstId, tool: InstId) {
-        let model = match self.char_of(player) {
-            Some(m) => m,
-            None => return,
-        };
+    pub fn unequip_in(&mut self, player: Option<InstId>, model: InstId, tool: InstId) {
         let bp = {
             let mut dm = self.dm.borrow_mut();
             if dm.get(tool).and_then(|i| i.parent) != Some(model) {
@@ -455,14 +484,22 @@ impl Game {
                     dm.destroy(g);
                 }
             }
-            dm.find_child_of_class(player, "Backpack")
+            player.and_then(|p| dm.find_child_of_class(p, "Backpack"))
         };
         self.host.fire(tool, "Unequipped", vec![]);
         if let Some(b) = bp {
             let _ = self.dm.borrow_mut().set_parent(tool, Some(b));
             self.host.notify_parent(tool, Some(model), Some(b));
+        } else if player.is_some() {
+            self.dm.borrow_mut().destroy(tool);
+        } else {
+            let _ = self.dm.borrow_mut().set_parent(tool, None);
+            self.host.notify_parent(tool, Some(model), None);
         }
         self.dirty.insert(model);
+        if let Some(n) = self.npcs.get_mut(&model) {
+            n.dirty = true;
+        }
     }
 
     fn drop_tool(&mut self, player: InstId, tool: InstId) {
@@ -483,13 +520,16 @@ impl Game {
                     dm.destroy(g);
                 }
             }
-            if let (Some(h), Some(c)) = (dm.find_child(tool, "Handle", false), self.chars.get(&model)) {
-                let f = [c.cf[0] - c.cf[5] * 3.0, c.cf[1] + 2.0, c.cf[2] - c.cf[11] * 3.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+            if let (Some(h), Some(c)) = (dm.find_child(tool, "Handle", false), self.npcs.get(&model).map(|n| n.torso_cf)) {
+                let f = [c[0] - c[5] * 3.0, c[1] + 2.0, c[2] - c[11] * 3.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
                 dm.set_prop_quiet(h, "CFrame", Val::Arr(f.to_vec()));
                 dm.set_prop_quiet(h, "CanCollide", Val::Bool(true));
             }
             dm.services["Workspace"]
         };
+        if let Some(n) = self.npcs.get_mut(&model) {
+            n.dirty = true;
+        }
         self.host.fire(tool, "Unequipped", vec![]);
         let _ = self.dm.borrow_mut().set_parent(tool, Some(ws));
         self.host.notify_parent(tool, Some(model), Some(ws));
@@ -649,6 +689,7 @@ impl Game {
         for m in models {
             dm.destroy(m);
             self.chars.remove(&m);
+            self.npcs.shift_remove(&m);
         }
         dm.destroy(player);
         self.pending.remove(&player);
@@ -932,22 +973,8 @@ impl Game {
             };
             let seq = v["s"].as_i64().unwrap_or(0);
             let state = v["st"].as_u64().unwrap_or(7) as u8;
-            let model = match self.chars.iter().find(|(_, c)| c.player == player) {
-                Some((m, _)) => *m,
-                None => return,
-            };
-            let mut dm = self.dm.borrow_mut();
-            let ch = self.chars.get_mut(&model).unwrap();
-            if seq < ch.seq {
-                return;
-            }
-            let mut c12 = [0.0; 12];
-            c12.copy_from_slice(&cf);
-            character::apply_cf(&mut dm, ch, c12);
-            ch.vel = [vel[0], vel[1], vel[2]];
-            ch.state = state;
-            ch.j = arr("j", 4).map(|a| [a[0].clamp(-7.0, 7.0), a[1].clamp(-7.0, 7.0), a[2].clamp(-7.0, 7.0), a[3].clamp(-7.0, 7.0)]);
-            self.dirty.insert(model);
+            let ang = arr("j", 4).map(|a| [a[0], a[1], a[2], a[3]]);
+            self.char_message(player, cf, [vel[0], vel[1], vel[2]], seq, state, ang);
         }
     }
 
@@ -971,6 +998,7 @@ impl Game {
             for m in old {
                 dm.destroy(m);
                 self.chars.remove(&m);
+                self.npcs.shift_remove(&m);
                 self.dead.remove(&m);
             }
             dm.get(player).map(|i| i.name.clone()).unwrap_or_default()
@@ -1043,22 +1071,32 @@ impl Game {
                 Req::LoadCharacter(p) => self.respawn(p),
                 Req::Debris(i, s) => self.debris.push((self.t + s, i)),
                 Req::EquipTool(h, t) => {
-                    let owner = self.chars.values().find(|c| self.dm.borrow().find_child_of_class(c.model, "Humanoid") == Some(h)).map(|c| c.player);
-                    if let Some(p) = owner {
-                        if self.tool_owned(p, t) {
-                            self.equip(p, t);
+                    let model = self.dm.borrow().get(h).and_then(|i| i.parent);
+                    if let Some(m) = model {
+                        let owner = self.npcs.get(&m).map(|n| n.owner);
+                        match owner {
+                            Some(Some(p)) => {
+                                if self.tool_owned(p, t) {
+                                    self.equip(p, t);
+                                }
+                            }
+                            Some(None) => self.equip_in(None, m, t),
+                            None => {}
                         }
                     }
                 }
                 Req::UnequipTools(h) => {
-                    let owner = self.chars.values().find(|c| self.dm.borrow().find_child_of_class(c.model, "Humanoid") == Some(h)).map(|c| (c.player, c.model));
-                    if let Some((p, m)) = owner {
-                        let tools: Vec<InstId> = {
-                            let dm = self.dm.borrow();
-                            dm.get(m).map(|i| i.children.iter().copied().filter(|c| dm.get(*c).map(|x| x.class == "Tool").unwrap_or(false)).collect()).unwrap_or_default()
-                        };
-                        for t in tools {
-                            self.unequip(p, t);
+                    let model = self.dm.borrow().get(h).and_then(|i| i.parent);
+                    if let Some(m) = model {
+                        let owner = self.npcs.get(&m).map(|n| n.owner);
+                        if let Some(owner) = owner {
+                            let tools: Vec<InstId> = {
+                                let dm = self.dm.borrow();
+                                dm.get(m).map(|i| i.children.iter().copied().filter(|c| dm.get(*c).map(|x| x.class == "Tool").unwrap_or(false)).collect()).unwrap_or_default()
+                            };
+                            for t in tools {
+                                self.unequip_in(owner, m, t);
+                            }
                         }
                     }
                 }
@@ -1084,6 +1122,11 @@ impl Game {
             }
         }
         self.step_physics();
+        let tkeys = self.physics.borrow_mut().terrain_flush();
+        if !tkeys.is_empty() {
+            let d = self.physics.borrow().terrain.as_ref().map(|t| t.encode(Some(&tkeys))).unwrap_or_default();
+            self.remote_out.push((vec![], json!({"t": "terrain", "d": d})));
+        }
         let due: Vec<InstId> = self.debris.iter().filter(|(t, _)| *t <= self.t).map(|(_, i)| *i).collect();
         if !due.is_empty() {
             self.debris.retain(|(t, _)| *t > self.t);
@@ -1092,27 +1135,13 @@ impl Game {
                 dm.destroy(i);
             }
         }
-        let mut died: Vec<(InstId, InstId)> = vec![];
         let mut respawn: Vec<InstId> = vec![];
-        {
-            let dm = self.dm.borrow();
-            for (m, c) in self.chars.iter() {
-                if self.dead.contains_key(m) {
-                    if self.dead[m] <= self.t {
-                        respawn.push(c.player);
-                    }
-                    continue;
-                }
-                if let Some(h) = dm.get(*m).and_then(|mi| mi.children.iter().copied().find(|k| dm.get(*k).map(|i| i.class == "Humanoid").unwrap_or(false))) {
-                    if matches!(dm.get_prop(h, "Health"), Some(Val::Num(x)) if *x <= 0.0) {
-                        died.push((*m, h));
-                    }
+        for (m, c) in self.chars.iter() {
+            if let Some(at) = self.dead.get(m) {
+                if *at <= self.t {
+                    respawn.push(c.player);
                 }
             }
-        }
-        for (m, h) in died {
-            self.dead.insert(m, self.t + 5.0);
-            self.host.fire(h, "Died", vec![]);
         }
         for p in respawn {
             self.respawn(p);
@@ -1122,128 +1151,6 @@ impl Game {
                 let args = if name == "Stepped" { vec![Wire::N(self.t), Wire::N(dt)] } else { vec![Wire::N(dt)] };
                 self.host.fire(id, name, args);
             }
-        }
-        if self.spawn_refresh <= self.t {
-            self.spawn_refresh = self.t + 2.0;
-            let dm = self.dm.borrow();
-            let ws = dm.services["Workspace"];
-            let mut all = vec![];
-            dm.descendants(ws, &mut all);
-            self.spawn_cache = all
-                .into_iter()
-                .filter(|id| dm.get(*id).map(|i| i.class == "SpawnLocation").unwrap_or(false) && matches!(dm.get_prop(*id, "AllowTeamChangeOnTouch"), Some(Val::Bool(true))) && !matches!(dm.get_prop(*id, "Neutral"), Some(Val::Bool(true))))
-                .collect();
-        }
-        if self.loose_refresh <= self.t {
-            self.loose_refresh = self.t + 1.0;
-            let dm = self.dm.borrow();
-            let ws = dm.services["Workspace"];
-            let mut all = vec![];
-            dm.descendants(ws, &mut all);
-            self.loose = all
-                .into_iter()
-                .filter(|id| {
-                    let h = match dm.get(*id) {
-                        Some(h) if h.name == "Handle" && swirl_core::classes::is_a(&h.class, "BasePart") => h,
-                        _ => return false,
-                    };
-                    match h.parent.and_then(|t| dm.get(t)) {
-                        Some(t) => t.class == "Tool" && !t.parent.map(|p| self.chars.contains_key(&p)).unwrap_or(false),
-                        None => false,
-                    }
-                })
-                .collect();
-        }
-        let mut pickups: Vec<(InstId, InstId)> = vec![];
-        if !self.loose.is_empty() {
-            let dm = self.dm.borrow();
-            for h in self.loose.iter().copied() {
-                let tool = match dm.get(h).and_then(|i| i.parent) {
-                    Some(t) if dm.get(t).map(|i| i.class == "Tool" && !i.destroyed).unwrap_or(false) => t,
-                    _ => continue,
-                };
-                if self.chars.contains_key(&dm.get(tool).and_then(|i| i.parent).unwrap_or(0)) {
-                    continue;
-                }
-                let hb = match Self::box_of(&dm, h) {
-                    Some(b) => b,
-                    None => continue,
-                };
-                for (m, c) in self.chars.iter() {
-                    if self.dead.contains_key(m) {
-                        continue;
-                    }
-                    if c.parts.iter().any(|(cp, _)| Self::box_of(&dm, *cp).map(|cb| overlap(&hb, &cb)).unwrap_or(false)) {
-                        pickups.push((c.player, tool));
-                        break;
-                    }
-                }
-            }
-        }
-        for (p, tool) in pickups {
-            let bp = self.dm.borrow().find_child_of_class(p, "Backpack");
-            let old = self.dm.borrow().get(tool).and_then(|i| i.parent);
-            if let Some(b) = bp {
-                let _ = self.dm.borrow_mut().set_parent(tool, Some(b));
-                self.host.notify_parent(tool, old, Some(b));
-                self.equip(p, tool);
-            }
-        }
-        let touch_parts: Vec<InstId> = {
-            let mut v = self.host.subscribed("Touched");
-            v.extend(self.spawn_cache.iter().copied());
-            v.sort();
-            v.dedup();
-            v
-        };
-        let end_parts: Vec<InstId> = self.host.subscribed("TouchEnded");
-        if !touch_parts.is_empty() || !end_parts.is_empty() {
-            let mut now: HashSet<(InstId, InstId)> = HashSet::new();
-            {
-                let dm = self.dm.borrow();
-                let mut watch: Vec<InstId> = touch_parts.clone();
-                watch.extend(end_parts.iter().copied());
-                watch.sort();
-                watch.dedup();
-                for p in watch {
-                    let pb = match Self::box_of(&dm, p) {
-                        Some(b) => b,
-                        None => continue,
-                    };
-                    for (m, c) in self.chars.iter() {
-                        if self.dead.contains_key(m) {
-                            continue;
-                        }
-                        for (cp, _) in c.parts.iter() {
-                            if let Some(cb) = Self::box_of(&dm, *cp) {
-                                if overlap(&pb, &cb) {
-                                    now.insert((p, *cp));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            for (p, cp) in now.difference(&self.touching).copied().collect::<Vec<_>>() {
-                if self.spawn_cache.contains(&p) {
-                    let owner = self.chars.values().find(|c| c.parts.iter().any(|(id, _)| *id == cp)).map(|c| c.player);
-                    if let Some(o) = owner {
-                        let mut dm = self.dm.borrow_mut();
-                        let col = dm.get_prop(p, "TeamColor").cloned();
-                        if let Some(col) = col {
-                            let _ = dm.set_prop(o, "TeamColor", col);
-                            let _ = dm.set_prop(o, "Neutral", Val::Bool(false));
-                        }
-                    }
-                }
-                if self.host.subscribed("Touched").contains(&p) {
-                    self.host.fire(p, "Touched", vec![Wire::I(cp)]);
-                }
-            }
-            for (p, cp) in self.touching.difference(&now).copied().collect::<Vec<_>>() {
-                self.host.fire(p, "TouchEnded", vec![Wire::I(cp)]);
-            }
-            self.touching = now;
         }
         let mut logs = std::mem::take(&mut self.pre_logs);
         logs.extend(self.host.take_logs());
@@ -1272,9 +1179,20 @@ impl Game {
             if !alive {
                 continue;
             }
+            let (ca, cb) = {
+                let dm = self.dm.borrow();
+                let ph = self.physics.borrow();
+                (swirl_physics::humanoid::live_character_of(&ph, &dm, t.a), swirl_physics::humanoid::live_character_of(&ph, &dm, t.b))
+            };
+            if ca.is_some() && ca == cb {
+                continue;
+            }
             let ev = if t.started { "Touched" } else { "TouchEnded" };
             self.host.fire(t.a, ev, vec![Wire::I(t.b)]);
             self.host.fire(t.b, ev, vec![Wire::I(t.a)]);
+            if t.started {
+                self.handle_touch_started(t.a, t.b, ca, cb);
+            }
         }
         let fallen = std::mem::take(&mut self.physics.borrow_mut().fallen);
         if !fallen.is_empty() {
@@ -1308,7 +1226,7 @@ impl Game {
 
     fn phys_for(&mut self, player: InstId, ph: Vec<[f64; 16]>) -> Vec<[f64; 16]> {
         const FAR: f64 = 200.0;
-        let focus = self.chars.values().find(|c| c.player == player && !self.dead.contains_key(&c.model)).map(|c| c.cf);
+        let focus = self.npcs.values().find(|n| n.owner == Some(player) && !n.dead).map(|n| n.torso_cf);
         let far = self.ph_far.entry(player).or_default();
         let pos = match focus {
             Some(p) => p,
@@ -1346,7 +1264,7 @@ impl Game {
             let mut dm = self.dm.borrow_mut();
             std::mem::take(&mut dm.journal)
         };
-        let dirty: Vec<InstId> = self.dirty.drain().collect();
+        self.dirty.clear();
         let mut out = vec![];
         for &p in players {
             let from = self.joined_at.remove(&p).unwrap_or(0).min(journal.len());
@@ -1359,24 +1277,7 @@ impl Game {
             let mut msg = serde_json::Map::new();
             msg.insert("t".into(), json!("rep"));
             msg.insert("o".into(), J::Array(ops.clone()));
-            let ch: Vec<J> = dirty
-                .iter()
-                .filter_map(|m| self.chars.get(m))
-                .filter(|c| c.player != p)
-                .map(|c| {
-                    let r = |x: f64| (x * 10000.0).round() / 10000.0;
-                    let mut rec: Vec<J> = vec![json!(c.model)];
-                    rec.extend(c.cf.iter().map(|x| json!(r(*x))));
-                    rec.extend(c.vel.iter().map(|x| json!((x * 100.0).round() / 100.0)));
-                    rec.push(json!(c.state));
-                    if let Some(j) = c.j {
-                        rec.extend(j.iter().map(|x| json!((x * 1000.0).round() / 1000.0)));
-                    }
-                    J::Array(rec)
-                })
-                .collect();
-            let mut ch = ch;
-            ch.extend(self.npc_records());
+            let ch: Vec<J> = self.npc_records(Some(p));
             if !ch.is_empty() {
                 msg.insert("ch".into(), J::Array(ch));
             }

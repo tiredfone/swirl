@@ -144,6 +144,9 @@ pub struct Physics {
     pub special: HashMap<ColliderHandle, Special>,
     pub solid_proxies: HashSet<ColliderHandle>,
     pub terrain_handles: HashSet<ColliderHandle>,
+    pub terrain: Option<crate::terrain::TerrainData>,
+    pub terrain_inst: Option<InstId>,
+    terrain_cols: HashMap<crate::terrain::Key, ColliderHandle>,
 }
 
 impl Default for Physics {
@@ -201,6 +204,9 @@ impl Physics {
             special: HashMap::new(),
             solid_proxies: HashSet::new(),
             terrain_handles: HashSet::new(),
+            terrain: None,
+            terrain_inst: None,
+            terrain_cols: HashMap::new(),
         }
     }
 
@@ -448,6 +454,54 @@ impl Physics {
         self.parts.insert(id, PartRec { collider: None, rot: None, asm: None, local: None, volume: 1.0, touch: false });
         self.make_collider(dm, id, None, None);
         self.mark_dirty(id);
+    }
+
+    pub fn set_terrain(&mut self, inst: InstId, data: crate::terrain::TerrainData) {
+        self.terrain_inst = Some(inst);
+        let keys = data.all_keys();
+        self.terrain = Some(data);
+        self.terrain_keys(&keys);
+    }
+
+    pub fn terrain_flush(&mut self) -> Vec<crate::terrain::Key> {
+        let keys = match self.terrain.as_mut() {
+            Some(t) if !t.dirty.is_empty() => t.take_dirty(),
+            _ => return vec![],
+        };
+        self.terrain_keys(&keys);
+        keys
+    }
+
+    fn terrain_keys(&mut self, keys: &[crate::terrain::Key]) {
+        for k in keys {
+            if let Some(h) = self.terrain_cols.remove(k) {
+                self.by_handle.remove(&h);
+                self.terrain_handles.remove(&h);
+                self.colliders.remove(h, &mut self.islands, &mut self.bodies, &mut self.soft, false);
+            }
+            let solid = match self.terrain.as_ref() {
+                Some(t) => t.solid_mesh(*k),
+                None => continue,
+            };
+            if solid.len() < 9 {
+                continue;
+            }
+            let verts: Vec<Vector> = solid.chunks(3).map(|c| Vector::new(c[0], c[1], c[2])).collect();
+            let idx: Vec<[u32; 3]> = (0..verts.len() as u32 / 3).map(|i| [i * 3, i * 3 + 1, i * 3 + 2]).collect();
+            let flags = TriMeshFlags::FIX_INTERNAL_EDGES | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES | TriMeshFlags::DELETE_DUPLICATE_TRIANGLES;
+            let b = match ColliderBuilder::trimesh_with_flags(verts, idx, flags) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let col = b.friction(0.5).active_collision_types(ActiveCollisionTypes::default() | ActiveCollisionTypes::KINEMATIC_FIXED).build();
+            let h = self.colliders.insert(col);
+            self.terrain_cols.insert(*k, h);
+            self.terrain_handles.insert(h);
+            if let Some(i) = self.terrain_inst {
+                self.by_handle.insert(h, i);
+            }
+        }
+        self.stir = true;
     }
 
     pub fn touch_interest(&mut self, id: InstId) {
@@ -1193,7 +1247,8 @@ impl Physics {
                     CollisionEvent::Started(a, b, _) => (a, b, true),
                     CollisionEvent::Stopped(a, b, _) => (a, b, false),
                 };
-                if let (Some(a), Some(b)) = (self.by_handle.get(&h1).copied(), self.by_handle.get(&h2).copied()) {
+                let resolve = |h: ColliderHandle| if self.terrain_handles.contains(&h) { None } else { self.by_handle.get(&h).copied() }.or_else(|| self.special.get(&h).and_then(|s| if s.solid_proxy { None } else { s.part }));
+                if let (Some(a), Some(b)) = (resolve(h1), resolve(h2)) {
                     self.touch_pair(a, b, started);
                 }
             }

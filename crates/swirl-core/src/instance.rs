@@ -343,6 +343,15 @@ impl DataModel {
         use crate::rbx::Value;
         let id = if classes::is_service(&x.cls) {
             self.service(&x.cls).ok()?
+        } else if x.cls == "Terrain" {
+            match self.find_child_of_class(parent, "Terrain") {
+                Some(t) => t,
+                None => {
+                    let id = self.alloc(&x.cls, &x.name);
+                    self.set_parent(id, Some(parent)).ok()?;
+                    id
+                }
+            }
         } else if classes::class_info(&x.cls).is_none() || classes::is_creatable(&x.cls) {
             let id = self.alloc(&x.cls, &x.name);
             self.set_parent(id, Some(parent)).ok()?;
@@ -368,6 +377,12 @@ impl DataModel {
                     }
                     continue;
                 }
+            }
+            if k == "ChocolateTerrain" {
+                if let Value::Str(s) = v {
+                    self.get_mut(id).unwrap().props.insert("ChocolateTerrain".into(), Val::Str(s.clone()));
+                }
+                continue;
             }
             let canon = match classes::canonical_prop(&x.cls, k) {
                 Some(c) => c,

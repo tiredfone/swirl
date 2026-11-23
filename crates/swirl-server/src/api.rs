@@ -130,7 +130,7 @@ pub const METHODS: &[&str] = &[
     "GetRootPart", "GetTouchingParts", "BreakJoints", "breakJoints", "MakeJoints", "makeJoints", "__ComputePath",
     "MoveTo", "moveTo", "TranslateBy", "GetModelCFrame", "getModelCFrame", "GetModelSize", "getModelSize", "GetExtentsSize", "GetPrimaryPartCFrame", "SetPrimaryPartCFrame",
     "GetPivot", "PivotTo",
-    "__receiptResult", "GetTeams", "GetMinutesAfterMidnight", "SetMinutesAfterMidnight", "getMinutesAfterMidnight", "setMinutesAfterMidnight",
+    "__receiptResult", "SetCell", "GetCell", "SetCells", "GetWaterCell", "SetWaterCell", "AutowedgeCell", "AutowedgeCells", "CellCenterToWorld", "CellCornerToWorld", "WorldToCell", "WorldToCellPreferSolid", "WorldToCellPreferEmpty", "CountCells", "Clear", "ConvertToSmooth", "FillBlock", "FillBall", "FillCylinder", "FillWedge", "FillRegion", "ReplaceMaterial", "__ReadVoxels", "__WriteVoxels", "__MaterialIndex", "__MaterialEnum", "GetMaterialColor", "SetMaterialColor", "CopyRegion", "PasteRegion", "GetTeams", "GetMinutesAfterMidnight", "SetMinutesAfterMidnight", "getMinutesAfterMidnight", "setMinutesAfterMidnight",
 ];
 
 fn user_id_of(d: &DataModel, w: Option<&Wire>) -> i64 {
@@ -421,6 +421,9 @@ fn text(a: &[Wire], i: usize) -> String {
 
 impl ApiHandler for Api {
     fn call(&mut self, d: &mut DataModel, id: InstId, method: &str, args: &[Wire]) -> Option<Res> {
+        if crate::terrain_api::METHODS.contains(&method) {
+            return crate::terrain_api::call(&mut self.1.borrow_mut(), d, id, method, args);
+        }
         if !METHODS.contains(&method) && !matches!(method, "Play" | "play" | "Stop" | "stop") {
             return None;
         }

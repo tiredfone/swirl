@@ -190,6 +190,10 @@ pub fn enum_name(enum_type: &str, value: i64) -> Option<&'static str> {
     table().enums.get(enum_type)?.iter().find(|e| e.1 == value).map(|e| e.0.as_str())
 }
 
+pub fn enum_value(enum_type: &str, name: &str) -> Option<i64> {
+    table().enums.get(enum_type)?.iter().find(|e| e.0 == name).map(|e| e.1)
+}
+
 pub fn prop_era(cls: &str, name: &str) -> i32 {
     let mut cur = class_info(cls);
     while let Some(c) = cur {
