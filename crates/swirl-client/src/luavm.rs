@@ -42,6 +42,10 @@ pub struct LuaVm {
     gui_dom: Option<crate::gui::Gui>,
     gui_dirty: bool,
     cam: crate::camera::Camera,
+    init_terrain: Option<String>,
+    terrain_keys: Vec<(i32, i32, i32)>,
+    bridge: crate::bridge::Bridge,
+    hidden: std::collections::HashSet<u32>,
     now_ms: f64,
     friends: std::collections::HashMap<u32, f64>,
     tags: Option<crate::tags::Tags>,
@@ -60,7 +64,7 @@ impl LuaVm {
         let mut dm = DataModel::new("client");
         dm.local_alloc = true;
         let dm = Rc::new(RefCell::new(dm));
-        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), gui: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), screen: [800.0, 600.0], gui_dom: None, gui_dirty: true, cam: Default::default(), now_ms: 0.0, friends: Default::default(), tags: None, tools: Default::default(), remote_moved: Default::default(), fired_later: vec![], t: 0.0 })
+        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), gui: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), screen: [800.0, 600.0], gui_dom: None, gui_dirty: true, cam: Default::default(), init_terrain: None, terrain_keys: vec![], bridge: Default::default(), hidden: Default::default(), now_ms: 0.0, friends: Default::default(), tags: None, tools: Default::default(), remote_moved: Default::default(), fired_later: vec![], t: 0.0 })
     }
 
     pub fn apply(&mut self, text: &str) -> bool {
@@ -72,8 +76,19 @@ impl LuaVm {
         match m["t"].as_str() {
             Some("init") => {
                 dm.era = m["era"].as_i64().unwrap_or(2012) as i32;
+                self.init_terrain = m["terrain"].as_str().map(String::from);
                 let snap = m["snap"].as_array().cloned().unwrap_or_default();
                 swirl_core::wire::apply_init(&mut dm, &snap);
+                self.bridge = Default::default();
+                {
+                    let mut all = vec![];
+                    dm.descendants(dm.root, &mut all);
+                    for i in all {
+                        if dm.get(i).map(|x| x.class == "Sound").unwrap_or(false) && matches!(dm.get_prop(i, "IsPlaying"), Some(Val::Bool(true))) {
+                            self.core.borrow_mut().sound_ops.push(serde_json::json!({"op": "play", "id": i}));
+                        }
+                    }
+                }
                 dm.local_player = m["you"].as_u64().map(|v| v as u32);
                 if self.run {
                     let mouse = boot(&mut dm, self.screen);
@@ -87,16 +102,45 @@ impl LuaVm {
                     if let Some(h) = self.host.as_mut() {
                         h.set_handler(Box::new(swirl_lua::client_api::ClientApi { core: self.core.clone(), anim: self.anim.clone(), gui: self.gui.clone(), measure: Some(Rc::new(WebMeasure::new())) }));
                         self.chars = Some(crate::clientchars::ClientChars::new(&mut self.dm.borrow_mut()));
+                        if let Some(ch) = self.chars.as_mut() {
+                            let dm = self.dm.borrow();
+                            if let Some(t) = dm.services.get("Workspace").and_then(|w| dm.find_child_of_class(*w, "Terrain")) {
+                                let mut td = swirl_physics::terrain::TerrainData::new(dm.era);
+                                if let Some(raw) = self.init_terrain.as_deref() {
+                                    let _ = td.decode(raw);
+                                }
+                                td.take_dirty();
+                                let keys = td.all_keys();
+                                ch.ph.set_terrain(t, td);
+                                self.terrain_keys.extend(keys);
+                            }
+                        }
                         h.scan_scripts();
                     }
                 }
                 true
             }
+            Some("terrain") => {
+                drop(dm);
+                if let (Some(ch), Some(d)) = (self.chars.as_mut(), m["d"].as_str()) {
+                    if let Some(td) = ch.ph.terrain.as_mut() {
+                        let _ = td.decode(d);
+                    }
+                    let keys = ch.ph.terrain_flush();
+                    self.terrain_keys.extend(keys);
+                }
+                true
+            }
             Some("rep") => {
                 let ops = m["o"].as_array().cloned().unwrap_or_default();
+                self.bridge.collect(&dm, false);
                 let applied = swirl_core::wire::apply_ops(&mut dm, &ops);
                 let moved = applied.moved;
+                for (sid, op) in &applied.sounds {
+                    self.core.borrow_mut().sound_ops.push(serde_json::json!({"op": op, "id": sid}));
+                }
                 let prop_changes = applied.props;
+                self.bridge.collect(&dm, true);
                 let mouse = self.core.borrow().mouse;
                 if let (Some(ch), Some(mouse)) = (self.chars.as_mut(), mouse) {
                     for (id, old, _) in &moved {
@@ -116,7 +160,7 @@ impl LuaVm {
                         for r in rows {
                             if let Some(a) = r.as_array() {
                                 if a.len() >= 16 {
-                                    let id = a[0].as_u64().unwrap_or(0) as u32;
+                                    let id = a[0].as_u64().or_else(|| a[0].as_f64().map(|f| f as u64)).unwrap_or(0) as u32;
                                     if !dm.get(id).map(|i| !i.destroyed).unwrap_or(false) || !dm.is_a(id, "BasePart") {
                                         continue;
                                     }
@@ -545,7 +589,9 @@ impl LuaVm {
                 self.gui_dirty = false;
                 g.dirty.set(false);
                 let mut dm = self.dm.borrow_mut();
-                g.layout(&mut dm, vw, vh, k, [l, t, r, b], &mut fired);
+                let _ = (l, t, r, b);
+                let ins = self.core.borrow().gui_inset;
+                g.layout(&mut dm, vw, vh, k, ins, &mut fired);
             }
             g.apply_pending_focus();
             count = g.node_count();
@@ -607,6 +653,21 @@ impl LuaVm {
         match self.chars.as_ref() {
             Some(ch) => {
                 let cf = self.cam.update(&mut dm, &ch.ph, own, dt, pointer_locked);
+                let want: std::collections::HashSet<u32> = match (self.cam.first_person, own) {
+                    (true, Some(m)) => {
+                        let mut all = vec![m];
+                        dm.descendants(m, &mut all);
+                        all.into_iter().filter(|i| dm.is_a(*i, "BasePart")).collect()
+                    }
+                    _ => Default::default(),
+                };
+                for i in want.difference(&self.hidden) {
+                    self.bridge.alpha.push((*i, Some(1.0)));
+                }
+                for i in self.hidden.difference(&want) {
+                    self.bridge.alpha.push((*i, None));
+                }
+                self.hidden = want;
                 serde_json::json!({"cf": cf, "yaw": self.cam.yaw, "zoom": self.cam.zoom, "fp": self.cam.first_person}).to_string()
             }
             None => "null".into(),
@@ -625,6 +686,276 @@ impl LuaVm {
 
     pub fn take_kicked(&mut self) -> Option<String> {
         self.core.borrow_mut().kicked.take()
+    }
+
+    pub fn take_sound_ops(&mut self) -> String {
+        let ops = std::mem::take(&mut self.core.borrow_mut().sound_ops);
+        let d = self.dm.borrow();
+        let out: Vec<serde_json::Value> = ops
+            .into_iter()
+            .map(|mut o| {
+                let id = o["id"].as_u64().unwrap_or(0) as u32;
+                if let Some(i) = d.get(id) {
+                    if matches!(o["op"].as_str(), Some("play") | Some("resume")) {
+                        let url = match d.get_prop(id, "SoundId") {
+                            Some(Val::Str(u)) => u.clone(),
+                            _ => String::new(),
+                        };
+                        let num = |k: &str, dflt: f64| match d.get_prop(id, k) {
+                            Some(Val::Num(n)) => *n,
+                            _ => dflt,
+                        };
+                        o["url"] = serde_json::json!(url);
+                        o["volume"] = serde_json::json!(num("Volume", 0.5));
+                        o["pitch"] = serde_json::json!(num("Pitch", 1.0));
+                        o["looped"] = serde_json::json!(matches!(d.get_prop(id, "Looped"), Some(Val::Bool(true))));
+                        if let Some(par) = i.parent {
+                            if d.is_a(par, "BasePart") {
+                                if let Some(Val::Arr(a)) = d.get_prop(par, "CFrame") {
+                                    o["pos"] = serde_json::json!([a[0], a[1], a[2]]);
+                                }
+                            }
+                        }
+                    }
+                }
+                o
+            })
+            .collect();
+        serde_json::to_string(&out).unwrap_or_default()
+    }
+
+    pub fn sound_ended(&mut self, id: u32) {
+        let mut dm = self.dm.borrow_mut();
+        if dm.get(id).map(|i| !i.destroyed).unwrap_or(false) {
+            let _ = dm.set_prop(id, "IsPlaying", Val::Bool(false));
+            drop(dm);
+            self.core.borrow_mut().fire_later.push((id, "Ended"));
+        }
+    }
+
+    pub fn client_era(&self) -> i32 {
+        self.dm.borrow().era
+    }
+
+    pub fn terrain_era(&self) -> i32 {
+        self.chars.as_ref().and_then(|c| c.ph.terrain.as_ref()).map(|t| t.era).unwrap_or(2012)
+    }
+
+    pub fn terrain_info(&self) -> String {
+        match self.chars.as_ref().and_then(|c| c.ph.terrain.as_ref()) {
+            Some(t) => format!("{{\"era\":{},\"keys\":{},\"init\":{}}}", t.era, t.all_keys().len(), self.init_terrain.as_ref().map(|s| s.len()).unwrap_or(0)),
+            None => format!("{{\"none\":true,\"init\":{}}}", self.init_terrain.as_ref().map(|s| s.len()).unwrap_or(0)),
+        }
+    }
+
+    pub fn take_terrain_keys(&mut self) -> String {
+        let keys = std::mem::take(&mut self.terrain_keys);
+        let v: Vec<String> = keys.into_iter().map(|k| format!("{},{},{}", k.0, k.1, k.2)).collect();
+        serde_json::to_string(&v).unwrap_or_default()
+    }
+
+    pub fn terrain_chunk(&self, key: &str) -> js_sys::Array {
+        let out = js_sys::Array::new();
+        let p: Vec<i32> = key.split(',').filter_map(|x| x.parse().ok()).collect();
+        if p.len() != 3 {
+            return out;
+        }
+        if let Some(td) = self.chars.as_ref().and_then(|c| c.ph.terrain.as_ref()) {
+            let groups = if td.era == 2018 { td.mesh_smooth((p[0], p[1], p[2])) } else { td.mesh_cells((p[0], p[1], p[2])) };
+            for (m, pos, nrm, uv) in groups {
+                let g = js_sys::Array::new();
+                g.push(&JsValue::from(m as u32));
+                g.push(&js_sys::Float32Array::from(&pos[..]));
+                g.push(&js_sys::Float32Array::from(&nrm[..]));
+                g.push(&js_sys::Float32Array::from(&uv[..]));
+                out.push(&g);
+            }
+        }
+        out
+    }
+
+    pub fn render_ops(&mut self) -> String {
+        self.bridge.take_ops()
+    }
+
+    pub fn render_cfs(&mut self) -> Vec<f64> {
+        self.bridge.take_cfs()
+    }
+
+    pub fn render_alpha(&mut self) -> String {
+        self.bridge.take_alpha()
+    }
+
+    pub fn render_camera(&self) -> Vec<f32> {
+        let d = self.dm.borrow();
+        let cam = d.services.get("Workspace").and_then(|w| match d.get_prop(*w, "CurrentCamera") {
+            Some(Val::Ref(Some(c))) => Some(*c),
+            _ => None,
+        });
+        let cf: Vec<f32> = match cam.and_then(|c| d.get_prop(c, "CFrame")) {
+            Some(Val::Arr(a)) if a.len() >= 12 => a.iter().take(12).map(|v| *v as f32).collect(),
+            _ => self.cam.cf.iter().map(|v| *v as f32).collect(),
+        };
+        let fov = match cam.and_then(|c| d.get_prop(c, "FieldOfView")) {
+            Some(Val::Num(n)) if *n > 0.0 => *n as f32,
+            _ => 70.0,
+        };
+        let mut out = cf;
+        out.push(fov);
+        out
+    }
+
+    pub fn cam_drag(&mut self, dx: f64, dy: f64) {
+        self.cam.drag(dx, dy);
+    }
+
+    pub fn cam_rotate(&mut self, dx: f64, dy: f64) {
+        self.cam.rotate_by(dx, dy);
+    }
+
+    pub fn cam_wheel(&mut self, dir: i32) {
+        let dm = self.dm.borrow();
+        self.cam.step_zoom(&dm, dir);
+    }
+
+    pub fn cam_zoom_by(&mut self, f: f64) {
+        let dm = self.dm.borrow();
+        self.cam.zoom_by(&dm, f);
+    }
+
+    pub fn cam_key_yaw(&mut self, v: f64) {
+        self.cam.key_yaw = v;
+    }
+
+    pub fn cam_toggle_shift_lock(&mut self) {
+        let dm = self.dm.borrow();
+        let allowed = {
+            let sp = dm.services.get("StarterPlayer").copied();
+            let blocked = sp.map(|s| matches!(dm.get_prop(s, "EnableMouseLockOption"), Some(Val::Bool(false)))).unwrap_or(false);
+            let t = dm.services.get("Workspace").and_then(|w| match dm.get_prop(*w, "CurrentCamera") {
+                Some(Val::Ref(Some(c))) => Some(*c),
+                _ => None,
+            }).and_then(|c| match dm.get_prop(c, "CameraType") {
+                Some(Val::Num(n)) => Some(*n as i64),
+                _ => None,
+            }).unwrap_or(5);
+            !blocked && t != 6 && t != 0
+        };
+        if self.cam.shift_lock || allowed {
+            self.cam.shift_lock = !self.cam.shift_lock;
+        }
+    }
+
+    pub fn cam_first_person(&self) -> bool {
+        self.cam.first_person
+    }
+
+    pub fn cam_state(&self) -> String {
+        serde_json::json!({"yaw": self.cam.yaw, "pitch": self.cam.pitch, "zoom": self.cam.target_zoom, "fp": self.cam.first_person, "shift": self.cam.shift_lock}).to_string()
+    }
+
+    pub fn frame(&mut self, dt: f64, fw: f64, sd: f64, jump: bool, dismount: bool, pointer_locked: bool) {
+        let f = self.cam.forward_flat();
+        let r = self.cam.right_flat();
+        let mx = f[0] * fw + r[0] * sd;
+        let mz = f[2] * fw + r[2] * sd;
+        if let Some(c) = self.chars.as_mut() {
+            c.drive_in = [fw > 0.3, fw < -0.3, sd < -0.3, sd > 0.3, dismount];
+        }
+        self.update(dt, mx, mz, jump);
+        let own = self.chars.as_ref().and_then(|c| c.own.as_ref()).map(|o| o.model);
+        let mut dm = self.dm.borrow_mut();
+        if let Some(ch) = self.chars.as_ref() {
+            let cf = self.cam.update(&mut dm, &ch.ph, own, dt, pointer_locked);
+            let _ = cf;
+            let want: std::collections::HashSet<u32> = match (self.cam.first_person, own) {
+                (true, Some(m)) => {
+                    let mut all = vec![m];
+                    dm.descendants(m, &mut all);
+                    all.into_iter().filter(|i| dm.is_a(*i, "BasePart")).collect()
+                }
+                _ => Default::default(),
+            };
+            for i in want.difference(&self.hidden) {
+                self.bridge.alpha.push((*i, Some(1.0)));
+            }
+            for i in self.hidden.difference(&want) {
+                self.bridge.alpha.push((*i, None));
+            }
+            self.hidden = want;
+        }
+    }
+
+    pub fn mouse_frame(&mut self, x: f64, y: f64, w: f64, h: f64, k: f64, over_gui: bool, centered: bool) {
+        let fov = match self.dm.borrow().services.get("Workspace").and_then(|ws| match self.dm.borrow().get_prop(*ws, "CurrentCamera") {
+            Some(Val::Ref(Some(c))) => Some(*c),
+            _ => None,
+        }) {
+            Some(c) => match self.dm.borrow().get_prop(c, "FieldOfView") {
+                Some(Val::Num(n)) if *n > 0.0 => *n,
+                _ => 70.0,
+            },
+            None => 70.0,
+        };
+        let (px, py) = if centered { (w / 2.0, h / 2.0) } else { (x, y) };
+        let (o, d) = self.cam.ray(fov, w, h, px, py);
+        self.update_mouse(o[0], o[1], o[2], d[0], d[1], d[2], x, y, over_gui, k);
+    }
+
+    pub fn sky_urls(&self) -> String {
+        let d = self.dm.borrow();
+        let lt = match d.services.get("Lighting") {
+            Some(l) => *l,
+            None => return "null".into(),
+        };
+        let sky = d.find_child_of_class(lt, "Sky");
+        let keys = ["SkyboxRt", "SkyboxLf", "SkyboxUp", "SkyboxDn", "SkyboxBk", "SkyboxFt"];
+        let v: Vec<String> = keys
+            .iter()
+            .map(|k| match sky.and_then(|s| d.get_prop(s, k)) {
+                Some(Val::Str(u)) => u.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        serde_json::json!({"urls": v, "era": d.era}).to_string()
+    }
+
+    pub fn fire_service(&mut self, service: &str, event: &str, args: &str) {
+        let id = match self.dm.borrow().services.get(service) {
+            Some(i) => *i,
+            None => return,
+        };
+        let parsed: serde_json::Value = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
+        let list: Vec<swirl_lua::host::Wire> = parsed
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|v| match v {
+                        serde_json::Value::Array(e) if e.len() == 3 && e[0] == "e" => swirl_lua::host::Wire::E(e[1].as_str().unwrap_or("").to_string(), e[2].as_f64().unwrap_or(0.0)),
+                        other => json_to_wire(other),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(h) = self.host.as_mut() {
+            h.fire(id, intern(event), list);
+        }
+    }
+
+    pub fn gui_key_claimed(&self, key: &str) -> bool {
+        self.core.borrow().gui_keys.contains(key)
+    }
+
+    pub fn mouse_event(&mut self, name: &str) {
+        let mouse = match self.core.borrow().mouse {
+            Some(m) => m,
+            None => return,
+        };
+        if let Some(ch) = self.chars.as_ref() {
+            let mut fired = vec![];
+            ch.emit_mouse(&self.tools, mouse, intern(name), vec![], &mut fired);
+            self.fired_later.extend(fired);
+        }
     }
 
     pub fn set_screen(&mut self, w: f64, h: f64) {
@@ -1044,7 +1375,34 @@ impl LuaVm {
                 ch.send_mouse(&dm, &mut self.tools, mouse, &self.mouse_state, false);
             }
             self.remote_moved.clear();
+            {
+                let mut ops = vec![];
+                for c in dm.journal.iter() {
+                    match c {
+                        swirl_core::instance::Change::Prop(id, name) if (name == "Volume" || name == "Pitch") && dm.get(*id).map(|i| i.class == "Sound").unwrap_or(false) => {
+                            let num = |k: &str, dflt: f64| match dm.get_prop(*id, k) {
+                                Some(Val::Num(n)) => *n,
+                                _ => dflt,
+                            };
+                            ops.push(serde_json::json!({"op": "update", "id": id, "volume": num("Volume", 0.5), "pitch": num("Pitch", 1.0)}));
+                        }
+                        swirl_core::instance::Change::Destroy { id, .. } if dm.get(*id).map(|i| i.class == "Sound").unwrap_or(false) => {
+                            ops.push(serde_json::json!({"op": "stop", "id": id}));
+                        }
+                        _ => {}
+                    }
+                }
+                self.core.borrow_mut().sound_ops.extend(ops);
+            }
+            self.bridge.cf_marks.extend(std::mem::take(&mut ch.cf_marks));
+            self.bridge.collect(&dm, false);
+            self.bridge.flush_marks(&dm);
             ch.step_physics(&mut dm);
+            self.bridge.render_from = 0;
+        }
+        {
+            let later = std::mem::take(&mut self.core.borrow_mut().fire_later);
+            self.fired_later.extend(later.into_iter().map(|(i, n)| (i, n, vec![])));
         }
         if let Some(h) = self.host.as_mut() {
             for (inst, name, args) in std::mem::take(&mut self.fired_later) {

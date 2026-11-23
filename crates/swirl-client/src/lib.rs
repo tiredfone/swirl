@@ -48,6 +48,9 @@ impl Default for Scene {
 mod gl;
 
 #[cfg(target_arch = "wasm32")]
+mod bridge;
+
+#[cfg(target_arch = "wasm32")]
 mod camera;
 
 #[cfg(target_arch = "wasm32")]

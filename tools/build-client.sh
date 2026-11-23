@@ -19,6 +19,10 @@ fi
 cp crates/swirl-client/entry.js "$out.tmp/entry.js"
 cp crates/swirl-client/lua.js "$out.tmp/lua.js"
 cp crates/swirl-client/pack.js "$out.tmp/pack.js"
+cp crates/swirl-client/app.js "$out.tmp/app.js"
+awk '/@font-face/{skip=1} !skip{print} skip&&/}/{skip=0}' vendor/chocolate/client/style.css > "$out.tmp/gui.css"
+cp vendor/chocolate/client/content-index.json "$out.tmp/content-index.json"
+node tools/pack-vendor.mjs vendor/chocolate/content "$out.tmp/content"
 node tools/pack-vendor.mjs vendor/chocolate "$out.tmp/chocolate"
 cat > "$out.tmp/manifest.json" <<JSON
 {"version":"$version","era":[2012,2018],"entry":"entry.js","build":"$short","profile":"$profile"}

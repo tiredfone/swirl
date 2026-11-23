@@ -759,6 +759,12 @@ impl Gui {
                     img.set_src(&s);
                     style(&img, "visibility", "");
                     let dr = self.dirty.clone();
+                    let img_err = img.clone();
+                    let ecb = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_| {
+                        style(img_err.unchecked_ref::<HtmlElement>(), "visibility", "hidden");
+                    }));
+                    let _ = img.add_event_listener_with_callback("error", ecb.as_ref().unchecked_ref());
+                    self.closures.push(ecb);
                     let cb = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_| dr.set(true)));
                     let _ = img.add_event_listener_with_callback("load", cb.as_ref().unchecked_ref());
                     self.closures.push(cb);

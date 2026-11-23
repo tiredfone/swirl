@@ -44,6 +44,7 @@ for (const raw of tap) {
   const t = JSON.parse(raw).t;
   if (t === 'init' || t === 'rep') vm.apply(raw);
   if (t === 'rep') {
+    if (process.env.PHDBG && JSON.parse(raw).ph) { vm.update(0.016, 0, 0, false); const a = vm.render_cfs(); console.log('after ph rep', a.length / 13); }
     for (const id of JSON.parse(vm.take_wanted())) for (const [k, v] of [...(await tree(id))].reverse()) vm.provide_core_source(k, v);
     vm.update(dt, 0, 0, false);
     n++;
@@ -61,3 +62,8 @@ if (process.env.LUA) {
   vm.update(dt, 0, 0, false);
   for (const l of JSON.parse(vm.logs())) console.log('LUA', l.kind, l.msg.slice(0, 300));
 }
+if (process.env.CFS) {
+  const a = vm.render_cfs();
+  console.log('cf ids', a.length / 13, JSON.parse(vm.render_ops()).length);
+}
+if (process.env.NAMED) console.log(vm.dump_named(process.env.NAMED).slice(0, 400));

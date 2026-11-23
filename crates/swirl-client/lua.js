@@ -316,6 +316,11 @@ export async function startLua(opts) {
     }
 
     frame() {
+      if (window.solarBridgeCmp) {
+        const b = window.solarBridgeCmp;
+        for (const [id, cf] of this.cfs) b.jsCf.set(id, cf.slice(0, 12));
+        for (const op of this.ops) { b.jsOps[op[0]] = (b.jsOps[op[0]] || 0) + 1; if (op[0] === 'p') b.jsP[op[2]] = (b.jsP[op[2]] || 0) + 1; }
+      }
       this.syncTerrain();
       this.applySky();
       if (this.ops.length) {
@@ -873,6 +878,13 @@ export async function startLua(opts) {
           }
           for (const l of JSON.parse(window.solarVm.logs())) (window.solarRustLogs = window.solarRustLogs || []).push(l);
           comparePos();
+          if (/[?&]swirlbridge=1/.test(location.search)) {
+            const b = (window.solarBridgeCmp = window.solarBridgeCmp || { jsCf: new Map(), rsCf: new Map(), jsOps: {}, rsOps: {}, jsP: {}, rsP: {} });
+            const a = window.solarVm.render_cfs();
+            for (let i = 0; i + 12 < a.length; i += 13) b.rsCf.set(a[i], Array.from(a.subarray(i + 1, i + 13)));
+            for (const op of JSON.parse(window.solarVm.render_ops())) { b.rsOps[op[0]] = (b.rsOps[op[0]] || 0) + 1; if (op[0] === 'p') b.rsP[op[2]] = (b.rsP[op[2]] || 0) + 1; }
+            window.solarVm.render_alpha();
+          }
           if (!camera.luaDriven) window.__rsCam = JSON.parse(window.solarVm.camera_update(camera.yaw, camera.pitch, camera.targetZoom, camera.shiftLock, document.pointerLockElement === canvas, camera.keyYaw, dt));
           const rsAll = JSON.parse(window.solarVm.take_out());
           const rsOut = rsAll.filter((x) => JSON.parse(x).t === 'char');

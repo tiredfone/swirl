@@ -544,6 +544,203 @@ impl TerrainData {
         pos.into_iter().map(|v| v as f32).collect()
     }
 
+    pub fn mesh_cells(&self, key: Key) -> Vec<(u8, Vec<f32>, Vec<f32>, Vec<f32>)> {
+        let (cx, cy, cz) = key;
+        let c = match self.chunks.get(&key) {
+            Some(c) => c,
+            None => return vec![],
+        };
+        let mut groups: IndexMap<u8, (Vec<f32>, Vec<f32>, Vec<f32>)> = IndexMap::new();
+        let h = VOXEL as f64;
+        let faces: [[i32; 3]; 6] = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+        let push = |g: &mut (Vec<f32>, Vec<f32>, Vec<f32>), pts: &[[f64; 3]], n: [f64; 3]| {
+            let mut i = 1;
+            while i + 1 < pts.len() {
+                for p in [pts[0], pts[i], pts[i + 1]] {
+                    g.0.extend_from_slice(&[p[0] as f32, p[1] as f32, p[2] as f32]);
+                    g.1.extend_from_slice(&[n[0] as f32, n[1] as f32, n[2] as f32]);
+                    let ax = if n[0].abs() > 0.6 { 0 } else if n[1].abs() > 0.6 { 1 } else { 2 };
+                    let u = if ax == 0 { p[2] } else { p[0] };
+                    let v = if ax == 1 { p[2] } else { p[1] };
+                    g.2.extend_from_slice(&[u as f32, v as f32]);
+                }
+                i += 1;
+            }
+        };
+        for ly in 0..CHUNK as usize {
+            for lz in 0..CHUNK as usize {
+                for lx in 0..CHUNK as usize {
+                    let i = idx(lx, ly, lz);
+                    let m = c.mat[i];
+                    if m == 0 {
+                        continue;
+                    }
+                    let x = cx * CHUNK + lx as i32;
+                    let y = cy * CHUNK + ly as i32;
+                    let z = cz * CHUNK + lz as i32;
+                    let (ox, oy, oz) = ((x * VOXEL) as f64, (y * VOXEL) as f64, (z * VOXEL) as f64);
+                    let water = m == CELL_WATER;
+                    let g = groups.entry(m).or_default();
+                    if c.block[i] != 0 && !water {
+                        for f in cell_shape(c.block[i] as usize, c.orient[i] as usize) {
+                            let pts: Vec<[f64; 3]> = f.iter().map(|p| [ox + p[0] * h, oy + p[1] * h, oz + p[2] * h]).collect();
+                            if pts.len() >= 3 {
+                                let (a, b, d) = (pts[0], pts[1], pts[2]);
+                                let (u, v) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [d[0] - a[0], d[1] - a[1], d[2] - a[2]]);
+                                let mut n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+                                let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-12);
+                                n = [n[0] / l, n[1] / l, n[2] / l];
+                                push(g, &pts, n);
+                            }
+                        }
+                        continue;
+                    }
+                    for [dx, dy, dz] in faces {
+                        let [nm, _, nb, _] = self.cell(x + dx, y + dy, z + dz);
+                        if nm != 0 && nb == 0 && (nm != CELL_WATER || water) {
+                            continue;
+                        }
+                        let pts: Vec<[f64; 3]> = if dx != 0 {
+                            let fx = if dx > 0 { ox + h } else { ox };
+                            if dx > 0 {
+                                vec![[fx, oy, oz], [fx, oy + h, oz], [fx, oy + h, oz + h], [fx, oy, oz + h]]
+                            } else {
+                                vec![[fx, oy, oz], [fx, oy, oz + h], [fx, oy + h, oz + h], [fx, oy + h, oz]]
+                            }
+                        } else if dy != 0 {
+                            let fy = if dy > 0 { oy + h } else { oy };
+                            if dy > 0 {
+                                vec![[ox, fy, oz], [ox, fy, oz + h], [ox + h, fy, oz + h], [ox + h, fy, oz]]
+                            } else {
+                                vec![[ox, fy, oz], [ox + h, fy, oz], [ox + h, fy, oz + h], [ox, fy, oz + h]]
+                            }
+                        } else {
+                            let fz = if dz > 0 { oz + h } else { oz };
+                            if dz > 0 {
+                                vec![[ox, oy, fz], [ox + h, oy, fz], [ox + h, oy + h, fz], [ox, oy + h, fz]]
+                            } else {
+                                vec![[ox, oy, fz], [ox, oy + h, fz], [ox + h, oy + h, fz], [ox + h, oy, fz]]
+                            }
+                        };
+                        push(g, &pts, [dx as f64, dy as f64, dz as f64]);
+                    }
+                }
+            }
+        }
+        groups.into_iter().map(|(m, g)| (m, g.0, g.1, g.2)).collect()
+    }
+
+    pub fn mesh_smooth(&self, key: Key) -> Vec<(u8, Vec<f32>, Vec<f32>, Vec<f32>)> {
+        let (x0, y0, z0) = (key.0 * CHUNK, key.1 * CHUNK, key.2 * CHUNK);
+        let v = VOXEL as f64;
+        let mut groups: IndexMap<u8, (Vec<f32>, Vec<f32>, Vec<f32>)> = IndexMap::new();
+        for want_water in [false, true] {
+            let dens = |x: i32, y: i32, z: i32| -> f64 {
+                let m = self.get(x, y, z);
+                if m == 0 {
+                    return 0.0;
+                }
+                if (m == SMOOTH_WATER) != want_water {
+                    return 0.0;
+                }
+                self.occ(x, y, z) as f64 / 255.0
+            };
+            let mut verts: std::collections::HashMap<Key, Option<([f64; 3], [f64; 3])>> = std::collections::HashMap::new();
+            let mut vert = |i: i32, j: i32, k: i32| -> Option<([f64; 3], [f64; 3])> {
+                if let Some(r) = verts.get(&(i, j, k)) {
+                    return *r;
+                }
+                let (mut sx, mut sy, mut sz, mut n) = (0.0, 0.0, 0.0, 0.0);
+                let mut d = [0.0f64; 8];
+                for c in 0..8 {
+                    d[c] = dens(i + (c & 1) as i32, j + ((c >> 1) & 1) as i32, k + ((c >> 2) & 1) as i32);
+                }
+                let edges: [[usize; 2]; 12] = [[0, 1], [2, 3], [4, 5], [6, 7], [0, 2], [1, 3], [4, 6], [5, 7], [0, 4], [1, 5], [2, 6], [3, 7]];
+                for [a, b] in edges {
+                    let (da, db) = (d[a] - 0.5, d[b] - 0.5);
+                    if (da >= 0.0) == (db >= 0.0) {
+                        continue;
+                    }
+                    let f = da / (da - db);
+                    let pa = [(a & 1) as f64, ((a >> 1) & 1) as f64, ((a >> 2) & 1) as f64];
+                    let pb = [(b & 1) as f64, ((b >> 1) & 1) as f64, ((b >> 2) & 1) as f64];
+                    sx += pa[0] + (pb[0] - pa[0]) * f;
+                    sy += pa[1] + (pb[1] - pa[1]) * f;
+                    sz += pa[2] + (pb[2] - pa[2]) * f;
+                    n += 1.0;
+                }
+                let r = if n == 0.0 {
+                    None
+                } else {
+                    let gx = (d[1] + d[3] + d[5] + d[7]) - (d[0] + d[2] + d[4] + d[6]);
+                    let gy = (d[2] + d[3] + d[6] + d[7]) - (d[0] + d[1] + d[4] + d[5]);
+                    let gz = (d[4] + d[5] + d[6] + d[7]) - (d[0] + d[1] + d[2] + d[3]);
+                    let gl = (gx * gx + gy * gy + gz * gz).sqrt();
+                    let gl = if gl == 0.0 { 1.0 } else { gl };
+                    Some(([(i as f64 + 0.5 + sx / n) * v, (j as f64 + 0.5 + sy / n) * v, (k as f64 + 0.5 + sz / n) * v], [-gx / gl, -gy / gl, -gz / gl]))
+                };
+                verts.insert((i, j, k), r);
+                r
+            };
+            for y in y0..y0 + CHUNK {
+                for z in z0..z0 + CHUNK {
+                    for x in x0..x0 + CHUNK {
+                        let d0 = dens(x, y, z);
+                        for ax in 0..3 {
+                            let (nx, ny, nz) = (x + (ax == 0) as i32, y + (ax == 1) as i32, z + (ax == 2) as i32);
+                            let d1 = dens(nx, ny, nz);
+                            if (d0 >= 0.5) == (d1 >= 0.5) {
+                                continue;
+                            }
+                            if want_water && d0 < 0.5 && self.get(x, y, z) != 0 && self.get(x, y, z) != SMOOTH_WATER {
+                                continue;
+                            }
+                            if want_water && d1 < 0.5 && self.get(nx, ny, nz) != 0 && self.get(nx, ny, nz) != SMOOTH_WATER {
+                                continue;
+                            }
+                            let inside = if d0 >= 0.5 { (x, y, z) } else { (nx, ny, nz) };
+                            let m = self.get(inside.0, inside.1, inside.2);
+                            let cells: [[i32; 3]; 4] = if ax == 0 {
+                                [[x, y - 1, z - 1], [x, y, z - 1], [x, y, z], [x, y - 1, z]]
+                            } else if ax == 1 {
+                                [[x - 1, y, z - 1], [x - 1, y, z], [x, y, z], [x, y, z - 1]]
+                            } else {
+                                [[x - 1, y - 1, z], [x, y - 1, z], [x, y, z], [x - 1, y, z]]
+                            };
+                            let mut vs: Vec<([f64; 3], [f64; 3])> = vec![];
+                            let mut ok = true;
+                            for c in cells {
+                                match vert(c[0], c[1], c[2]) {
+                                    Some(p) => vs.push(p),
+                                    None => {
+                                        ok = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if !ok {
+                                continue;
+                            }
+                            if d0 < 0.5 {
+                                vs.reverse();
+                            }
+                            let g = groups.entry(m).or_default();
+                            for tri in [[0usize, 1, 2], [0, 2, 3]] {
+                                for q in tri {
+                                    let (p, nn) = vs[q];
+                                    g.0.extend_from_slice(&[p[0] as f32, p[1] as f32, p[2] as f32]);
+                                    g.1.extend_from_slice(&[nn[0] as f32, nn[1] as f32, nn[2] as f32]);
+                                    g.2.extend_from_slice(&[0.0, 0.0]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        groups.into_iter().map(|(m, g)| (m, g.0, g.1, g.2)).collect()
+    }
+
     fn solid_cells(&self, key: Key) -> Vec<f64> {
         let (cx, cy, cz) = key;
         let c = match self.chunks.get(&key) {

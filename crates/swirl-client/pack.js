@@ -1,12 +1,14 @@
 const base = new URL('./chocolate/', import.meta.url).href;
 let map = {};
+const skip = new URLSearchParams(location.search).get('swirlapp') === '1';
 try {
+  if (skip) throw new Error('skip');
   map = await (await fetch(base + 'rewrite.json')).json();
 } catch (e) {
   map = {};
 }
 const orig = window.fetch.bind(window);
-window.fetch = (input, init) => {
+window.fetch = skip ? window.fetch : (input, init) => {
   try {
     const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : input && input.url;
     if (raw && raw.startsWith(base)) {

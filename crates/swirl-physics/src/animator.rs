@@ -605,7 +605,7 @@ pub fn step_motors(d: &mut DataModel, model: InstId, dt: f64) {
         }
         let diff = des - cur;
         let next = if diff.abs() <= mv { des } else { cur + diff.signum() * mv };
-        let _ = d.set_prop(j, "CurrentAngle", Val::Num(next));
+        d.set_prop_quiet(j, "CurrentAngle", Val::Num(next));
     }
 }
 

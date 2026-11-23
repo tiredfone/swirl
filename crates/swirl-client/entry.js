@@ -40,11 +40,14 @@ export async function start(opts = {}) {
     setStatus('Joining');
     client.connect(base + '?ticket=' + encodeURIComponent(t.ticket));
     setInterval(() => client.ping(), 5000);
-    const assetUrl = (id) => (id.startsWith('c:') ? new URL('./chocolate/content/' + id.slice(2), import.meta.url).href : ((cfg.endpoints && cfg.endpoints.asset) || '/asset/?id={id}').replace('{id}', id));
+    const useAppEarly = new URLSearchParams(location.search).get('swirlapp') === '1';
+    if (useAppEarly) window.solarContentReady = new Promise((res) => { window.__resolveContent = res; });
+    const assetUrl = (id) => (id.startsWith('c:') ? (window.solarContentUrl ? window.solarContentUrl(id.slice(2)) : new URL('./chocolate/content/' + id.slice(2), import.meta.url).href) : ((cfg.endpoints && cfg.endpoints.asset) || '/asset/?id={id}').replace('{id}', id));
     let inflight = 0;
     const fetchAsset = async (r) => {
       inflight++;
       try {
+        if (useAppEarly && r.id.startsWith('c:')) await window.solarContentReady;
         for (let n = 0; r.k === 'tex' && !(window.solarLoadImage && window.solarWorldReady) && n < 600; n++) await new Promise((res) => setTimeout(res, 50));
         if (r.k === 'tex' && window.solarWorldReady) await window.solarWorldReady;
         if (r.k === 'tex' && window.solarLoadImage) {
@@ -72,7 +75,8 @@ export async function start(opts = {}) {
       while (inflight < 6 && pending.length) fetchAsset(pending.shift());
     }, 80);
     let lua = null;
-    const luaStart = import('./lua.js').then((m) => m.startLua({ client, cfg, canvas, reference: new URLSearchParams(location.search).get('swirlref') === 'three' })).then((l) => { lua = l; }).catch((e) => {
+    const useApp = new URLSearchParams(location.search).get('swirlapp') === '1';
+    const luaStart = (useApp ? import('./app.js').then((m) => m.startApp({ client, cfg, canvas })) : import('./lua.js').then((m) => m.startLua({ client, cfg, canvas, reference: new URLSearchParams(location.search).get('swirlref') === 'three' }))).then((l) => { lua = l; }).catch((e) => {
       window.solarLuaFailed = String(e && e.stack ? e.stack : e);
       console.error(e);
     });

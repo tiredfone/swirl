@@ -7,7 +7,9 @@ const wsPort = process.argv[2];
 const out = process.argv[3] || '/tmp/swirl/gui';
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const page = `<!doctype html><meta charset=utf-8><body style="margin:0;background:#000"><canvas id=swirl-canvas style="width:100vw;height:100vh;display:block" tabindex=0></canvas><div id=swirl-status style="position:fixed;top:0;left:0;color:#fff"></div><script>window.solarClientConfig={};window.solarClientReady=function(){window.__ready=true};window.solarClientFailed=function(r){window.__failed=r}</script><script type=module src="/dist/entry.js"></script>`;
+const vendored = [];
 const srv = http.createServer((req, res) => {
+  if (/\/(chocolate)\//.test(req.url.split('?')[0])) vendored.push(req.url.split('?')[0]);
   if (req.url.startsWith('/dist/')) {
     const f = path.join(dist, req.url.slice(6).split('?')[0]);
     const types = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm', '.json': 'application/json', '.css': 'text/css', '.png': 'image/png', '.ttf': 'font/ttf', '.otf': 'font/otf', '.svg': 'image/svg+xml' };
@@ -109,6 +111,7 @@ const srv = http.createServer((req, res) => {
     await wait(1200);
     await pg.screenshot({ path: out + '-equip.png' });
   }
+  console.log('vendoredRequests', vendored.length, JSON.stringify(vendored.slice(0, 5)));
   console.log('assetfail', JSON.stringify(await pg.evaluate(() => window.solarAssetFailures || [])));
   console.log('sent', JSON.stringify(await pg.evaluate(() => window.__sent)));
   console.log(JSON.stringify(await info(), null, 1).slice(0, 1500));

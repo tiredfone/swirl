@@ -184,3 +184,32 @@ impl Camera {
         self.cf
     }
 }
+
+impl Camera {
+    pub fn drag(&mut self, dx: f64, dy: f64) {
+        self.yaw -= dx * 0.002 * std::f64::consts::PI;
+        self.pitch -= dy * 0.0015 * std::f64::consts::PI;
+        self.pitch = (-PITCH).max(PITCH.min(self.pitch));
+    }
+
+    pub fn rotate_by(&mut self, dx: f64, dy: f64) {
+        self.yaw += dx * 0.86;
+        self.pitch = (-PITCH).max(PITCH.min(self.pitch + dy * 0.86));
+    }
+
+    pub fn zoom_by(&mut self, d: &DataModel, f: f64) {
+        let [lo, hi] = self.zoom_limits(d);
+        self.target_zoom = lo.max(hi.min(self.target_zoom * f));
+        self.zoom = self.target_zoom;
+    }
+
+    pub fn ray(&self, fov: f64, w: f64, h: f64, x: f64, y: f64) -> ([f64; 3], [f64; 3]) {
+        let ndc = [x / w * 2.0 - 1.0, -(y / h) * 2.0 + 1.0];
+        let t = (fov * std::f64::consts::PI / 360.0).tan();
+        let aspect = w / h.max(1.0);
+        let v = [ndc[0] * aspect * t, ndc[1] * t, -1.0];
+        let d = cf::vector(&self.cf, v[0], v[1], v[2]);
+        let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-12);
+        ([self.cf[0], self.cf[1], self.cf[2]], [d[0] / l, d[1] / l, d[2] / l])
+    }
+}
