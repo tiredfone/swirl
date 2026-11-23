@@ -12,6 +12,7 @@ pub struct LuaVm {
     core: Rc<RefCell<swirl_lua::client_api::CoreState>>,
     anim: Rc<RefCell<swirl_lua::client_api::AnimState>>,
     chars: Option<crate::clientchars::ClientChars>,
+    mouse_state: crate::clientchars::MouseState,
     t: f64,
 }
 
@@ -24,7 +25,7 @@ impl LuaVm {
         let mut dm = DataModel::new("client");
         dm.local_alloc = true;
         let dm = Rc::new(RefCell::new(dm));
-        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), chars: None, t: 0.0 })
+        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), t: 0.0 })
     }
 
     pub fn apply(&mut self, text: &str) -> bool {
@@ -67,9 +68,9 @@ impl LuaVm {
                             Some("own") if c.len() >= 12 => {
                                 let mut cf = [0.0; 12];
                                 cf.copy_from_slice(&c[..12]);
-                                ch.take_own(&dm, a["id"].as_u64().unwrap_or(0) as u32, cf);
+                                ch.take_own(&dm, a["id"].as_u64().unwrap_or(0) as u32, cf, a["s"].as_i64().unwrap_or(1));
                             }
-                            Some("tp") => ch.teleport(&dm, &c),
+                            Some("tp") => ch.teleport(&dm, &c, a["s"].as_i64().unwrap_or(0)),
                             _ => {}
                         }
                     }
@@ -217,6 +218,41 @@ impl LuaVm {
         let d = self.dm.borrow();
         match self.chars.as_ref() {
             Some(c) => serde_json::to_string(&c.ph.part_ids().into_iter().map(|i| format!("{}:{}", d.name(i), d.full_name(i))).collect::<Vec<_>>()).unwrap_or_default(),
+            None => "[]".into(),
+        }
+    }
+
+    pub fn update_mouse(&mut self, ox: f64, oy: f64, oz: f64, dx: f64, dy: f64, dz: f64, x: f64, y: f64, over_gui: bool, k: f64) {
+        let mouse = match self.core.borrow().mouse {
+            Some(m) => m,
+            None => return,
+        };
+        self.mouse_state.x = x;
+        self.mouse_state.y = y;
+        if let Some(ch) = self.chars.as_mut() {
+            let mut dm = self.dm.borrow_mut();
+            ch.update_mouse(&mut dm, mouse, &mut self.mouse_state, [ox, oy, oz], [dx, dy, dz], over_gui, k);
+        }
+    }
+
+    pub fn mouse_props(&self) -> String {
+        let mouse = match self.core.borrow().mouse {
+            Some(m) => m,
+            None => return "null".into(),
+        };
+        let d = self.dm.borrow();
+        let g = |k: &str| match d.get_prop(mouse, k) {
+            Some(Val::Arr(a)) => serde_json::json!(a),
+            Some(Val::Num(n)) => serde_json::json!(n),
+            Some(Val::Ref(r)) => serde_json::json!(r),
+            _ => serde_json::Value::Null,
+        };
+        serde_json::json!({"Hit": g("Hit"), "Origin": g("Origin"), "Target": g("Target"), "TargetSurface": g("TargetSurface"), "X": g("X"), "Y": g("Y")}).to_string()
+    }
+
+    pub fn take_out(&mut self) -> String {
+        match self.chars.as_mut() {
+            Some(c) => serde_json::to_string(&std::mem::take(&mut c.out)).unwrap_or_default(),
             None => "[]".into(),
         }
     }

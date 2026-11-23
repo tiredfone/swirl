@@ -228,6 +228,13 @@ Next in step 1: a client `DataModel` fed by `init` and `rep` (swirl-core), the L
 - `tools/luavm-replay.mjs <dist copy> <tap.json>` replays a recorded message stream (`?swirltap=1` and `TAPOUT=` in `tools/swirl-gui-test.cjs`) into the Rust VM in node with a chosen frame time (`DT=`); `HOLD=w:1500,wait:300,Space:200` presses keys in the test page.
 - Build speed: rapier stays in its own crate (swirl-physics), so editing the client, swirl-lua or swirl-core only relinks: incremental 1.2 to 1.5 s (swirl-client sources 1.2 s, swirl-physics 1.5 s), `build-client.sh` 4.2 s end to end, clean 70 s. wasm size 4.8 MB with the controller (was 2.0 MB; the `client-size` profile and wasm-opt are the lever if it matters).
 
+### Step 2d: outgoing character messages and Mouse in Rust (unreleased)
+
+- `ClientChars` builds the outgoing `char` message (`s`, `c`, `v`, `st`, `j` limb angles at 30 Hz, same rounding as `readLimbAngles`) and sets Humanoid Health to 0 below `FallenPartsDestroyHeight`. Live comparison with `?swirlhost=1` (`window.solarCharCmp`): 60 of 60 messages equal to Chocolate's (position, velocity, state, sequence), limb angles equal in 58 (the two others are the Animate start-up lag).
+- Mouse: `ClientChars::update_mouse` ports `updateMouse` (raycast ignoring the own character and `TargetFilter`, `Origin`, `Hit`, `Target`, `TargetSurface`, `X`, `Y`, ClickDetector hover with `hover` messages and `MaxActivationDistance`). `lua.js` feeds it the camera ray, mouse position, over-GUI flag and GUI scale; `window.solarMouseCmp`: 38 frames, Hit difference 1.1e-16, 0 target, surface or position mismatches.
+- Releases now build with the `client-size` profile (`tools/release-client.sh` sets `PROFILE=${PROFILE:-client-size}`): 4.49 MB raw, 1.29 MB gzip (the `client` profile is 4.8 MB, 1.48 MB gzip). `wasm-opt` is not installed and the automatic download of binaryen was refused in this session, so no wasm-opt pass is applied; install binaryen and run with `WASM_OPT=1` to shrink further.
+- Remotes belong to the 2018 runtime only (`FireServer` as `__remote` op `fs`, `InvokeServer` as async `__invokeServer`, results as `__invokeResult`, replies `rfr`/`rfc`/`re`); the 2012 runtime has none. They are ported together with the 2018 boot. Still open before the host replaces wasmoon: mouse button events (`Button1Down/Up`, `KeyDown/Up`, `Activated`, `act` and `mouse` messages) which need tools, then tools and backpack, `InsertService:LoadAsset`, seats, `moveTo`, remote characters, the 2018 boot and the GUI.
+
 ## Server port: independence, config and feature inventory (server 4)
 
 Owner direction: Swirl is 1:1 with Chocolate and vanilla but in Rust and depends on neither. Done for the server:

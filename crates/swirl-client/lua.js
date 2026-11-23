@@ -108,7 +108,11 @@ export async function startLua(opts) {
   const errors = [];
   const gameErrors = [];
   const logs = [];
-  const send = (o) => client.send(JSON.stringify(o));
+  const jsChars = [];
+  const send = (o) => {
+    if (o && o.t === 'char') jsChars.push(JSON.stringify(o));
+    client.send(JSON.stringify(o));
+  };
   const net = { send, bytesIn: 0, bytesOut: 0, close() {} };
 
   class RustRenderer {
@@ -678,6 +682,19 @@ export async function startLua(opts) {
     if (o.rec.state !== r.state) pos.stateMismatch++;
     pos.last = { js: [a[0], a[1], a[2]], rs: [r.cf[0], r.cf[1], r.cf[2]], jsState: o.rec.state, rsState: r.state };
   };
+  const mc = (window.solarMouseCmp = { n: 0, hitMax: 0, targetMismatch: 0, surfMismatch: 0, xyMismatch: 0 });
+  const compareMouse = () => {
+    const r = JSON.parse(window.solarVm.mouse_props());
+    if (!r || !r.Hit) return;
+    const m = world.mouse;
+    const h = m.props.get('Hit');
+    mc.n++;
+    for (let i = 0; i < 12; i++) mc.hitMax = Math.max(mc.hitMax, Math.abs(h[i] - r.Hit[i]));
+    const t = m.props.get('Target');
+    if ((t ? t.id : null) !== r.Target) mc.targetMismatch++;
+    if (m.props.get('TargetSurface') !== r.TargetSurface) mc.surfMismatch++;
+    if (m.props.get('X') !== r.X || m.props.get('Y') !== r.Y) mc.xyMismatch++;
+  };
   const compareAnim = () => {
     const o = world.own;
     if (!o || !o.rec || !o.rec.model) return;
@@ -797,6 +814,20 @@ export async function startLua(opts) {
         try {
           window.solarVm.update(dt, input.move[0], input.move[2], !!input.jump);
           comparePos();
+          const rsOut = JSON.parse(window.solarVm.take_out());
+          const cc = (window.solarCharCmp = window.solarCharCmp || { js: 0, rs: 0, equal: 0, diff: [] });
+          const jsOut = jsChars.splice(0);
+          cc.js += jsOut.length;
+          cc.rs += rsOut.length;
+          for (let i = 0; i < Math.min(jsOut.length, rsOut.length); i++) {
+            const a = JSON.parse(jsOut[i]);
+            const b = JSON.parse(rsOut[i]);
+            const near = (x, y) => x.length === y.length && x.every((v, k) => Math.abs(v - y[k]) < 1e-3);
+            const body = a.s === b.s && a.st === b.st && near(a.c, b.c) && near(a.v, b.v);
+            if (body) cc.equal++;
+            else if (cc.diff.length < 3) cc.diff.push([jsOut[i], rsOut[i]]);
+            if (near(a.j, b.j)) cc.limbsEqual = (cc.limbsEqual || 0) + 1;
+          }
         } catch (e) {
           errors.push('vmupdate: ' + e);
         }
@@ -811,6 +842,14 @@ export async function startLua(opts) {
       const ray = state.renderer.pick(ms.ndc[0], ms.ndc[1]);
       ms.overGui = false;
       const cd = world.updateMouse(ray, state.renderer);
+      if (window.solarVm && /[?&]swirlhost=1/.test(location.search)) {
+        try {
+          window.solarVm.update_mouse(ray.origin[0], ray.origin[1], ray.origin[2], ray.dir[0], ray.dir[1], ray.dir[2], ms.x, ms.y, !!ms.overGui, world.guiScale());
+          compareMouse();
+        } catch (e) {
+          errors.push('vmmouse: ' + e);
+        }
+      }
       const icon = (world.toolMouse && world.toolMouse.props.get('Icon')) || world.mouse.props.get('Icon');
       cursor.set(camera.shiftLock && camera.mouseLocked() && !camera.firstPerson ? CURSORS.mouseLock : icon || (cd ? CURSORS.hand : world.mouseHit && world.mouseHit.part ? CURSORS.arrow : CURSORS.far));
       if (document.pointerLockElement === canvas || camera.aimCentered()) cursor.place(camera.aimCentered(), true);

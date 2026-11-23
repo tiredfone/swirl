@@ -3,7 +3,7 @@ set -e
 cd /var/www/swirl
 out=${OUT:-/var/www/swirl/dist/client}
 place=${CHECK_PLACE:-564}
-tools/build-client.sh "$out"
+PROFILE=${PROFILE:-client-size} tools/build-client.sh "$out"
 if [ ! -d "$out/chocolate" ]; then echo "build output has no chocolate directory"; exit 1; fi
 version=$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$out/manifest.json")
 notes=${NOTES:-"Swirl wasm client $version"}
