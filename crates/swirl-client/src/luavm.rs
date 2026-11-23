@@ -9,6 +9,7 @@ pub struct LuaVm {
     dm: Rc<RefCell<DataModel>>,
     host: Option<Host>,
     run: bool,
+    core: Rc<RefCell<swirl_lua::client_api::CoreState>>,
     t: f64,
 }
 
@@ -21,7 +22,7 @@ impl LuaVm {
         let mut dm = DataModel::new("client");
         dm.local_alloc = true;
         let dm = Rc::new(RefCell::new(dm));
-        Ok(LuaVm { dm, host: None, run: false, t: 0.0 })
+        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), t: 0.0 })
     }
 
     pub fn apply(&mut self, text: &str) -> bool {
@@ -37,9 +38,16 @@ impl LuaVm {
                 swirl_core::wire::apply_init(&mut dm, &snap);
                 dm.local_player = m["you"].as_u64().map(|v| v as u32);
                 if self.run {
+                    let mouse = boot(&mut dm);
+                    self.core.borrow_mut().mouse = mouse;
+                    if dm.era != 2018 {
+                        let sc = dm.services.get("ScriptContext").copied();
+                        self.core.borrow_mut().queue.push((37801172, sc, "StarterScript".to_string()));
+                    }
                     drop(dm);
                     self.host = Host::new(self.dm.clone()).ok();
                     if let Some(h) = self.host.as_mut() {
+                        h.set_handler(Box::new(swirl_lua::client_api::ClientApi { core: self.core.clone() }));
                         h.scan_scripts();
                     }
                 }
@@ -84,13 +92,63 @@ impl LuaVm {
         Ok(())
     }
 
+    pub fn provide_core_source(&mut self, id: f64, text: Option<String>) {
+        self.core.borrow_mut().sources.insert(id as u64, text);
+    }
+
+    pub fn take_wanted(&mut self) -> String {
+        let w = std::mem::take(&mut self.core.borrow_mut().wanted);
+        serde_json::to_string(&w).unwrap_or_default()
+    }
+
     pub fn set_run(&mut self, run: bool) {
         self.run = run;
+    }
+
+    fn drain_core(&mut self) {
+        let queue = std::mem::take(&mut self.core.borrow_mut().queue);
+        let mut keep = vec![];
+        for (cid, parent, name) in queue {
+            let src = self.core.borrow().sources.get(&cid).cloned();
+            match src {
+                Some(Some(text)) => {
+                    let parent = parent.filter(|p| self.dm.borrow().get(*p).map(|i| !i.destroyed).unwrap_or(false)).or_else(|| self.dm.borrow().services.get("ScriptContext").copied());
+                    let sid = {
+                        let mut dm = self.dm.borrow_mut();
+                        match dm.create_any("CoreScript", None) {
+                            Ok(sid) => {
+                                dm.set_prop_quiet(sid, "Source", Val::Str(text));
+                                dm.set_prop_quiet(sid, "Name", Val::Str(name.clone()));
+                                dm.get_mut_name(sid, &name);
+                                if let Some(p) = parent {
+                                    let _ = dm.set_parent(sid, Some(p));
+                                }
+                                Some(sid)
+                            }
+                            Err(_) => None,
+                        }
+                    };
+                    if let (Some(sid), Some(h)) = (sid, self.host.as_mut()) {
+                        h.scan_subtree(sid);
+                    }
+                }
+                Some(None) => {}
+                None => {
+                    let mut c = self.core.borrow_mut();
+                    if c.requested.insert(cid) {
+                        c.wanted.push(cid);
+                    }
+                    keep.push((cid, parent, name));
+                }
+            }
+        }
+        self.core.borrow_mut().queue.extend(keep);
     }
 
     pub fn tick(&mut self, dt: f64) {
         self.t += dt;
         swirl_lua::clock::set_now(self.t);
+        self.drain_core();
         if let Some(h) = self.host.as_mut() {
             h.tick(self.t);
         }
@@ -148,4 +206,37 @@ impl LuaVm {
         }
         serde_json::to_string(&m).unwrap_or_default()
     }
+}
+
+fn boot(dm: &mut DataModel) -> Option<u32> {
+    let mut mouse_id = None;
+    for s in ["ScriptContext", "GuiService", "LogService", "MarketplaceService", "TeleportService", "InsertService", "ChangeHistoryService", "PersonalServerService", "PointsService", "HttpService", "ContextActionService", "NetworkClient", "CollectionService", "LocalBackpack", "CoreGui", "UserInputService", "RunService"] {
+        let _ = dm.service(s);
+    }
+    if let (Some(players), Some(lp)) = (dm.services.get("Players").copied(), dm.local_player) {
+        dm.set_prop_quiet(players, "LocalPlayer", Val::Ref(Some(lp)));
+    }
+    if let Ok(m) = dm.create_any("PlayerMouse", None) {
+        mouse_id = Some(m);
+        dm.set_prop_quiet(m, "Name", Val::Str("Mouse".into()));
+        dm.get_mut_name(m, "Mouse");
+    }
+    if let Some(ws) = dm.services.get("Workspace").copied() {
+        if let Ok(cam) = dm.create_any("Camera", None) {
+            dm.set_prop_quiet(cam, "Name", Val::Str("Camera".into()));
+            dm.get_mut_name(cam, "Camera");
+            dm.set_prop_quiet(cam, "CameraType", Val::Num(5.0));
+            dm.set_prop_quiet(cam, "FieldOfView", Val::Num(70.0));
+            dm.link_quiet(cam, Some(ws));
+            dm.set_prop_quiet(ws, "CurrentCamera", Val::Ref(Some(cam)));
+        }
+    }
+    if let Some(cg) = dm.services.get("CoreGui").copied() {
+        if let Ok(g) = dm.create_any("ScreenGui", None) {
+            dm.set_prop_quiet(g, "Name", Val::Str("RobloxGui".into()));
+            dm.get_mut_name(g, "RobloxGui");
+            dm.link_quiet(g, Some(cg));
+        }
+    }
+    mouse_id
 }

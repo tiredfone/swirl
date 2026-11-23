@@ -1,5 +1,35 @@
 import { LuaVm } from './swirl_client.js';
 
+const fetchCoreSource = async (id) => {
+  try {
+    const r = await fetch('/asset/?id=' + id, { credentials: 'same-origin' });
+    if (!r.ok) return null;
+    let t = await r.text();
+    if (t.charCodeAt(0) === 0xfeff) t = t.slice(1);
+    if (t.startsWith('%')) t = t.slice(t.indexOf('\n') + 1);
+    if (t.startsWith('<') || /^Failed to fetch asset/.test(t)) return null;
+    return t;
+  } catch (e) {
+    return null;
+  }
+};
+
+const fetchCoreTree = async (root) => {
+  const out = new Map();
+  let frontier = [root];
+  for (let depth = 0; depth < 4 && frontier.length; depth++) {
+    const next = [];
+    const got = await Promise.all(frontier.filter((id) => !out.has(id)).map(async (id) => [id, await fetchCoreSource(id)]));
+    for (const [id, src] of got) {
+      out.set(id, src);
+      if (!src) continue;
+      for (const re of [/AddCoreScript\(\s*(\d+)/g, /AddStarterScript\(\s*(\d+)/g, /RegisterLibrary\([^,]+,\s*["']?(\d+)/g]) for (const m of src.matchAll(re)) next.push(+m[1]);
+    }
+    frontier = next;
+  }
+  return out;
+};
+
 const addImportMap = (pub) => {
   const map = {
     imports: {
@@ -636,7 +666,11 @@ export async function startLua(opts) {
     if (window.solarVm && /[?&]swirlhost=1/.test(location.search)) {
       try {
         window.solarVm.tick(1 / 60);
-        for (const l of JSON.parse(window.solarVm.logs())) (window.solarRustLogs = window.solarRustLogs || []).push(l);
+        for (const id of JSON.parse(window.solarVm.take_wanted())) {
+          fetchCoreTree(id).then((tree) => {
+            for (const [k, v] of [...tree].reverse()) window.solarVm.provide_core_source(k, v);
+          });
+        }
       } catch (e) {
         errors.push('vmtick: ' + e);
       }
