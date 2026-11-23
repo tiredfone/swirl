@@ -855,6 +855,7 @@ export async function startLua(opts) {
       world.update(dt, input);
       if (window.solarVm && /[?&]swirlhost=1/.test(location.search)) {
         try {
+          window.solarVm.set_drive_input(!!input.forward, !!input.back, !!input.left, !!input.right, !!input.dismount);
           window.solarVm.update(dt, input.move[0], input.move[2], !!input.jump);
           if (state.guiRust && state.gui) {
             if (!state.rustGuiAttached) {

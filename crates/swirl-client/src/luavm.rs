@@ -312,6 +312,67 @@ impl LuaVm {
                 }
                 true
             }
+            Some("mktr") => {
+                let k = m["k"].as_u64().unwrap_or(0) as u32;
+                let r = &m["r"];
+                drop(dm);
+                let tok = self.core.borrow_mut().mkt.remove(&k);
+                if let (Some(h), Some(tok)) = (self.host.as_mut(), tok) {
+                    let w = if let Some(info) = r.get("info") {
+                        json_to_wire(info)
+                    } else if let Some(o) = r.get("owns") {
+                        swirl_lua::host::Wire::B(o.as_bool().unwrap_or(false))
+                    } else if let Some(n) = r.get("robux") {
+                        swirl_lua::host::Wire::N(n.as_f64().unwrap_or(0.0))
+                    } else if r.is_null() {
+                        json_to_wire(&serde_json::json!({"success": false, "status": "Error"}))
+                    } else {
+                        json_to_wire(r)
+                    };
+                    h.resolve(tok, Ok(vec![w]));
+                }
+                true
+            }
+            Some("prompt") => {
+                let kind = m["kind"].as_str().unwrap_or("asset").to_string();
+                let id = m["id"].as_u64().unwrap_or(0);
+                let equip = m["equip"].as_bool().unwrap_or(false);
+                drop(dm);
+                self.core.borrow_mut().prompt_req.push((kind, id, equip));
+                true
+            }
+            Some("pver") => {
+                let mps = dm.services.get("MarketplaceService").copied();
+                let uid = dm.local_player.and_then(|p| match dm.get_prop(p, "userId") {
+                    Some(Val::Num(n)) => Some(*n),
+                    _ => None,
+                });
+                drop(dm);
+                if let (Some(h), Some(mps), Some(uid)) = (self.host.as_mut(), mps, uid) {
+                    h.fire(mps, "ServerPurchaseVerification", vec![swirl_lua::host::Wire::Dict(vec![("playerId".into(), swirl_lua::host::Wire::N(uid)), ("productId".into(), swirl_lua::host::Wire::N(m["product"].as_f64().unwrap_or(0.0))), ("receipt".into(), swirl_lua::host::Wire::S(m["receipt"].as_str().unwrap_or("").to_string()))])]);
+                }
+                true
+            }
+            Some("out") => {
+                let ls = dm.services.get("LogService").copied();
+                let era = dm.era;
+                drop(dm);
+                let mt = match m["k"].as_str() {
+                    Some("error") => 3.0,
+                    Some("warn") => 2.0,
+                    _ => 0.0,
+                };
+                let text = m["m"].as_str().unwrap_or("").to_string();
+                if let (Some(h), Some(ls)) = (self.host.as_mut(), ls) {
+                    use swirl_lua::host::Wire;
+                    if era == 2018 {
+                        h.fire(ls, "ServerMessageOut", vec![Wire::S(text), Wire::E("MessageType".into(), mt), Wire::N((self.now_ms / 1000.0).floor())]);
+                    } else {
+                        h.fire(ls, "MessageOut", vec![Wire::S(format!("[server] {}", text)), Wire::E("MessageType".into(), mt)]);
+                    }
+                }
+                true
+            }
             Some("rfr") => {
                 let k = m["k"].as_u64().unwrap_or(0) as u32;
                 let args = m["a"].as_array().map(|a| swirl_lua::wire_from_json(a)).unwrap_or_default();
@@ -555,6 +616,12 @@ impl LuaVm {
         self.now_ms = now_ms;
     }
 
+    pub fn set_drive_input(&mut self, forward: bool, back: bool, left: bool, right: bool, dismount: bool) {
+        if let Some(c) = self.chars.as_mut() {
+            c.drive_in = [forward, back, left, right, dismount];
+        }
+    }
+
     pub fn set_screen(&mut self, w: f64, h: f64) {
         self.screen = [w, h];
         self.core.borrow_mut().screen = (w, h);
@@ -562,6 +629,51 @@ impl LuaVm {
 
     pub fn set_run(&mut self, run: bool) {
         self.run = run;
+    }
+
+    fn drain_market(&mut self) {
+        let (prompts, finished) = {
+            let mut c = self.core.borrow_mut();
+            (std::mem::take(&mut c.prompt_req), std::mem::take(&mut c.finished))
+        };
+        let (mps, lp, uid) = {
+            let dm = self.dm.borrow();
+            let lp = dm.local_player;
+            let uid = lp.and_then(|p| match dm.get_prop(p, "userId") {
+                Some(Val::Num(n)) => Some(*n),
+                _ => None,
+            });
+            (dm.services.get("MarketplaceService").copied(), lp, uid)
+        };
+        let (mps, lp) = match (mps, lp) {
+            (Some(m), Some(l)) => (m, l),
+            _ => return,
+        };
+        use swirl_lua::host::Wire;
+        if let Some(h) = self.host.as_mut() {
+            for (kind, id, equip) in prompts {
+                if id == 0 {
+                    continue;
+                }
+                if kind == "gamepass" {
+                    self.core.borrow_mut().pass_prompts.insert(id);
+                    h.fire(mps, "PromptPurchaseRequested", vec![Wire::I(lp), Wire::N(id as f64), Wire::B(false), Wire::E("CurrencyType".into(), 0.0)]);
+                } else if kind == "product" {
+                    h.fire(mps, "PromptProductPurchaseRequested", vec![Wire::I(lp), Wire::N(id as f64), Wire::B(equip), Wire::E("CurrencyType".into(), 0.0)]);
+                } else {
+                    h.fire(mps, "PromptPurchaseRequested", vec![Wire::I(lp), Wire::N(id as f64), Wire::B(equip), Wire::E("CurrencyType".into(), 0.0)]);
+                }
+            }
+            for (kind, _who, id, ok) in finished {
+                if kind == "gamepass" {
+                    h.fire(mps, "PromptGamePassPurchaseFinished", vec![Wire::I(lp), Wire::N(id as f64), Wire::B(ok)]);
+                } else if kind == "asset" {
+                    h.fire(mps, "PromptPurchaseFinished", vec![Wire::I(lp), Wire::N(id as f64), Wire::B(ok)]);
+                } else {
+                    h.fire(mps, "PromptProductPurchaseFinished", vec![Wire::N(uid.unwrap_or(0.0)), Wire::N(id as f64), Wire::B(ok)]);
+                }
+            }
+        }
     }
 
     fn drain_core(&mut self) {
@@ -817,6 +929,7 @@ impl LuaVm {
         self.t += dt;
         swirl_lua::clock::set_now(self.t);
         self.drain_core();
+        self.drain_market();
         {
             let mut g = self.gui.borrow_mut();
             g.now = self.t;
@@ -837,6 +950,13 @@ impl LuaVm {
                         self.core.borrow_mut().out.push(serde_json::json!({"t": "rfr", "k": tok as i64, "a": a}).to_string());
                     }
                     _ => {}
+                }
+            }
+        }
+        if let Some((hum, pos)) = self.core.borrow_mut().move_to.take() {
+            if let Some(ch) = self.chars.as_mut() {
+                if ch.own.as_ref().map(|o| o.hum == hum).unwrap_or(false) {
+                    ch.move_to = pos;
                 }
             }
         }
@@ -1083,4 +1203,16 @@ fn intern(s: &str) -> &'static str {
         n.insert(s.to_string(), leaked);
         leaked
     })
+}
+
+fn json_to_wire(j: &serde_json::Value) -> swirl_lua::host::Wire {
+    use swirl_lua::host::Wire;
+    match j {
+        serde_json::Value::Null => Wire::Nil,
+        serde_json::Value::Bool(b) => Wire::B(*b),
+        serde_json::Value::Number(n) => Wire::N(n.as_f64().unwrap_or(0.0)),
+        serde_json::Value::String(s) => Wire::S(s.clone()),
+        serde_json::Value::Array(a) => Wire::List(a.iter().map(json_to_wire).collect()),
+        serde_json::Value::Object(o) => Wire::Dict(o.iter().map(|(k, v)| (k.clone(), json_to_wire(v))).collect()),
+    }
 }
