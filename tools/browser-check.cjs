@@ -43,9 +43,14 @@ const pass = acct.password || acct.Password;
     config: !!window.solarClientConfig,
     luaFailed: window.solarLuaFailed || null,
   }));
-  await pg.waitForFunction('window.solarLua && window.solarLua.ready()', { timeout: 40000 }).catch(() => {});
+  await pg.waitForFunction('(window.solarLua && window.solarLua.ready()) || (window.solarApp && window.solarApp.vm && document.querySelector("[data-ipath]"))', { timeout: 40000 }).catch(() => {});
   await new Promise((r) => setTimeout(r, 4000));
-  const lua = await pg.evaluate(() => {
+  const appMode = await pg.evaluate(() => !!window.solarApp);
+  const lua = appMode ? await pg.evaluate(() => {
+    const paths = [...document.querySelectorAll('[data-ipath]')].map((e) => e.getAttribute('data-ipath'));
+    const has = (n) => paths.some((x) => x.endsWith('.' + n));
+    return { present: true, ready: !!window.solarApp.vm, era: window.solarApp.vm.client_era(), playerList: has('PlayerListScreen') || has('PlayerListContainer'), hotbarOrTopbar: has('CurrentLoadout') || has('TopBarFrame'), errors: window.solarApp.errors.slice(0, 5), nodes: paths.length, app: true };
+  }) : await pg.evaluate(() => {
     const L = window.solarLua;
     if (!L) return { present: false, failed: window.solarLuaFailed || null };
     const names = L.world.robloxGui.children.map((c) => c.props.get('Name'));
@@ -64,8 +69,8 @@ const pass = acct.password || acct.Password;
   let animSwing = 0;
   let animInfo = null;
   if (process.env.WALK) {
-    const pos = () => pg.evaluate(() => (window.solarLua && window.solarLua.ownPos ? window.solarLua.ownPos() : null));
-    const limbs = () => pg.evaluate(() => { if (!window.solarLua) return null; const w = window.solarLua.world; const m = w.own && w.own.model; if (!m) return null; const t = m.findChild('Torso') || m.findChild('HumanoidRootPart'); const tc = t.props.get('CFrame'); const rel = (n) => { const q = m.findChild(n); if (!q) return null; const c = q.props.get('CFrame'); const d = [c[0] - tc[0], c[1] - tc[1], c[2] - tc[2]]; return [tc[3] * d[0] + tc[6] * d[1] + tc[9] * d[2], tc[4] * d[0] + tc[7] * d[1] + tc[10] * d[2], tc[5] * d[0] + tc[8] * d[1] + tc[11] * d[2]]; }; let tracks = 0; try { tracks = (w.anims.playing(w.own.hum) || []).length; } catch (e) {} return { ll: rel('Left Leg') || rel('LeftUpperLeg'), rl: rel('Right Leg') || rel('RightUpperLeg'), animate: !!m.findChild('Animate'), tracks }; });
+    const pos = () => pg.evaluate(() => (window.solarApp && window.solarApp.vm ? (() => { const o = JSON.parse(window.solarApp.vm.own_state() || 'null'); return o ? [o.cf[0], o.cf[1], o.cf[2]] : null; })() : window.solarLua && window.solarLua.ownPos ? window.solarLua.ownPos() : null));
+    const limbs = () => pg.evaluate(() => { if (window.solarApp && window.solarApp.vm) { const m = JSON.parse(window.solarApp.vm.motor_angles()); const ks = Object.keys(m); const l = ks.find((k) => k.endsWith(':Left Hip')); const r = ks.find((k) => k.endsWith(':Right Hip')); return l && r ? { ll: [0, 0, m[l]], rl: [0, 0, m[r]], animate: ks.length > 0 } : null; } if (!window.solarLua) return null; const w = window.solarLua.world; const m = w.own && w.own.model; if (!m) return null; const t = m.findChild('Torso') || m.findChild('HumanoidRootPart'); const tc = t.props.get('CFrame'); const rel = (n) => { const q = m.findChild(n); if (!q) return null; const c = q.props.get('CFrame'); const d = [c[0] - tc[0], c[1] - tc[1], c[2] - tc[2]]; return [tc[3] * d[0] + tc[6] * d[1] + tc[9] * d[2], tc[4] * d[0] + tc[7] * d[1] + tc[10] * d[2], tc[5] * d[0] + tc[8] * d[1] + tc[11] * d[2]]; }; let tracks = 0; try { tracks = (w.anims.playing(w.own.hum) || []).length; } catch (e) {} return { ll: rel('Left Leg') || rel('LeftUpperLeg'), rl: rel('Right Leg') || rel('RightUpperLeg'), animate: !!m.findChild('Animate'), tracks }; });
     await pg.focus('#swirl-canvas').catch(() => {});
     const a = await pos();
     await pg.keyboard.down('w');

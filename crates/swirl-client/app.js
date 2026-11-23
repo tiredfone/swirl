@@ -361,6 +361,15 @@ export async function startApp({ client, cfg, canvas }) {
     }
   };
 
+  const CURSOR_URLS = { arrow: 'rbxasset://textures/ArrowCursor.png', far: 'rbxasset://textures/ArrowFarCursor.png', hand: 'rbxasset://textures/DragCursor.png', lock: 'rbxasset://textures/MouseLockedCursor.png' };
+  let cursorKey = null;
+  const setCursor = (key) => {
+    if (key === cursorKey) return;
+    cursorKey = key;
+    const u = imageUrl(CURSOR_URLS[key] || key);
+    canvas.style.cursor = u ? `url("${u}") 0 0, auto` : '';
+  };
+
   const applySky = async () => {
     if (!vm) return;
     const sk = JSON.parse(vm.sky_urls() || 'null');
@@ -494,6 +503,7 @@ export async function startApp({ client, cfg, canvas }) {
       if (kicked) client.close_connection && client.close_connection();
       terrainSync();
       applySky();
+      setCursor(vm.mouse_cursor());
     } catch (e) {
       errors.push('frame: ' + (e && e.stack ? e.stack : e));
       console.error(e);

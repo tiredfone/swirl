@@ -1,6 +1,9 @@
 const base = new URL('./chocolate/', import.meta.url).href;
 let map = {};
-const skip = new URLSearchParams(location.search).get('swirlapp') === '1';
+const appParam = new URLSearchParams(location.search).get('swirlapp');
+const cfgEra = Number((window.solarClientConfig || {}).clientVersion) || 0;
+export const useApp = appParam === '1' || (appParam !== '0' && cfgEra === 2012);
+const skip = useApp;
 try {
   if (skip) throw new Error('skip');
   map = await (await fetch(base + 'rewrite.json')).json();

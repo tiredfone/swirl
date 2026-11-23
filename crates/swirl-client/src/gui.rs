@@ -48,6 +48,11 @@ pub struct Gui {
     message: HtmlElement,
     pub forced_message: Option<String>,
     pending_focus: Option<(InstId, u32)>,
+    billboards: HtmlElement,
+    bb_live: HashSet<InstId>,
+    bb_sight: HashMap<InstId, (f64, bool, u32)>,
+    bb_world: Vec<InstId>,
+    bb_frame: u32,
 }
 
 struct Kids {
@@ -150,11 +155,12 @@ impl Gui {
         };
         let overlay = mk("ch-gui", root)?;
         let screen = mk("ch-screen", &overlay)?;
+        let billboards = mk("ch-billboards", &overlay)?;
         let hint = mk("ch-hint", &overlay)?;
         hint.set_hidden(true);
         let message = mk("ch-message", &overlay)?;
         message.set_hidden(true);
-        Some(Gui { doc, overlay, screen, nodes: HashMap::new(), closures: vec![], events: Rc::new(RefCell::new(vec![])), dirty: Rc::new(Cell::new(true)), scale_key: String::new(), focused: Rc::new(Cell::new(None)), last_state: HashMap::new(), hint, message, forced_message: None, pending_focus: None })
+        Some(Gui { doc, overlay, screen, nodes: HashMap::new(), closures: vec![], events: Rc::new(RefCell::new(vec![])), dirty: Rc::new(Cell::new(true)), scale_key: String::new(), focused: Rc::new(Cell::new(None)), last_state: HashMap::new(), hint, message, forced_message: None, pending_focus: None, billboards, bb_live: HashSet::new(), bb_sight: HashMap::new(), bb_world: vec![], bb_frame: 0 })
     }
 
     fn el(&self, tag: &str, cls: &str, parent: &HtmlElement) -> HtmlElement {
@@ -553,7 +559,7 @@ impl Gui {
                 self.message.set_text_content(Some(&t));
             }
         }
-        let dead: Vec<InstId> = self.nodes.keys().copied().filter(|i| !live.contains(i)).collect();
+        let dead: Vec<InstId> = self.nodes.keys().copied().filter(|i| !live.contains(i) && !self.bb_live.contains(i)).collect();
         for i in dead {
             if let Some(n) = self.nodes.remove(&i) {
                 n.el.remove();
@@ -852,6 +858,153 @@ impl Gui {
 
     pub fn commit_text(&mut self, d: &mut DataModel, inst: InstId, value: &str) {
         d.set_prop_quiet(inst, "Text", Val::Str(value.to_string()));
+    }
+
+    pub fn update_billboards(&mut self, d: &mut DataModel, ph: &swirl_physics::Physics, view: &crate::tags::View, now_ms: f64, own_char: Option<InstId>, fired: &mut Vec<(InstId, &'static str, Vec<Wire>)>) {
+        let ws = d.services.get("Workspace").copied();
+        let pg = d.local_player.and_then(|p| d.find_child_of_class(p, "PlayerGui"));
+        let scan = |d: &DataModel, root: Option<InstId>| -> Vec<InstId> {
+            let mut out = vec![];
+            if let Some(r) = root {
+                let mut all = vec![];
+                d.descendants(r, &mut all);
+                out.extend(all.into_iter().filter(|i| d.get(*i).map(|x| x.class == "BillboardGui").unwrap_or(false)));
+            }
+            out
+        };
+        if self.bb_frame % 15 == 0 || self.bb_world.is_empty() {
+            self.bb_world = scan(d, ws);
+        }
+        self.bb_frame += 1;
+        let mut list = self.bb_world.clone();
+        list.extend(scan(d, pg));
+        let mut live: HashSet<InstId> = HashSet::new();
+        let cam = [view.cf[0], view.cf[1], view.cf[2]];
+        let mut budget = 12;
+        let bb_el = self.billboards.clone();
+        for bb in list {
+            if d.get(bb).map(|i| i.destroyed).unwrap_or(true) {
+                continue;
+            }
+            let ad = match d.get_prop(bb, "Adornee") {
+                Some(Val::Ref(Some(a))) => Some(*a),
+                _ => d.get(bb).and_then(|i| i.parent).filter(|p| d.is_a(*p, "BasePart")),
+            };
+            let ad = match ad.filter(|a| d.is_a(*a, "BasePart")) {
+                Some(a) => a,
+                None => continue,
+            };
+            if !flag(d, bb, "Enabled", true) {
+                continue;
+            }
+            let cf = match d.get_prop(ad, "CFrame") {
+                Some(Val::Arr(a)) if a.len() >= 12 => [a[0], a[1], a[2]],
+                _ => continue,
+            };
+            let off = match d.get_prop(bb, "StudsOffset") { Some(Val::Arr(a)) if a.len() >= 3 => [a[0], a[1], a[2]], _ => [0.0; 3] };
+            let wo = match d.get_prop(bb, "StudsOffsetWorldSpace") { Some(Val::Arr(a)) if a.len() >= 3 => [a[0], a[1], a[2]], _ => [0.0; 3] };
+            let ex = match d.get_prop(bb, "ExtentsOffset") { Some(Val::Arr(a)) if a.len() >= 3 => [a[0], a[1], a[2]], _ => [0.0; 3] };
+            let asz = match d.get_prop(ad, "Size") { Some(Val::Arr(a)) if a.len() >= 3 => [a[0], a[1], a[2]], _ => [0.0; 3] };
+            let loc = [off[0] + ex[0] * asz[0] / 2.0, off[1] + ex[1] * asz[1] / 2.0, off[2] + ex[2] * asz[2] / 2.0];
+            let mut at = [cf[0] + wo[0], cf[1] + wo[1], cf[2] + wo[2]];
+            let basis = [swirl_physics::cf::vector(&view.cf, 1.0, 0.0, 0.0), swirl_physics::cf::vector(&view.cf, 0.0, 1.0, 0.0), swirl_physics::cf::vector(&view.cf, 0.0, 0.0, 1.0)];
+            for i in 0..3 {
+                at[0] += basis[i][0] * loc[i];
+                at[1] += basis[i][1] * loc[i];
+                at[2] += basis[i][2] * loc[i];
+            }
+            if let Some(Val::Arr(e)) = d.get_prop(bb, "ExtentsOffsetWorldSpace") {
+                if e.len() >= 3 {
+                    at[0] += e[0] * asz[0] / 2.0;
+                    at[1] += e[1] * asz[1] / 2.0;
+                    at[2] += e[2] * asz[2] / 2.0;
+                }
+            }
+            let p = crate::tags::project(view, at);
+            if self.node_for(d, bb, &bb_el).is_none() {
+                continue;
+            }
+            live.insert(bb);
+            let el = self.nodes[&bb].el.clone();
+            let p = match p {
+                Some(p) => p,
+                None => {
+                    style(&el, "display", "none");
+                    continue;
+                }
+            };
+            let maxd = num(d, bb, "MaxDistance", 0.0);
+            let dist_at = ((at[0] - cam[0]).powi(2) + (at[1] - cam[1]).powi(2) + (at[2] - cam[2]).powi(2)).sqrt();
+            if maxd > 0.0 && maxd.is_finite() && maxd < 1e8 && dist_at > maxd {
+                style(&el, "display", "none");
+                continue;
+            }
+            if let Some(Val::Ref(Some(h))) = d.get_prop(bb, "PlayerToHideFrom") {
+                if Some(*h) == d.local_player {
+                    style(&el, "display", "none");
+                    continue;
+                }
+            }
+            if !flag(d, bb, "AlwaysOnTop", false) {
+                let model = d.get(ad).and_then(|i| i.parent).filter(|m| d.get(*m).map(|x| x.class == "Model").unwrap_or(false));
+                let entry = self.bb_sight.entry(bb).or_insert((-1e9, true, 0));
+                if now_ms - entry.0 >= 90.0 && budget > 0 {
+                    budget -= 1;
+                    entry.0 = now_ms;
+                    let dd = [at[0] - cam[0], at[1] - cam[1], at[2] - cam[2]];
+                    let len = (dd[0] * dd[0] + dd[1] * dd[1] + dd[2] * dd[2]).sqrt();
+                    if len < 0.5 {
+                        entry.1 = true;
+                        entry.2 = 0;
+                    } else {
+                        let k = (len - 0.3).max(0.0) / len;
+                        let mut ig = vec![ad];
+                        if let Some(m) = model {
+                            if d.find_child_of_class(m, "Humanoid").is_some() {
+                                ig.push(m);
+                            }
+                        }
+                        if let Some(c) = own_char {
+                            ig.push(c);
+                        }
+                        let hit = ph.raycast(d, cam, [dd[0] * k, dd[1] * k, dd[2] * k], &ig, Some(&|q| matches!(d.get_prop(q, "Transparency"), Some(Val::Num(t)) if *t < 0.95) || d.get_prop(q, "Transparency").is_none()));
+                        if hit.part.is_some() {
+                            entry.2 += 1;
+                            if entry.2 >= 2 {
+                                entry.1 = false;
+                            }
+                        } else {
+                            entry.2 = 0;
+                            entry.1 = true;
+                        }
+                    }
+                }
+                if !entry.1 {
+                    style(&el, "display", "none");
+                    continue;
+                }
+            }
+            let dist = ((cf[0] - cam[0]).powi(2) + (cf[1] - cam[1]).powi(2) + (cf[2] - cam[2]).powi(2)).sqrt().max(0.1);
+            let px_per_stud = view.h / (2.0 * dist * (view.fov * std::f64::consts::PI / 360.0).tan());
+            let sz = arr4(d, bb, "Size", [0.0; 4]);
+            let (w, h) = (sz[0] * px_per_stud + sz[1], sz[2] * px_per_stud + sz[3]);
+            style(&el, "display", "");
+            style(&el, "left", &format!("{}px", p[0] - w / 2.0));
+            style(&el, "top", &format!("{}px", p[1] - h / 2.0));
+            style(&el, "width", &format!("{}px", w));
+            style(&el, "height", &format!("{}px", h));
+            style(&el, "z-index", &format!("{}", (1000.0 - dist).round()));
+            let mut lv = std::mem::take(&mut live);
+            self.layout_children(d, bb, [p[0] - w / 2.0, p[1] - h / 2.0], [w, h], &mut lv, fired);
+            live = lv;
+        }
+        let dead: Vec<InstId> = self.nodes.keys().copied().filter(|i| !live.contains(i) && self.bb_live.contains(i)).collect();
+        for i in dead {
+            if let Some(n) = self.nodes.remove(&i) {
+                n.el.remove();
+            }
+        }
+        self.bb_live = live;
     }
 
     pub fn pointer_over(&self, x: f64, y: f64) -> bool {

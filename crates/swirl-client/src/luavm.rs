@@ -610,6 +610,11 @@ impl LuaVm {
                 let own = ch.own.as_ref().map(|o| o.model);
                 t.update(&dm, &ch.ph, &view, own, now_ms);
                 t.update_bubbles(&dm, &view, now_ms);
+                drop(dm);
+                if let (Some(g), Some(ch)) = (self.gui_dom.as_mut(), self.chars.as_ref()) {
+                    let mut dm = self.dm.borrow_mut();
+                    g.update_billboards(&mut dm, &ch.ph, &view, now_ms, own, &mut fired);
+                }
             }
         }
         if let Some(h) = self.host.as_mut() {
@@ -955,6 +960,31 @@ impl LuaVm {
             let mut fired = vec![];
             ch.emit_mouse(&self.tools, mouse, intern(name), vec![], &mut fired);
             self.fired_later.extend(fired);
+        }
+    }
+
+    pub fn mouse_cursor(&self) -> String {
+        let mouse = match self.core.borrow().mouse {
+            Some(m) => m,
+            None => return "arrow".into(),
+        };
+        let d = self.dm.borrow();
+        let icon = |m: u32| match d.get_prop(m, "Icon") {
+            Some(Val::Str(s)) if !s.is_empty() => Some(s.clone()),
+            _ => None,
+        };
+        if let Some(i) = self.tools.tool_mouse.and_then(icon).or_else(|| icon(mouse)) {
+            return i;
+        }
+        if self.cam.shift_lock && !self.cam.first_person {
+            return "lock".into();
+        }
+        if self.mouse_state.hover.is_some() {
+            return "hand".into();
+        }
+        match d.get_prop(mouse, "Target") {
+            Some(Val::Ref(Some(_))) => "arrow".into(),
+            _ => "far".into(),
         }
     }
 
