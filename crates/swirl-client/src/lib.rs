@@ -48,10 +48,16 @@ impl Default for Scene {
 mod gl;
 
 #[cfg(target_arch = "wasm32")]
+mod camera;
+
+#[cfg(target_arch = "wasm32")]
 mod clientchars;
 
 #[cfg(target_arch = "wasm32")]
 mod gui;
+
+#[cfg(target_arch = "wasm32")]
+mod tags;
 
 #[cfg(target_arch = "wasm32")]
 mod luavm;

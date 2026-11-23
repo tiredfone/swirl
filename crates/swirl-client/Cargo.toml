@@ -7,6 +7,8 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
 swirl-net = { path = "../swirl-net" }
 wasm-bindgen = "=0.2.121"
 serde_json = "1"
@@ -18,5 +20,5 @@ swirl-physics = { path = "../swirl-physics" }
 version = "0.3.77"
 features = [
     "Window", "Document", "Element", "HtmlCanvasElement", "WebGl2RenderingContext", "WebGlProgram", "WebGlShader", "WebGlBuffer",
-    "WebGlVertexArrayObject", "WebGlUniformLocation", "WebSocket", "MessageEvent", "MouseEvent", "WheelEvent", "Event", "CloseEvent", "KeyboardEvent", "ImageBitmap", "WebGlTexture", "WebGlFramebuffer", "WebGlSampler", "ImageData", "OffscreenCanvas", "HtmlImageElement", "OffscreenCanvasRenderingContext2d", "TextMetrics", "HtmlElement", "HtmlInputElement", "HtmlTextAreaElement", "CssStyleDeclaration", "DomTokenList", "PointerEvent", "Node", "DomRect", "HtmlDivElement", "HtmlSpanElement", "DomStringMap", "EventTarget", "Document", "Window", "HtmlHeadElement",
+    "WebGlVertexArrayObject", "WebGlUniformLocation", "WebSocket", "MessageEvent", "MouseEvent", "WheelEvent", "Event", "CloseEvent", "KeyboardEvent", "ImageBitmap", "WebGlTexture", "WebGlFramebuffer", "WebGlSampler", "ImageData", "OffscreenCanvas", "HtmlImageElement", "OffscreenCanvasRenderingContext2d", "TextMetrics", "HtmlElement", "CanvasRenderingContext2d", "Response", "Headers", "Request", "RequestInit", "HtmlInputElement", "HtmlTextAreaElement", "CssStyleDeclaration", "DomTokenList", "PointerEvent", "Node", "DomRect", "HtmlDivElement", "HtmlSpanElement", "DomStringMap", "EventTarget", "Document", "Window", "HtmlHeadElement",
 ]

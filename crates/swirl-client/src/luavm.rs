@@ -41,6 +41,8 @@ pub struct LuaVm {
     screen: [f64; 2],
     gui_dom: Option<crate::gui::Gui>,
     gui_dirty: bool,
+    cam: crate::camera::Camera,
+    tags: Option<crate::tags::Tags>,
     tools: crate::clientchars::Tools,
     remote_moved: std::collections::HashSet<u32>,
     fired_later: Vec<(u32, &'static str, Vec<swirl_lua::host::Wire>)>,
@@ -56,7 +58,7 @@ impl LuaVm {
         let mut dm = DataModel::new("client");
         dm.local_alloc = true;
         let dm = Rc::new(RefCell::new(dm));
-        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), gui: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), screen: [800.0, 600.0], gui_dom: None, gui_dirty: true, tools: Default::default(), remote_moved: Default::default(), fired_later: vec![], t: 0.0 })
+        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), gui: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), screen: [800.0, 600.0], gui_dom: None, gui_dirty: true, cam: Default::default(), tags: None, tools: Default::default(), remote_moved: Default::default(), fired_later: vec![], t: 0.0 })
     }
 
     pub fn apply(&mut self, text: &str) -> bool {
@@ -275,9 +277,12 @@ impl LuaVm {
 
     pub fn attach_gui(&mut self, root: web_sys::HtmlElement) {
         self.gui_dom = crate::gui::Gui::new(&root);
+        if let (Some(g), Some(doc)) = (self.gui_dom.as_ref(), web_sys::window().and_then(|w| w.document())) {
+            self.tags = crate::tags::Tags::new(&doc, &g.overlay);
+        }
     }
 
-    pub fn gui_frame(&mut self, vw: f64, vh: f64, k: f64, l: f64, t: f64, r: f64, b: f64, show: bool) -> usize {
+    pub fn gui_frame(&mut self, vw: f64, vh: f64, k: f64, l: f64, t: f64, r: f64, b: f64, show: bool, now_ms: f64) -> usize {
         let mut fired: Vec<(u32, &'static str, Vec<swirl_lua::host::Wire>)> = vec![];
         let mut out: Vec<String> = vec![];
         let mut count = 0;
@@ -327,6 +332,21 @@ impl LuaVm {
             g.apply_pending_focus();
             count = g.node_count();
         }
+        if show {
+            if let (Some(t), Some(ch)) = (self.tags.as_mut(), self.chars.as_ref()) {
+                let dm = self.dm.borrow();
+                let fov = dm.services.get("Workspace").and_then(|w| match dm.get_prop(*w, "CurrentCamera") {
+                    Some(Val::Ref(Some(c))) => Some(*c),
+                    _ => None,
+                }).and_then(|c| match dm.get_prop(c, "FieldOfView") {
+                    Some(Val::Num(n)) if *n > 0.0 => Some(*n),
+                    _ => None,
+                }).unwrap_or(70.0);
+                let view = crate::tags::View { cf: self.cam.cf, fov, w: vw, h: vh };
+                let own = ch.own.as_ref().map(|o| o.model);
+                t.update(&dm, &ch.ph, &view, own, now_ms);
+            }
+        }
         if let Some(h) = self.host.as_mut() {
             for (inst, name, args) in fired {
                 h.fire(inst, name, args);
@@ -354,6 +374,23 @@ impl LuaVm {
     pub fn focus_text_box(&mut self, inst: u32, on: bool) {
         if let Some(g) = self.gui_dom.as_mut() {
             g.focus_box(inst, on);
+        }
+    }
+
+    pub fn camera_update(&mut self, yaw: f64, pitch: f64, zoom: f64, shift_lock: bool, pointer_locked: bool, key_yaw: f64, dt: f64) -> String {
+        self.cam.yaw = yaw;
+        self.cam.pitch = pitch;
+        self.cam.target_zoom = zoom;
+        self.cam.shift_lock = shift_lock;
+        self.cam.key_yaw = key_yaw;
+        let own = self.chars.as_ref().and_then(|c| c.own.as_ref()).map(|o| o.model);
+        let mut dm = self.dm.borrow_mut();
+        match self.chars.as_ref() {
+            Some(ch) => {
+                let cf = self.cam.update(&mut dm, &ch.ph, own, dt, pointer_locked);
+                serde_json::json!({"cf": cf, "yaw": self.cam.yaw, "zoom": self.cam.zoom, "fp": self.cam.first_person}).to_string()
+            }
+            None => "null".into(),
         }
     }
 

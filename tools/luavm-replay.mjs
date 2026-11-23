@@ -50,11 +50,11 @@ for (const raw of tap) {
     for (const l of JSON.parse(vm.logs())) all.push(l);
   }
 }
-for (let i = 0; i < 120; i++) {
+for (let i = 0; i < +(process.env.EXTRA || 120); i++) {
   vm.update(dt, 0, 0, false);
   for (const l of JSON.parse(vm.logs())) all.push(l);
 }
-console.log(vm.class_counts('CoreGui'), vm.class_counts('ScriptContext'));
+console.log(vm.class_counts("CoreGui"), vm.children_of("CoreGui.RobloxGui.CurrentLoadout.Slot1"));
 for (const l of all.slice(0, 8)) console.log(l.kind, l.msg.slice(0, 200));
 if (process.env.LUA) {
   vm.run_script(process.env.LUA);

@@ -2418,12 +2418,14 @@ dependencies = [
 name = "swirl-client"
 version = "1.20.0"
 dependencies = [
+ "js-sys",
  "serde_json",
  "swirl-core",
  "swirl-lua",
  "swirl-net",
  "swirl-physics",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 

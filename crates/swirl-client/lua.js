@@ -868,10 +868,11 @@ export async function startLua(opts) {
             }
             state.gui.overlay.style.visibility = 'hidden';
             const ins = world.guiInset || [0, 0, 0, 0];
-            window.solarRustGuiNodes = window.solarVm.gui_frame(canvas.clientWidth || 1, canvas.clientHeight || 1, world.guiScale ? world.guiScale() : 1, ins[0], ins[1], ins[2], ins[3], true);
+            window.solarRustGuiNodes = window.solarVm.gui_frame(canvas.clientWidth || 1, canvas.clientHeight || 1, world.guiScale ? world.guiScale() : 1, ins[0], ins[1], ins[2], ins[3], true, performance.now());
           }
           for (const l of JSON.parse(window.solarVm.logs())) (window.solarRustLogs = window.solarRustLogs || []).push(l);
           comparePos();
+          if (!camera.luaDriven) window.__rsCam = JSON.parse(window.solarVm.camera_update(camera.yaw, camera.pitch, camera.targetZoom, camera.shiftLock, document.pointerLockElement === canvas, camera.keyYaw, dt));
           const rsAll = JSON.parse(window.solarVm.take_out());
           const rsOut = rsAll.filter((x) => JSON.parse(x).t === 'char');
           const canon = (o) => JSON.stringify(Object.keys(o).sort().map((k) => [k, typeof o[k] === 'number' ? Math.round(o[k] * 100) / 100 : o[k]]));
@@ -906,6 +907,15 @@ export async function startLua(opts) {
         }
       }
       camera.update(dt);
+      if (window.__rsCam && !camera.luaDriven) {
+        const cc = (window.solarCamCmp = window.solarCamCmp || { n: 0, max: 0, sum: 0 });
+        let m = 0;
+        for (let i = 0; i < 12; i++) m = Math.max(m, Math.abs(camera.cf[i] - window.__rsCam.cf[i]));
+        cc.n++;
+        cc.max = Math.max(cc.max, m);
+        cc.sum += m;
+        window.__rsCam = null;
+      }
       if (camera.aimCentered()) {
         const cr = canvas.getBoundingClientRect();
         ms.x = cr.width / 2;
