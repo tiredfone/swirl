@@ -42,6 +42,8 @@ pub struct LuaVm {
     gui_dom: Option<crate::gui::Gui>,
     gui_dirty: bool,
     cam: crate::camera::Camera,
+    now_ms: f64,
+    friends: std::collections::HashMap<u32, f64>,
     tags: Option<crate::tags::Tags>,
     tools: crate::clientchars::Tools,
     remote_moved: std::collections::HashSet<u32>,
@@ -58,7 +60,7 @@ impl LuaVm {
         let mut dm = DataModel::new("client");
         dm.local_alloc = true;
         let dm = Rc::new(RefCell::new(dm));
-        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), gui: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), screen: [800.0, 600.0], gui_dom: None, gui_dirty: true, cam: Default::default(), tags: None, tools: Default::default(), remote_moved: Default::default(), fired_later: vec![], t: 0.0 })
+        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), gui: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), screen: [800.0, 600.0], gui_dom: None, gui_dirty: true, cam: Default::default(), now_ms: 0.0, friends: Default::default(), tags: None, tools: Default::default(), remote_moved: Default::default(), fired_later: vec![], t: 0.0 })
     }
 
     pub fn apply(&mut self, text: &str) -> bool {
@@ -192,6 +194,133 @@ impl LuaVm {
                 }
                 true
             }
+            Some("anim") => {
+                let hum = m["h"].as_u64().unwrap_or(0) as u32;
+                if dm.get(hum).map(|i| i.class == "Humanoid").unwrap_or(false) {
+                    if let Some(k) = m["k"].as_str() {
+                        let key = format!("r{}", k);
+                        let f = |n: &str| m[n].as_f64();
+                        self.anim.borrow_mut().an.op(&mut dm, hum, &key, m["op"].as_str().unwrap_or(""), m["id"].as_u64(), f("a"), f("b"), f("c"), None, f("st").unwrap_or(0.0));
+                    }
+                }
+                true
+            }
+            Some("chat") => {
+                let players = dm.services.get("Players").copied();
+                let speaker = if let Some(p) = m["p"].as_u64() {
+                    Some(p as u32)
+                } else {
+                    let uid = m["u"].as_f64();
+                    players.and_then(|pl| dm.get(pl).and_then(|i| i.children.iter().copied().find(|c| dm.get(*c).map(|x| x.class == "Player").unwrap_or(false) && matches!(dm.get_prop(*c, "userId"), Some(Val::Num(n)) if Some(*n) == uid))))
+                };
+                let kind = match m["k"].as_str() {
+                    Some("team") => 1.0,
+                    Some("whisper") => 2.0,
+                    _ => 0.0,
+                };
+                let to = m["to"].as_u64().map(|t| t as u32).filter(|t| dm.get(*t).is_some());
+                let text = m["m"].as_str().unwrap_or("").to_string();
+                let head = m["h"].as_u64().map(|h| h as u32).filter(|h| dm.get(*h).is_some());
+                let era = dm.era;
+                drop(dm);
+                use swirl_lua::host::Wire;
+                if let (Some(h), Some(sp), Some(pl)) = (self.host.as_mut(), speaker, players) {
+                    h.fire(pl, "PlayerChatted", vec![Wire::E("PlayerChatType".into(), kind), Wire::I(sp), Wire::S(text.clone()), to.map(Wire::I).unwrap_or(Wire::Nil)]);
+                    h.fire(sp, "Chatted", vec![Wire::S(text.clone()), to.map(Wire::I).unwrap_or(Wire::Nil)]);
+                }
+                if let (Some(hd), Some(t)) = (head, self.tags.as_mut()) {
+                    if kind != 2.0 && era != 2018 {
+                        t.add_bubble(hd, &text, self.now_ms);
+                    }
+                }
+                true
+            }
+            Some("bubble") => {
+                let id = m["id"].as_u64().unwrap_or(0) as u32;
+                let text = m["m"].as_str().unwrap_or("").to_string();
+                let era = dm.era;
+                let chat = dm.services.get("Chat").copied();
+                let exists = dm.get(id).is_some();
+                drop(dm);
+                if exists {
+                    if era == 2018 {
+                        if let (Some(h), Some(c)) = (self.host.as_mut(), chat) {
+                            use swirl_lua::host::Wire;
+                            h.fire(c, "Chatted", vec![Wire::I(id), Wire::S(text), Wire::E("ChatColor".into(), m["c"].as_f64().unwrap_or(0.0))]);
+                        }
+                    } else if let Some(t) = self.tags.as_mut() {
+                        t.add_bubble(id, &text, self.now_ms);
+                    }
+                }
+                true
+            }
+            Some("msg") => {
+                drop(dm);
+                if let Some(g) = self.gui_dom.as_mut() {
+                    g.forced_message = m["m"].as_str().map(String::from);
+                }
+                self.gui_dirty = true;
+                true
+            }
+            Some("fs") => {
+                let lp = dm.local_player;
+                let mut changes = vec![];
+                if let Some(o) = m["s"].as_object() {
+                    for (k, v) in o {
+                        let id: u32 = k.parse().unwrap_or(0);
+                        let st = v.as_f64().unwrap_or(1.0);
+                        let prev = self.friends.get(&id).copied().unwrap_or(1.0);
+                        self.friends.insert(id, st);
+                        if prev != st && dm.get(id).is_some() {
+                            changes.push((id, st));
+                        }
+                    }
+                }
+                drop(dm);
+                if let (Some(h), Some(p)) = (self.host.as_mut(), lp) {
+                    for (id, st) in changes {
+                        use swirl_lua::host::Wire;
+                        h.fire(p, "FriendStatusChanged", vec![Wire::I(id), Wire::E("FriendStatus".into(), st)]);
+                    }
+                }
+                true
+            }
+            Some("fre") => {
+                let (a, b) = (m["a"].as_u64().unwrap_or(0) as u32, m["b"].as_u64().unwrap_or(0) as u32);
+                let players = dm.services.get("Players").copied();
+                let ok = dm.get(a).is_some() && dm.get(b).is_some();
+                drop(dm);
+                if let (true, Some(h), Some(p)) = (ok, self.host.as_mut(), players) {
+                    use swirl_lua::host::Wire;
+                    h.fire(p, "FriendRequestEvent", vec![Wire::I(a), Wire::I(b), Wire::E("FriendRequestEvent".into(), m["e"].as_f64().unwrap_or(0.0))]);
+                }
+                true
+            }
+            Some("re") | Some("rfc") => {
+                let id = m["id"].as_u64().unwrap_or(0) as u32;
+                let class = dm.get(id).map(|i| i.class.clone());
+                let args = m["a"].as_array().map(|a| swirl_lua::wire_from_json(a)).unwrap_or_default();
+                drop(dm);
+                if let Some(h) = self.host.as_mut() {
+                    if m["t"] == "re" && class.as_deref() == Some("RemoteEvent") {
+                        h.fire(id, "OnClientEvent", args);
+                    } else if m["t"] == "rfc" && class.as_deref() == Some("RemoteFunction") {
+                        let mut full = vec![swirl_lua::host::Wire::N(m["k"].as_f64().unwrap_or(0.0))];
+                        full.extend(args);
+                        h.fire(id, "__Invoke", full);
+                    }
+                }
+                true
+            }
+            Some("rfr") => {
+                let k = m["k"].as_u64().unwrap_or(0) as u32;
+                let args = m["a"].as_array().map(|a| swirl_lua::wire_from_json(a)).unwrap_or_default();
+                drop(dm);
+                if let (Some(h), Some(tok)) = (self.host.as_mut(), self.core.borrow_mut().invokes.remove(&k)) {
+                    h.resolve(tok, Ok(args));
+                }
+                true
+            }
             _ => false,
         }
     }
@@ -309,6 +438,7 @@ impl LuaVm {
     }
 
     pub fn gui_frame(&mut self, vw: f64, vh: f64, k: f64, l: f64, t: f64, r: f64, b: f64, show: bool, now_ms: f64) -> usize {
+        self.now_ms = now_ms;
         let mut fired: Vec<(u32, &'static str, Vec<swirl_lua::host::Wire>)> = vec![];
         let mut out: Vec<String> = vec![];
         let mut count = 0;
@@ -371,6 +501,7 @@ impl LuaVm {
                 let view = crate::tags::View { cf: self.cam.cf, fov, w: vw, h: vh };
                 let own = ch.own.as_ref().map(|o| o.model);
                 t.update(&dm, &ch.ph, &view, own, now_ms);
+                t.update_bubbles(&dm, &view, now_ms);
             }
         }
         if let Some(h) = self.host.as_mut() {
@@ -418,6 +549,10 @@ impl LuaVm {
             }
             None => "null".into(),
         }
+    }
+
+    pub fn sync_now(&mut self, now_ms: f64) {
+        self.now_ms = now_ms;
     }
 
     pub fn set_screen(&mut self, w: f64, h: f64) {
@@ -689,6 +824,21 @@ impl LuaVm {
         }
         if let Some(h) = self.host.as_mut() {
             h.tick(self.t);
+        }
+        if let Some(h) = self.host.as_mut() {
+            for r in h.take_requests() {
+                match r {
+                    swirl_lua::host::Req::Remote(id, op, args) if op == "fs" => {
+                        let a = swirl_lua::wire_to_json(&args);
+                        self.core.borrow_mut().out.push(serde_json::json!({"t": "re", "id": id, "a": a}).to_string());
+                    }
+                    swirl_lua::host::Req::InvokeResult(_, tok, args) => {
+                        let a = swirl_lua::wire_to_json(&args);
+                        self.core.borrow_mut().out.push(serde_json::json!({"t": "rfr", "k": tok as i64, "a": a}).to_string());
+                    }
+                    _ => {}
+                }
+            }
         }
         let fired = match self.chars.as_mut() {
             Some(ch) => {

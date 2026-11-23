@@ -50,6 +50,7 @@ const srv = http.createServer((req, res) => {
   const A = await open('A', qs);
   await A.bringToFront();
   await wait(+(process.env.SETTLE || 9000));
+  if (process.env.CHATB) await B.evaluate((t) => window.solarClient.send(JSON.stringify({ t: 'chat', m: t, k: 'all' })), process.env.CHATB);
   await A.evaluate(() => { const c = window.solarLua && window.solarLua.state && window.solarLua.state.camera; if (c) { c.yaw = 0.6; c.pitch = -0.25; c.targetZoom = 9; } });
   await wait(2500);
   if (process.env.EVAL) console.log(JSON.stringify(await A.evaluate(process.env.EVAL)));

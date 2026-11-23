@@ -286,7 +286,7 @@ async fn push_presence(sup: &Rc<RefCell<Sup>>, env: &Rc<Env>) {
         }
         out
     };
-    let _ = r.post(&path, "application/json", &json!({"users": users}).to_string()).await;
+    let _ = r.post(&path, "application/json", &json!({"users": users, "server": "swirl"}).to_string()).await;
 }
 
 fn note_activity(m: &mut Member, text: &str) {

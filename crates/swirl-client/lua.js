@@ -806,7 +806,7 @@ export async function startLua(opts) {
         continue;
       }
       if (/[?&]swirltap=1/.test(location.search)) (window.solarTapLog = window.solarTapLog || []).push(raw);
-      if (m.t === 'init' || m.t === 'rep') {
+      if (m.t === 'init' || m.t === 'rep' || window.solarVm) {
         try {
           if (!window.solarVm || m.t === 'init') {
             window.solarVm = new LuaVm(Date.now() / 1000);

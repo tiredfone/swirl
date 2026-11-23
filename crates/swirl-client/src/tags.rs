@@ -207,7 +207,25 @@ struct Sight {
     clear: bool,
 }
 
+struct Bubble {
+    part: InstId,
+    el: HtmlElement,
+    msg: String,
+    until: f64,
+    stack: f64,
+    drawn: bool,
+}
+
+pub struct Art {
+    slices: Vec<HtmlImageElement>,
+    tail: HtmlImageElement,
+}
+
 pub struct Tags {
+    bubbles: Vec<Bubble>,
+    bubble_font: FontSlot,
+    bubble_font_req: bool,
+    art: Option<Art>,
     doc: Document,
     pub layer: HtmlElement,
     font: FontSlot,
@@ -249,7 +267,7 @@ impl Tags {
         let layer = doc.create_element("div").ok()?.dyn_into::<HtmlElement>().ok()?;
         layer.set_class_name("ch-tags");
         overlay.append_child(&layer).ok()?;
-        Some(Tags { doc: doc.clone(), layer, font: Rc::new(RefCell::new(None)), font_req: false, tags: HashMap::new(), sight: HashMap::new(), hums: vec![], hum_scan: -1e9 })
+        Some(Tags { bubbles: vec![], bubble_font: Rc::new(RefCell::new(None)), bubble_font_req: false, art: None, doc: doc.clone(), layer, font: Rc::new(RefCell::new(None)), font_req: false, tags: HashMap::new(), sight: HashMap::new(), hums: vec![], hum_scan: -1e9 })
     }
 
     fn div(&self, cls: &str, parent: &HtmlElement) -> HtmlElement {
@@ -394,6 +412,116 @@ impl Tags {
             }
         }
         self.sight.retain(|m, _| seen.contains(m) || (d.get(*m).map(|i| !i.destroyed).unwrap_or(false) && d.is_descendant_of(*m, ws)));
+    }
+
+    fn image(&self, name: &str) -> Option<HtmlImageElement> {
+        let url = solar_image_url(&format!("rbxasset://textures/{}.png", name)).ok()?.as_string()?;
+        let img = self.doc.create_element("img").ok()?.dyn_into::<HtmlImageElement>().ok()?;
+        img.set_src(&url);
+        Some(img)
+    }
+
+    pub fn add_bubble(&mut self, part: InstId, msg: &str, now_ms: f64) {
+        if !self.bubble_font_req {
+            self.bubble_font_req = true;
+            load_font(&self.doc, "Arial-18pt", self.bubble_font.clone());
+        }
+        if self.art.is_none() {
+            let slices: Vec<HtmlImageElement> = (1..=9).filter_map(|i| self.image(&format!("chatBubble_white_bkg_slice{}", i))).collect();
+            if let (true, Some(tail)) = (slices.len() == 9, self.image("chatBubble_white_tail")) {
+                self.art = Some(Art { slices, tail });
+            }
+        }
+        let el = self.div("ch-bubble2", &self.layer);
+        let _ = el.style().set_property("visibility", "hidden");
+        for b in self.bubbles.iter_mut().filter(|b| b.part == part) {
+            b.stack += 1.0;
+        }
+        self.bubbles.push(Bubble { part, el, msg: msg.to_string(), until: now_ms + 7000.0, stack: 0.0, drawn: false });
+    }
+
+    fn draw_bubbles(&mut self) {
+        let font = self.bubble_font.borrow().clone();
+        for b in self.bubbles.iter_mut() {
+            if b.drawn {
+                continue;
+            }
+            let (font, art) = match (font.as_ref(), self.art.as_ref()) {
+                (Some(f), Some(a)) if a.slices.iter().all(|i| i.natural_width() > 0) && a.tail.natural_width() > 0 => (f, a),
+                _ => continue,
+            };
+            let dpr = web_sys::window().map(|w| w.device_pixel_ratio()).unwrap_or(1.0).min(3.0);
+            let (k, tk) = (0.4, 0.6);
+            let text = match text_canvas(&self.doc, font, &b.msg, "#000", None, 360.0, true) {
+                Some(t) => t,
+                None => continue,
+            };
+            let s = &art.slices;
+            let (cw, ch) = (s[0].natural_width() as f64 * k, s[0].natural_height() as f64 * k);
+            let (pad_x, pad_y) = (4.0, 1.0);
+            let w = (cw * 2.0).max(text.width() as f64 * tk + pad_x * 2.0 + cw);
+            let h = (ch * 2.0).max(text.height() as f64 * tk + pad_y * 2.0 + ch);
+            let ts = art.tail.natural_width() as f64 * k;
+            let rim = 17.0 * k;
+            let (c, g) = match canvas(&self.doc, (w * dpr).ceil(), ((h + rim) * dpr).ceil()) {
+                Some(x) => x,
+                None => continue,
+            };
+            let _ = c.style().set_property("width", &format!("{}px", w));
+            let _ = c.style().set_property("height", &format!("{}px", h + rim));
+            let _ = g.scale(dpr, dpr);
+            let xs = [0.0, cw, w - cw];
+            let ys = [0.0, ch, h - ch];
+            let ws = [cw, w - cw * 2.0, cw];
+            let hs = [ch, h - ch * 2.0, ch];
+            for r in 0..3 {
+                for q in 0..3 {
+                    let _ = g.draw_image_with_html_image_element_and_dw_and_dh(&s[r * 3 + q], xs[q], ys[r], ws[q] + 0.5, hs[r] + 0.5);
+                }
+            }
+            let _ = g.draw_image_with_html_image_element_and_dw_and_dh(&art.tail, (w - ts) / 2.0, h - 15.0 * k, ts, ts);
+            let _ = g.draw_image_with_html_canvas_element_and_dw_and_dh(&text, (w - text.width() as f64 * tk) / 2.0, (h - text.height() as f64 * tk) / 2.0, text.width() as f64 * tk, text.height() as f64 * tk);
+            let _ = b.el.append_child(&c);
+            let _ = b.el.style().set_property("visibility", "");
+            b.drawn = true;
+        }
+    }
+
+    pub fn update_bubbles(&mut self, d: &DataModel, view: &View, now_ms: f64) {
+        self.draw_bubbles();
+        let cam = [view.cf[0], view.cf[1], view.cf[2]];
+        let mut stack_count: HashMap<InstId, f64> = HashMap::new();
+        let mut keep: Vec<Bubble> = vec![];
+        for b in std::mem::take(&mut self.bubbles) {
+            if now_ms > b.until || d.get(b.part).map(|i| i.destroyed).unwrap_or(true) {
+                b.el.remove();
+                continue;
+            }
+            let c = match d.get_prop(b.part, "CFrame") {
+                Some(Val::Arr(a)) if a.len() >= 3 => [a[0], a[1], a[2]],
+                _ => {
+                    keep.push(b);
+                    continue;
+                }
+            };
+            let p = match project(view, [c[0], c[1] + 3.2, c[2]]) {
+                Some(p) => p,
+                None => {
+                    let _ = b.el.style().set_property("display", "none");
+                    keep.push(b);
+                    continue;
+                }
+            };
+            *stack_count.entry(b.part).or_insert(0.0) += 1.0;
+            let _ = b.el.style().set_property("display", "");
+            let bd = ((c[0] - cam[0]).powi(2) + (c[1] - cam[1]).powi(2) + (c[2] - cam[2]).powi(2)).sqrt();
+            let bs = (1.15 - bd / 110.0).min(1.0).max(0.5);
+            let _ = b.el.style().set_property("transform", &format!("translate({}px, {}px) scale({}) translate(-50%, {}%) translateY(-12px)", p[0], p[1], bs, -100.0 - b.stack * 115.0));
+            let _ = b.el.style().set_property("transform-origin", "0 0");
+            let _ = b.el.style().set_property("opacity", &if b.stack > 0.0 { format!("{}", (1.0 - b.stack * 0.25).max(0.35)) } else { "1".to_string() });
+            keep.push(b);
+        }
+        self.bubbles = keep;
     }
 
     pub fn tag_names(&self) -> Vec<(f64, String)> {

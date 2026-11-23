@@ -964,8 +964,27 @@ impl Game {
                     let ps = dm.services.get("Players").and_then(|p| dm.get(*p)).map(|p| p.children.clone()).unwrap_or_default();
                     (name, uid, dm.get_prop(player, "TeamColor").cloned(), matches!(dm.get_prop(player, "Neutral"), Some(Val::Bool(true))), ps)
                 };
-                let kind = if v["k"] == "team" { "team" } else { "all" };
-                let targets: Vec<InstId> = if kind == "team" {
+                let kind = if v["k"] == "team" { "team" } else if v["k"] == "whisper" { "whisper" } else { "all" };
+                let whisper_to: Option<InstId> = if kind == "whisper" {
+                    let t = v["to"].as_u64().map(|t| t as InstId);
+                    let dm = self.dm.borrow();
+                    t.filter(|t| dm.get(*t).map(|i| i.class == "Player" && !i.destroyed).unwrap_or(false))
+                } else {
+                    None
+                };
+                if kind == "whisper" && whisper_to.is_none() {
+                    return;
+                }
+                let head: Option<InstId> = {
+                    let dm = self.dm.borrow();
+                    match dm.get_prop(player, "Character") {
+                        Some(Val::Ref(Some(m))) => dm.find_child(*m, "Head", false),
+                        _ => None,
+                    }
+                };
+                let targets: Vec<InstId> = if kind == "whisper" {
+                    vec![player, whisper_to.unwrap()]
+                } else if kind == "team" {
                     let dm = self.dm.borrow();
                     players.into_iter().filter(|o| !neutral && !matches!(dm.get_prop(*o, "Neutral"), Some(Val::Bool(true))) && dm.get_prop(*o, "TeamColor").cloned() == team).collect()
                 } else {
@@ -975,8 +994,12 @@ impl Game {
                 if self.chat_log.len() > 40 {
                     self.chat_log.remove(0);
                 }
-                self.host.fire(player, "Chatted", vec![Wire::S(msg.clone()), Wire::Nil]);
-                self.remote_out.push((targets, json!({"t": "chat", "p": player, "n": name, "u": uid, "m": msg, "k": kind})));
+                self.host.fire(player, "Chatted", vec![Wire::S(msg.clone()), whisper_to.map(Wire::I).unwrap_or(Wire::Nil)]);
+                let mut out = json!({"t": "chat", "p": player, "n": name, "u": uid, "m": msg, "k": kind, "h": head});
+                if let Some(t) = whisper_to {
+                    out["to"] = json!(t);
+                }
+                self.remote_out.push((targets, out));
             }
             "mouse" => {
                 let mouse = self.mouse_of(player);
