@@ -1,4 +1,4 @@
-import { LuaVm } from './swirl_client.js';
+import { LuaVm, DevConsole } from './swirl_client.js';
 
 const STARTER = 37801172;
 const FONT_SIZES = [8, 9, 10, 11, 12, 14, 18, 24, 36, 48, 28, 32, 42, 60, 96];
@@ -120,6 +120,7 @@ export async function startApp({ client, cfg, canvas }) {
   root.id = 'chocolate';
   root.className = 'swirl-gui-root';
   root.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:5';
+  const devConsole = new DevConsole(root);
   const touch = detectTouch();
   if (touch) {
     root.classList.add('ch-touch');
@@ -146,6 +147,11 @@ export async function startApp({ client, cfg, canvas }) {
   let dragging = false;
 
   window.addEventListener('keydown', (e) => {
+    if (e.key === 'F9' && window.solarEra !== 2018) {
+      e.preventDefault();
+      if (!e.repeat) devConsole.toggle();
+      return;
+    }
     if (!vm) return;
     if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key && e.key.length === 1 && !typing() && !'cvxaz'.includes(e.key.toLowerCase())) e.preventDefault();
     if (window.solarEra === 2018) {
@@ -572,6 +578,7 @@ export async function startApp({ client, cfg, canvas }) {
         vm.set_touch(touch);
         booted = false;
       }
+      if (m.t === 'out') devConsole.add('server', m.k, m.m);
       if (!vm) continue;
       try {
         vm.apply(raw);
@@ -605,6 +612,7 @@ export async function startApp({ client, cfg, canvas }) {
     try {
       for (const l of JSON.parse(vm.logs())) {
         (window.solarApp.logs = window.solarApp.logs || []).push(l);
+        devConsole.add('client', l.kind, l.msg);
         if (window.solarApp.logs.length > 400) window.solarApp.logs.shift();
         if (l.kind === 'error') console.error(l.msg.split('\n')[0]);
       }
