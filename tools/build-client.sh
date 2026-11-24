@@ -23,6 +23,8 @@ cp crates/swirl-client/app.js "$out.tmp/app.js"
 awk '/@font-face/{skip=1} !skip{print} skip&&/}/{skip=0}' vendor/chocolate/client/style.css > "$out.tmp/gui.css"
 cp vendor/chocolate/client/content-index.json "$out.tmp/content-index.json"
 node tools/pack-vendor.mjs vendor/chocolate/content "$out.tmp/content"
+cp vendor/chocolate/client/content2018-index.json "$out.tmp/content2018-index.json"
+node tools/pack-vendor.mjs vendor/chocolate/content2018 "$out.tmp/content2018"
 node tools/pack-vendor.mjs vendor/chocolate "$out.tmp/chocolate"
 cat > "$out.tmp/manifest.json" <<JSON
 {"version":"$version","era":[2012,2018],"entry":"entry.js","build":"$short","profile":"$profile"}

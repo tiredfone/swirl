@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use swirl_core::instance::{DataModel, InstId, Val};
 use swirl_lua::host::Wire;
 use swirl_physics::cf::CF;
@@ -44,7 +46,7 @@ pub struct ClientChars {
     pub cf_marks: Vec<InstId>,
     pub remotes: HashMap<InstId, Remote>,
     pub rig_dirty: bool,
-    pub ph: Physics,
+    pub ph: Rc<RefCell<Physics>>,
     pub excluded: HashSet<InstId>,
     pub own: Option<Own>,
     pub pending_own: Option<(InstId, CF, i64)>,
@@ -75,7 +77,7 @@ impl ClientChars {
         }
         dm.journal.clear();
         ph.reset_cursor();
-        let mut c = ClientChars { cf_marks: vec![], remotes: HashMap::new(), rig_dirty: false, ph, excluded: HashSet::new(), own: None, pending_own: None, input: ([0.0; 3], false), tp_seq: 0, move_to: None, drive_in: [false; 5], send_acc: 0.0, out: vec![] };
+        let mut c = ClientChars { cf_marks: vec![], remotes: HashMap::new(), rig_dirty: false, ph: Rc::new(RefCell::new(ph)), excluded: HashSet::new(), own: None, pending_own: None, input: ([0.0; 3], false), tp_seq: 0, move_to: None, drive_in: [false; 5], send_acc: 0.0, out: vec![] };
         c.track(dm);
         c
     }
@@ -89,7 +91,7 @@ impl ClientChars {
         for m in kids {
             if dm.get(m).map(|i| i.class == "Model").unwrap_or(false) && dm.find_child_of_class(m, "Humanoid").is_some() && !self.excluded.contains(&m) {
                 self.excluded.insert(m);
-                self.ph.exclude_model(dm, m);
+                self.ph.borrow_mut().exclude_model(dm, m);
             }
         }
         let models: Vec<InstId> = self.excluded.iter().copied().collect();
@@ -119,13 +121,13 @@ impl ClientChars {
                 }
                 _ => continue,
             };
-            let proxy = CharacterProxy::with_sensors(&mut self.ph, dm, m, false);
+            let proxy = CharacterProxy::with_sensors(&mut *self.ph.borrow_mut(), dm, m, false);
             self.remotes.insert(m, Remote { model: m, rig: Rig::new(dm, m), proxy, cf: c, target: c, vel: [0.0; 3], state: humanoid::IDLE, net_angles: None, t: 0.0 });
         }
         let gone: Vec<InstId> = self.remotes.keys().copied().filter(|m| dm.get(*m).map(|i| i.destroyed).unwrap_or(true) || dm.services.get("Workspace").map(|w| !dm.is_descendant_of(*m, *w)).unwrap_or(true)).collect();
         for m in gone {
             if let Some(mut r) = self.remotes.remove(&m) {
-                r.proxy.destroy(&mut self.ph);
+                r.proxy.destroy(&mut *self.ph.borrow_mut());
             }
             self.excluded.remove(&m);
         }
@@ -147,13 +149,13 @@ impl ClientChars {
             None => return,
         };
         if let Some(mut r) = self.remotes.remove(&model) {
-            r.proxy.destroy(&mut self.ph);
+            r.proxy.destroy(&mut *self.ph.borrow_mut());
         }
         if let Some(mut o) = self.own.take() {
-            o.ctrl.destroy(&mut self.ph);
+            o.ctrl.destroy(&mut *self.ph.borrow_mut());
         }
-        let mut ctrl = Controller::new(&mut self.ph, dm, model, hum);
-        ctrl.teleport(&mut self.ph, dm, &cf);
+        let mut ctrl = Controller::new(&mut *self.ph.borrow_mut(), dm, model, hum);
+        ctrl.teleport(&mut *self.ph.borrow_mut(), dm, &cf);
         self.tp_seq = seq;
         let rig = Rig::new(dm, model);
         self.own = Some(Own { model, hum, ctrl, rig, cf, vel: [0.0; 3], state: humanoid::FALL, run_state: None, last_run: None, swim_state: None, last_swim: None, climb_state: None, last_climb: None, fall_for: 0.0, fall_sent: false, target: None, seated_on: None, drive: None });
@@ -162,7 +164,7 @@ impl ClientChars {
     pub fn teleport(&mut self, dm: &DataModel, c: &[f64], seq: i64) {
         self.tp_seq = seq;
         if let (Some(o), Some(c)) = (self.own.as_mut(), cf12(c)) {
-            o.ctrl.teleport(&mut self.ph, dm, &c);
+            o.ctrl.teleport(&mut *self.ph.borrow_mut(), dm, &c);
         }
     }
 
@@ -209,7 +211,7 @@ impl ClientChars {
                     o.cf = swirl_physics::cf::lerp(&o.cf, &t, (dt * 15.0).min(1.0));
                 }
                 let cf = o.cf;
-                o.ctrl.teleport(&mut self.ph, dm, &cf);
+                o.ctrl.teleport(&mut *self.ph.borrow_mut(), dm, &cf);
                 return fired;
             }
             let mut mv = mv;
@@ -225,7 +227,7 @@ impl ClientChars {
             } else if user {
                 self.move_to = None;
             }
-            let r = o.ctrl.update(&mut self.ph, dm, dt, &Input { mv, jump, face: None });
+            let r = o.ctrl.update(&mut *self.ph.borrow_mut(), dm, dt, &Input { mv, jump, face: None });
             o.cf = r.cf;
             o.vel = r.vel;
             let prev = o.state;
@@ -323,7 +325,7 @@ impl ClientChars {
 
     pub fn pose(&mut self, dm: &mut DataModel) {
         if let Some(o) = self.own.as_ref() {
-            let poses = o.rig.pose(&self.ph, dm, &o.cf);
+            let poses = o.rig.pose(&*self.ph.borrow(), dm, &o.cf);
             for (p, c) in poses.iter() {
                 dm.set_prop_quiet(*p, "CFrame", Val::Arr(c.to_vec()));
                 self.cf_marks.push(*p);
@@ -332,10 +334,10 @@ impl ClientChars {
     }
 
     pub fn step_physics(&mut self, dm: &mut DataModel) {
-        self.ph.stir();
-        self.ph.step(dm, 1.0 / 60.0);
+        self.ph.borrow_mut().stir();
+        self.ph.borrow_mut().step(dm, 1.0 / 60.0);
         dm.journal.clear();
-        self.ph.reset_cursor();
+        self.ph.borrow_mut().reset_cursor();
     }
 }
 
@@ -381,7 +383,7 @@ impl ClientChars {
             ignore.push(*tf);
         }
         let dir = [d[0] * 1000.0, d[1] * 1000.0, d[2] * 1000.0];
-        let hit = self.ph.raycast(dm, o, dir, &ignore, None);
+        let hit = self.ph.borrow().raycast(dm, o, dir, &ignore, None);
         let origin = swirl_physics::cf::look_at(o[0], o[1], o[2], o[0] + d[0], o[1] + d[1], o[2] + d[2]);
         let hcf = swirl_physics::cf::with_pos(&swirl_physics::cf::look_at(o[0], o[1], o[2], hit.point[0], hit.point[1], hit.point[2]), hit.point[0], hit.point[1], hit.point[2]);
         dm.set_prop_quiet(mouse, "Origin", Val::Arr(origin.to_vec()));
@@ -684,7 +686,7 @@ impl ClientChars {
             let rec = self.remotes.get_mut(&m).unwrap();
             if dirty {
                 rec.rig.build(dm);
-                rec.proxy.refresh(&mut self.ph, dm);
+                rec.proxy.refresh(&mut *self.ph.borrow_mut(), dm);
             }
             rec.cf = swirl_physics::cf::lerp(&rec.cf, &rec.target, (dt * 14.0).min(1.0));
             rec.t += dt;
@@ -697,12 +699,12 @@ impl ClientChars {
             if let Some(a) = rec.net_angles.clone() {
                 swirl_physics::animator::apply_limb_angles(dm, m, &a);
             }
-            let poses = rec.rig.pose(&self.ph, dm, &rec.cf);
+            let poses = rec.rig.pose(&*self.ph.borrow(), dm, &rec.cf);
             for (p, c) in poses.iter() {
                 dm.set_prop_quiet(*p, "CFrame", Val::Arr(c.to_vec()));
                 self.cf_marks.push(*p);
             }
-            rec.proxy.update(&mut self.ph, dm, &rec.cf, &poses);
+            rec.proxy.update(&mut *self.ph.borrow_mut(), dm, &rec.cf, &poses);
         }
     }
 }

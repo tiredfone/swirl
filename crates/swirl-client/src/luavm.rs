@@ -102,6 +102,7 @@ impl LuaVm {
                     if let Some(h) = self.host.as_mut() {
                         h.set_handler(Box::new(swirl_lua::client_api::ClientApi { core: self.core.clone(), anim: self.anim.clone(), gui: self.gui.clone(), measure: Some(Rc::new(WebMeasure::new())) }));
                         self.chars = Some(crate::clientchars::ClientChars::new(&mut self.dm.borrow_mut()));
+                        self.core.borrow_mut().ph = self.chars.as_ref().map(|c| c.ph.clone());
                         if let Some(ch) = self.chars.as_mut() {
                             let dm = self.dm.borrow();
                             if let Some(t) = dm.services.get("Workspace").and_then(|w| dm.find_child_of_class(*w, "Terrain")) {
@@ -111,7 +112,7 @@ impl LuaVm {
                                 }
                                 td.take_dirty();
                                 let keys = td.all_keys();
-                                ch.ph.set_terrain(t, td);
+                                ch.ph.borrow_mut().set_terrain(t, td);
                                 self.terrain_keys.extend(keys);
                             }
                         }
@@ -123,10 +124,10 @@ impl LuaVm {
             Some("terrain") => {
                 drop(dm);
                 if let (Some(ch), Some(d)) = (self.chars.as_mut(), m["d"].as_str()) {
-                    if let Some(td) = ch.ph.terrain.as_mut() {
+                    if let Some(td) = ch.ph.borrow_mut().terrain.as_mut() {
                         let _ = td.decode(d);
                     }
-                    let keys = ch.ph.terrain_flush();
+                    let keys = ch.ph.borrow_mut().terrain_flush();
                     self.terrain_keys.extend(keys);
                 }
                 true
@@ -608,12 +609,12 @@ impl LuaVm {
                 }).unwrap_or(70.0);
                 let view = crate::tags::View { cf: self.cam.cf, fov, w: vw, h: vh };
                 let own = ch.own.as_ref().map(|o| o.model);
-                t.update(&dm, &ch.ph, &view, own, now_ms);
+                t.update(&dm, &*ch.ph.borrow(), &view, own, now_ms);
                 t.update_bubbles(&dm, &view, now_ms);
                 drop(dm);
                 if let (Some(g), Some(ch)) = (self.gui_dom.as_mut(), self.chars.as_ref()) {
                     let mut dm = self.dm.borrow_mut();
-                    g.update_billboards(&mut dm, &ch.ph, &view, now_ms, own, &mut fired);
+                    g.update_billboards(&mut dm, &*ch.ph.borrow(), &view, now_ms, own, &mut fired);
                 }
             }
         }
@@ -657,7 +658,7 @@ impl LuaVm {
         let mut dm = self.dm.borrow_mut();
         match self.chars.as_ref() {
             Some(ch) => {
-                let cf = self.cam.update(&mut dm, &ch.ph, own, dt, pointer_locked);
+                let cf = self.cam.update(&mut dm, &*ch.ph.borrow(), own, dt, pointer_locked);
                 let want: std::collections::HashSet<u32> = match (self.cam.first_person, own) {
                     (true, Some(m)) => {
                         let mut all = vec![m];
@@ -743,11 +744,13 @@ impl LuaVm {
     }
 
     pub fn terrain_era(&self) -> i32 {
-        self.chars.as_ref().and_then(|c| c.ph.terrain.as_ref()).map(|t| t.era).unwrap_or(2012)
+        self.chars.as_ref().and_then(|c| c.ph.borrow().terrain.as_ref().map(|t| t.era)).unwrap_or(2012)
     }
 
     pub fn terrain_info(&self) -> String {
-        match self.chars.as_ref().and_then(|c| c.ph.terrain.as_ref()) {
+        let ph = self.chars.as_ref().map(|c| c.ph.clone());
+        let g = ph.as_ref().map(|p| p.borrow());
+        match g.as_ref().and_then(|p| p.terrain.as_ref()) {
             Some(t) => format!("{{\"era\":{},\"keys\":{},\"init\":{}}}", t.era, t.all_keys().len(), self.init_terrain.as_ref().map(|s| s.len()).unwrap_or(0)),
             None => format!("{{\"none\":true,\"init\":{}}}", self.init_terrain.as_ref().map(|s| s.len()).unwrap_or(0)),
         }
@@ -765,7 +768,9 @@ impl LuaVm {
         if p.len() != 3 {
             return out;
         }
-        if let Some(td) = self.chars.as_ref().and_then(|c| c.ph.terrain.as_ref()) {
+        let ph = self.chars.as_ref().map(|c| c.ph.clone());
+        let g = ph.as_ref().map(|p| p.borrow());
+        if let Some(td) = g.as_ref().and_then(|p| p.terrain.as_ref()) {
             let groups = if td.era == 2018 { td.mesh_smooth((p[0], p[1], p[2])) } else { td.mesh_cells((p[0], p[1], p[2])) };
             for (m, pos, nrm, uv) in groups {
                 let g = js_sys::Array::new();
@@ -871,7 +876,7 @@ impl LuaVm {
         let own = self.chars.as_ref().and_then(|c| c.own.as_ref()).map(|o| o.model);
         let mut dm = self.dm.borrow_mut();
         if let Some(ch) = self.chars.as_ref() {
-            let cf = self.cam.update(&mut dm, &ch.ph, own, dt, pointer_locked);
+            let cf = self.cam.update(&mut dm, &*ch.ph.borrow(), own, dt, pointer_locked);
             let _ = cf;
             let want: std::collections::HashSet<u32> = match (self.cam.first_person, own) {
                 (true, Some(m)) => {
@@ -1089,7 +1094,7 @@ impl LuaVm {
     pub fn phys_parts(&self) -> String {
         let d = self.dm.borrow();
         match self.chars.as_ref() {
-            Some(c) => serde_json::to_string(&c.ph.part_ids().into_iter().map(|i| format!("{}:{}", d.name(i), d.full_name(i))).collect::<Vec<_>>()).unwrap_or_default(),
+            Some(c) => serde_json::to_string(&c.ph.borrow().part_ids().into_iter().map(|i| format!("{}:{}", d.name(i), d.full_name(i))).collect::<Vec<_>>()).unwrap_or_default(),
             None => "[]".into(),
         }
     }
@@ -1208,6 +1213,20 @@ impl LuaVm {
         d.descendants(root, &mut all);
         let v: Vec<String> = all.into_iter().filter(|i| d.get(*i).map(|x| x.class == class).unwrap_or(false)).map(|i| d.full_name(i)).collect();
         serde_json::to_string(&v).unwrap_or_default()
+    }
+
+    pub fn script_source(&self, name: &str) -> String {
+        let d = self.dm.borrow();
+        let mut all = vec![];
+        d.descendants(d.root, &mut all);
+        for i in all {
+            if d.name(i) == name && d.is_a(i, "LuaSourceContainer") {
+                if let Some(Val::Str(s)) = d.get_prop(i, "Source") {
+                    return s.clone();
+                }
+            }
+        }
+        String::new()
     }
 
     pub fn dump_named(&self, name: &str) -> String {
@@ -1336,9 +1355,45 @@ impl LuaVm {
                 }
             }
         }
+        let interp = self.core.borrow().cam_interp;
+        if let Some((cam, st, goal, focus, t0, dur)) = interp {
+            let a = ((self.t - t0) / dur).clamp(0.0, 1.0);
+            let mut dm = self.dm.borrow_mut();
+            if dm.get(cam).map(|i| i.destroyed).unwrap_or(true) {
+                self.core.borrow_mut().cam_interp = None;
+            } else {
+                let cf = if a >= 1.0 { goal } else { swirl_physics::cf::lerp(&st, &goal, a) };
+                let _ = dm.set_prop(cam, "CFrame", Val::Arr(cf.to_vec()));
+                if a >= 1.0 {
+                    if let Some(f) = focus {
+                        let fc = swirl_physics::cf::with_pos(&swirl_physics::cf::rot_only(&goal), f[0], f[1], f[2]);
+                        let _ = dm.set_prop(cam, "Focus", Val::Arr(fc.to_vec()));
+                    }
+                    self.core.borrow_mut().cam_interp = None;
+                }
+            }
+        }
+        let era18 = self.dm.borrow().era == 2018;
+        let lm = self.core.borrow().lua_move;
+        let hum_jump = if era18 {
+            let dm = self.dm.borrow();
+            let own = self.chars.as_ref().and_then(|c| c.own.as_ref()).map(|o| o.hum);
+            own.map(|h| matches!(dm.get_prop(h, "Jump"), Some(Val::Bool(true)))).unwrap_or(false)
+        } else {
+            false
+        };
         let fired = match self.chars.as_mut() {
             Some(ch) => {
-                ch.input = ([mx, 0.0, mz], jump);
+                if era18 {
+                    ch.input = (lm.unwrap_or([0.0; 3]), jump || hum_jump);
+                    if hum_jump {
+                        if let Some(o) = ch.own.as_ref() {
+                            let _ = self.dm.borrow_mut().set_prop(o.hum, "Jump", Val::Bool(false));
+                        }
+                    }
+                } else {
+                    ch.input = ([mx, 0.0, mz], jump);
+                }
                 let mut dm = self.dm.borrow_mut();
                 ch.update(&mut dm, dt)
             }

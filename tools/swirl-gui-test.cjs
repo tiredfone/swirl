@@ -17,6 +17,7 @@ const srv = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': types[path.extname(f)] || 'application/octet-stream' });
       res.end(fs.readFileSync(f));
     } catch (e) {
+      if (process.env.LOG404) console.log('404 ' + req.url);
       res.writeHead(404);
       res.end();
     }

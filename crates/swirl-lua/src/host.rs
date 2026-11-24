@@ -1,7 +1,7 @@
 use mlua::{Function, Lua, Table, Value};
 use serde_json::Value as J;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use swirl_core::classes;
 use swirl_core::instance::{DataModel, InstId, Val};
@@ -73,6 +73,11 @@ struct State {
     handler: Option<Box<dyn ApiHandler>>,
     extra_methods: HashSet<String>,
     async_seq: u32,
+    linked_on: bool,
+    linked: HashMap<u32, String>,
+    linked_pending: HashSet<u32>,
+    linked_wanted: Vec<(u32, String)>,
+    debug_out: Vec<String>,
 }
 
 pub struct Host {
@@ -80,6 +85,7 @@ pub struct Host {
     dm: Rc<RefCell<DataModel>>,
     st: Rc<RefCell<State>>,
     step: Function,
+    ext: Function,
 }
 
 const METHODS: &[&str] = &[
@@ -703,6 +709,19 @@ fn scan_into(st: &Rc<RefCell<State>>, d: &DataModel, id: InstId) {
     for i in all {
         if !s.running.contains(&i) && can_run(d, i) {
             s.running.insert(i);
+            if s.linked_on && d.get(i).map(|x| x.class != "CoreScript").unwrap_or(false) {
+                let has_src = matches!(d.get_prop(i, "Source"), Some(Val::Str(x)) if !x.is_empty());
+                let url = match d.get_prop(i, "LinkedSource") {
+                    Some(Val::Str(x)) if !x.is_empty() => x.clone(),
+                    _ => String::new(),
+                };
+                if !has_src && !url.is_empty() && !s.linked.contains_key(&i) {
+                    if s.linked_pending.insert(i) {
+                        s.linked_wanted.push((i, url));
+                    }
+                    continue;
+                }
+            }
             s.queue.push(Q::Start(i));
         }
     }
@@ -766,7 +785,7 @@ fn after_parent_change(st: &Rc<RefCell<State>>, dm: &DataModel, id: InstId, old:
 impl Host {
     pub fn new(dm: Rc<RefCell<DataModel>>) -> mlua::Result<Host> {
         let lua = unsafe { Lua::unsafe_new() };
-        let st = Rc::new(RefCell::new(State { reqs: vec![], queue: vec![], subs: HashSet::new(), logs: vec![], running: HashSet::new(), t0: crate::clock::Clock::new(), settings: None, user_settings: None, handler: None, extra_methods: HashSet::new(), async_seq: 1 }));
+        let st = Rc::new(RefCell::new(State { reqs: vec![], queue: vec![], subs: HashSet::new(), logs: vec![], running: HashSet::new(), t0: crate::clock::Clock::new(), settings: None, user_settings: None, handler: None, extra_methods: HashSet::new(), async_seq: 1, linked_on: false, linked: HashMap::new(), linked_pending: HashSet::new(), linked_wanted: vec![], debug_out: vec![] }));
         let j = lua.create_table()?;
         {
             let dm = dm.clone();
@@ -816,8 +835,8 @@ impl Host {
                         return Ok(Value::Table(tagged(lua, &out)?));
                     }
                     let class_gated = match key.as_str() {
-                        "Play" | "play" | "Stop" | "stop" | "Pause" | "pause" | "Resume" => Some(classes::is_a(&inst.class, "Sound") || classes::is_a(&inst.class, "AnimationTrack")),
-                        "Move" => Some(classes::is_a(&inst.class, "Humanoid")),
+                        "Play" | "play" | "Stop" | "stop" | "Pause" | "pause" | "Resume" => Some(classes::is_a(&inst.class, "Sound") || classes::is_a(&inst.class, "AnimationTrack") || inst.class == "Tween"),
+                        "Move" => Some(classes::is_a(&inst.class, "Humanoid") || inst.class == "Player"),
                         _ => None,
                     };
                     if class_gated != Some(false) && (METHODS.contains(&key.as_str()) || st_get.borrow().extra_methods.contains(&key) || method_known(&d, id, &inst.class, &key)) {
@@ -976,8 +995,8 @@ impl Host {
                     match method.as_str() {
                         "__source" => {
                             let src = match d.get_prop(id, "Source") {
-                                Some(Val::Str(x)) => x.clone(),
-                                _ => String::new(),
+                                Some(Val::Str(x)) if !x.is_empty() => x.clone(),
+                                _ => st2.borrow().linked.get(&id).cloned().unwrap_or_default(),
                             };
                             ok(Wire::S(src))
                         }
@@ -1344,7 +1363,8 @@ impl Host {
             let ext: Function = rt.get("extend")?;
             ext.call::<()>((include_str!("../data/runtime2018.lua"), "runtime2018"))?;
         }
-        Ok(Host { lua, dm, st, step })
+        let ext: Function = rt.get("extend")?;
+        Ok(Host { lua, dm, st, step, ext })
     }
 
     pub fn set_handler(&mut self, h: Box<dyn ApiHandler>) {
@@ -1406,9 +1426,76 @@ impl Host {
         push_event(&self.st, id, name, args);
     }
 
+    pub fn has_listener(&self, id: u32, name: &str) -> bool {
+        self.st.borrow().subs.contains(&format!("{}:{}", id, name))
+    }
+
     pub fn subscribed(&self, name: &str) -> Vec<u32> {
         let suffix = format!(":{}", name);
         self.st.borrow().subs.iter().filter(|k| k.ends_with(&suffix)).filter_map(|k| k.split(':').next().and_then(|n| n.parse().ok())).collect()
+    }
+
+    pub fn extend(&mut self, src: &str, name: &str) -> Result<(), String> {
+        self.ext.call::<()>((src.to_string(), name.to_string())).map_err(|e| e.to_string())
+    }
+
+    pub fn debug_attach(&mut self) -> Result<(), String> {
+        let st = self.st.clone();
+        let f = self
+            .lua
+            .create_function(move |_, json: String| {
+                st.borrow_mut().debug_out.push(json);
+                Ok(())
+            })
+            .map_err(|e| e.to_string())?;
+        self.lua.globals().set("__DBGSEND", f).map_err(|e| e.to_string())
+    }
+
+    pub fn debug_command(&mut self, cmd: &str, a: &str) {
+        if let Ok(f) = self.lua.globals().get::<Function>("__DBGCMD") {
+            let _ = f.call::<()>((cmd.to_string(), a.to_string(), String::new()));
+        }
+    }
+
+    pub fn take_debug(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.st.borrow_mut().debug_out)
+    }
+
+    pub fn compile_error(&self, src: &str) -> Option<String> {
+        self.lua.load(src).set_name("=chunk").into_function().err().map(|e| e.to_string())
+    }
+
+    pub fn enable_linked_source(&mut self) {
+        self.st.borrow_mut().linked_on = true;
+    }
+
+    pub fn take_linked(&mut self) -> Vec<(u32, String)> {
+        std::mem::take(&mut self.st.borrow_mut().linked_wanted)
+    }
+
+    pub fn provide_linked(&mut self, id: u32, src: Result<String, String>) {
+        let (name, alive) = {
+            let d = self.dm.borrow();
+            (d.get(id).map(|_| d.name(id).to_string()).unwrap_or_default(), d.get(id).map(|i| !i.destroyed).unwrap_or(false))
+        };
+        let mut st = self.st.borrow_mut();
+        st.linked_pending.remove(&id);
+        match src {
+            Ok(t) => {
+                st.linked.insert(id, t);
+            }
+            Err(e) => {
+                st.linked.insert(id, String::new());
+                let url = match self.dm.borrow().get_prop(id, "LinkedSource") {
+                    Some(Val::Str(x)) => x.clone(),
+                    _ => String::new(),
+                };
+                st.logs.push(LogLine { kind: "warn".into(), msg: format!("{}: LinkedSource {} failed: {}", name, url, e), id: 0 });
+            }
+        }
+        if alive && st.running.contains(&id) {
+            st.queue.push(Q::Start(id));
+        }
     }
 
     pub fn take_requests(&mut self) -> Vec<Req> {

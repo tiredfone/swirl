@@ -1,4 +1,5 @@
 pub mod client_api;
+pub mod client_api2018;
 pub mod clock;
 pub mod gui_layout;
 pub mod host;

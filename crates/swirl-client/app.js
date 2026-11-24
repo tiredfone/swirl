@@ -44,9 +44,14 @@ export async function startApp({ client, cfg, canvas }) {
       return {};
     }
   };
-  const [index, rewrite] = await Promise.all([json(here + 'content-index.json'), json(here + 'content/rewrite.json')]);
+  const [index, rewrite, index2018] = await Promise.all([json(here + 'content-index.json'), json(here + 'content/rewrite.json'), json(here + 'content2018-index.json')]);
   const contentUrl = (path) => {
     let p = String(path).replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/{2,}/g, '/');
+    if (window.solarEra === 2018) {
+      const key = p.toLowerCase();
+      const hit = index2018[key] || index2018[key.replace(/\.(dds|tex)$/, '.png')] || index2018['platform/' + key] || index2018['platform/' + key.replace(/\.(dds|tex)$/, '.png')];
+      if (hit) return here + 'content2018/' + hit.split('/').map(encodeURIComponent).join('/');
+    }
     p = index[p.toLowerCase()] || p;
     p = rewrite[p] || p;
     return here + 'content/' + p.split('/').map(encodeURIComponent).join('/');
@@ -457,6 +462,7 @@ export async function startApp({ client, cfg, canvas }) {
       if (!vm) continue;
       try {
         vm.apply(raw);
+        if (m.t === 'init') window.solarEra = vm.client_era();
       } catch (e) {
         errors.push('apply: ' + e);
       }
@@ -481,6 +487,11 @@ export async function startApp({ client, cfg, canvas }) {
     const jump = held.has(' ') || jumpQueued;
     jumpQueued = false;
     try {
+      for (const l of JSON.parse(vm.logs())) {
+        (window.solarApp.logs = window.solarApp.logs || []).push(l);
+        if (window.solarApp.logs.length > 400) window.solarApp.logs.shift();
+        if (l.kind === 'error') console.error(l.msg.split('\n')[0]);
+      }
       vm.cam_key_yaw(keyYaw);
       vm.frame(dt, fw, sd, jump, held.has('backspace'), locked());
       const cs = JSON.parse(vm.cam_state());
