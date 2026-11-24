@@ -50,7 +50,7 @@ const pass = acct.password || acct.Password;
     if (!window.solarApp.vm) return { present: false, failed: 'no vm', app: true, errors: window.solarApp.errors.slice(0, 5) };
     const paths = [...document.querySelectorAll('[data-ipath]')].map((e) => e.getAttribute('data-ipath'));
     const has = (n) => paths.some((x) => x.endsWith('.' + n));
-    return { present: true, ready: !!window.solarApp.vm, era: window.solarApp.vm.client_era(), playerList: has('PlayerListScreen') || has('PlayerListContainer'), hotbarOrTopbar: has('CurrentLoadout') || has('TopBarFrame'), errors: window.solarApp.errors.slice(0, 5), nodes: paths.length, app: true };
+    return { present: true, ready: !!window.solarApp.vm, era: window.solarApp.vm.client_era(), playerList: has('PlayerListScreen') || has('PlayerListContainer'), hotbarOrTopbar: has('CurrentLoadout') || has('TopBarFrame') || has('TopBarContainer'), errors: window.solarApp.errors.slice(0, 5), nodes: paths.length, app: true };
   }) : await pg.evaluate(() => {
     const L = window.solarLua;
     if (!L) return { present: false, failed: window.solarLuaFailed || null };
