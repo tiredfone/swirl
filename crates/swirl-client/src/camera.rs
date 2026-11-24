@@ -128,6 +128,14 @@ impl Camera {
             Some(c) => c,
             None => return self.cf,
         };
+        if d.era == 2018 {
+            if let Some(Val::Arr(a)) = d.get_prop(cam, "CFrame") {
+                if let Some(c) = cf::arr(a) {
+                    self.cf = c;
+                }
+            }
+            return self.cf;
+        }
         let ctype = num(d, cam, "CameraType") as i64;
         self.yaw += self.key_yaw * dt * 2.2;
         let zl = self.zoom_limits(d);

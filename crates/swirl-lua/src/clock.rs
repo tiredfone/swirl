@@ -17,6 +17,10 @@ mod imp {
     }
 
     pub fn set_now(_: f64) {}
+
+    pub fn tick() -> f64 {
+        wall()
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -44,6 +48,10 @@ mod imp {
 
     pub fn set_now(secs: f64) {
         NOW.store(secs.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn tick() -> f64 {
+        wall() + f64::from_bits(NOW.load(Ordering::Relaxed))
     }
 
     pub fn set_wall(secs: f64) {

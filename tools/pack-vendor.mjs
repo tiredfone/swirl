@@ -3,10 +3,12 @@ import path from 'path';
 const [src, dst] = process.argv.slice(2);
 const allowed = new Set(['wasm', 'js', 'mjs', 'json', 'data', 'css', 'html', 'png', 'svg', 'txt']);
 const map = {};
+const skip = new Set((process.env.SKIP_DIRS || '').split(',').filter(Boolean));
 const walk = (rel) => {
   for (const e of fs.readdirSync(path.join(src, rel), { withFileTypes: true })) {
     const r = rel ? rel + '/' + e.name : e.name;
     if (e.isDirectory()) {
+      if (!rel && skip.has(e.name)) continue;
       walk(r);
       continue;
     }

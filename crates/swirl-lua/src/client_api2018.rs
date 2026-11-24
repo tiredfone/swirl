@@ -97,10 +97,22 @@ impl ClientApi {
                 nil()
             }
             "GetFFlag" | "GetFastFlag" => ok(vec![Wire::B(matches!(args.first(), Some(Wire::S(s)) if s == "DebugDisableLogServiceExecuteScript"))]),
-            "GetLastInputType" if class == "UserInputService" => ok(vec![en("UserInputType", "Keyboard")]),
+            "GetLastInputType" if class == "UserInputService" => {
+                let v = self.core.borrow().last_input;
+                ok(vec![if v == 0.0 { en("UserInputType", "Keyboard") } else { Wire::E("UserInputType".into(), v) }])
+            }
             "GetPlatform" if class == "UserInputService" => ok(vec![en("Platform", "Windows")]),
-            "GetMouseDelta" if class == "UserInputService" => ok(vec![Wire::V2([0.0, 0.0])]),
-            "IsMouseButtonPressed" if class == "UserInputService" => ok(vec![Wire::B(false)]),
+            "GetMouseDelta" if class == "UserInputService" => {
+                let mut c = self.core.borrow_mut();
+                let v = c.mouse_delta;
+                c.mouse_delta = [0.0, 0.0];
+                ok(vec![Wire::V2(v)])
+            }
+            "IsMouseButtonPressed" if class == "UserInputService" => {
+                let v = n(args, 0).unwrap_or(0.0);
+                let b = if v == enum_value("UserInputType", "MouseButton1").unwrap_or(-1) as f64 { 0 } else if v == enum_value("UserInputType", "MouseButton3").unwrap_or(-1) as f64 { 1 } else if v == enum_value("UserInputType", "MouseButton2").unwrap_or(-1) as f64 { 2 } else { -1 };
+                ok(vec![Wire::B(self.core.borrow().buttons_down.contains(&b))])
+            }
             "GetKeysPressed" if class == "UserInputService" => ok(vec![Wire::List(vec![])]),
             "GetFocusedTextBox" if class == "UserInputService" => nil(),
             "GetStringForKeyCode" if class == "UserInputService" => {
