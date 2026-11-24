@@ -444,16 +444,28 @@ export async function startApp({ client, cfg, canvas }) {
   let pingT = 0;
   let booted = false;
   const frameMs = 1000 / 60;
+  let holdMsgs = [];
+  let bundle = null;
+  let bundleP = null;
   const frame = (now) => {
-    for (const raw of JSON.parse(client.take_tap())) {
+    const raws = holdMsgs.concat(JSON.parse(client.take_tap()));
+    holdMsgs = [];
+    for (let ri = 0; ri < raws.length; ri++) {
+      const raw = raws[ri];
       let m;
       try {
         m = JSON.parse(raw);
       } catch (e) {
         continue;
       }
+      if (m.t === 'init' && m.era === 2018 && bundle === null) {
+        if (!bundleP) bundleP = fetch(here + 'corescripts2018/bundle.json').then((r) => (r.ok ? r.text() : '{}')).catch(() => '{}').then((t) => { bundle = t; });
+        holdMsgs = raws.slice(ri);
+        break;
+      }
       if (m.t === 'init') {
         vm = new LuaVm(Date.now() / 1000);
+        if (m.era === 2018) vm.set_core_pack(bundle);
         vm.set_run(true);
         vm.set_screen(canvas.clientWidth || 800, canvas.clientHeight || 600);
         window.solarApp.vm = vm;

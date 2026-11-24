@@ -5,3 +5,6 @@ dist/client/chocolate/
 config.local.php
 data/store/
 .toolchain/
+dist/client/content/
+dist/client/content2018/
+dist/client/corescripts2018/

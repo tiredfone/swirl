@@ -39,6 +39,10 @@ pub struct CoreState {
     pub keys_code: std::collections::HashSet<i64>,
     pub mouse_pos: [f64; 2],
     pub ph: Option<Rc<RefCell<swirl_physics::Physics>>>,
+    pub local_scripts: Vec<(String, Option<InstId>)>,
+    pub own_seat: Option<InstId>,
+    pub modes: HashMap<(InstId, String), Vec<f64>>,
+    pub loading_removed: bool,
     pub lua_move: Option<[f64; 3]>,
     pub cam_interp: Option<(InstId, [f64; 12], [f64; 12], Option<[f64; 3]>, f64, f64)>,
 }
@@ -233,6 +237,67 @@ fn num(args: &[Wire], i: usize) -> Option<f64> {
 
 impl ApiHandler for ClientApi {
     fn get(&mut self, d: &DataModel, id: InstId, key: &str) -> Option<Wire> {
+        let class = d.get(id).map(|i| i.class.clone()).unwrap_or_default();
+        let is = |b: &str| swirl_core::classes::is_a(&class, b);
+        match key {
+            "ViewportSize" if class == "Camera" => {
+                let (w, h) = self.core.borrow().screen;
+                return Some(Wire::V2([w, h]));
+            }
+            "ClockTime" if class == "Lighting" => {
+                let t = match d.get_prop(id, "TimeOfDay") {
+                    Some(Val::Str(t)) => t.clone(),
+                    _ => String::new(),
+                };
+                let p: Vec<f64> = t.split(':').map(|x| x.trim().parse::<f64>().unwrap_or(0.0)).collect();
+                let v = p.first().copied().unwrap_or(0.0) + p.get(1).copied().unwrap_or(0.0) / 60.0 + p.get(2).copied().unwrap_or(0.0) / 3600.0;
+                return Some(Wire::N(v));
+            }
+            "AbsoluteWindowSize" if class == "ScrollingFrame" => {
+                return Some(match d.get_prop(id, "AbsoluteSize") {
+                    Some(Val::Arr(a)) if a.len() >= 2 => Wire::V2([a[0], a[1]]),
+                    _ => Wire::V2([0.0, 0.0]),
+                });
+            }
+            "AbsoluteContentSize" if is("UIGridStyleLayout") => {
+                return Some(match d.get_prop(id, "AbsoluteContentSize") {
+                    Some(Val::Arr(a)) if a.len() >= 2 => Wire::V2([a[0], a[1]]),
+                    _ => Wire::V2([0.0, 0.0]),
+                });
+            }
+            "AbsoluteRotation" if is("GuiBase2d") => {
+                return Some(Wire::N(match d.get_prop(id, "Rotation") {
+                    Some(Val::Num(n)) => *n,
+                    _ => 0.0,
+                }));
+            }
+            "Transparency" if is("GuiObject") => {
+                return Some(Wire::N(match d.get_prop(id, "BackgroundTransparency") {
+                    Some(Val::Num(n)) => *n,
+                    _ => 0.0,
+                }));
+            }
+            "LocalizedText" if is("TextLabel") || is("TextButton") || is("TextBox") => {
+                return Some(Wire::S(match d.get_prop(id, "Text") {
+                    Some(Val::Str(t)) => t.clone(),
+                    _ => String::new(),
+                }));
+            }
+            "Playing" if class == "Sound" => return Some(Wire::B(matches!(d.get_prop(id, "IsPlaying"), Some(Val::Bool(true))))),
+            "SeatPart" if class == "Humanoid" => {
+                let c = self.core.borrow();
+                return Some(match (c.own_state, c.own_seat) {
+                    (Some((h, _)), Some(s)) if h == id => Wire::I(s),
+                    _ => Wire::Nil,
+                });
+            }
+            "FloorMaterial" if class == "Humanoid" => {
+                let air = self.core.borrow().own_state.map(|(h, st)| h == id && st == 5).unwrap_or(false);
+                let name = if air { "Air" } else { "Plastic" };
+                return Some(Wire::E("Material".into(), swirl_core::classes::enum_value("Material", name).unwrap_or(256) as f64));
+            }
+            _ => {}
+        }
         if key == "TextBounds" && (d.is_a(id, "TextLabel") || d.is_a(id, "TextButton") || d.is_a(id, "TextBox")) {
             let m = self.measure.as_ref()?;
             let (w, h) = self.core.borrow().screen;
@@ -552,7 +617,8 @@ impl ApiHandler for ClientApi {
                     Some(Wire::S(x)) => x.clone(),
                     _ => String::new(),
                 };
-                ok(vec![Wire::B(swirl_core::classes::canonical_prop(&class, &n).is_some())])
+                let computed = matches!((n.as_str(), class.as_str()), ("ViewportSize", "Camera") | ("ClockTime", "Lighting") | ("AbsoluteWindowSize", "ScrollingFrame") | ("Playing", "Sound") | ("SeatPart", "Humanoid") | ("FloorMaterial", "Humanoid") | ("RootPart", "Humanoid") | ("Team", "Player") | ("Terrain", "Workspace") | ("AbsoluteContentSize", _) | ("AbsoluteRotation", _) | ("LocalizedText", _) | ("Transparency", _));
+                ok(vec![Wire::B(swirl_core::classes::canonical_prop(&class, &n).is_some() || computed)])
             }
             "__newTween" if class == "TweenService" => {
                 let tw = d.create_any("Tween", None).ok()?;

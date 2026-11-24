@@ -46,6 +46,57 @@ impl ClientApi {
         let nil = || Some(Res::Ok(vec![]));
         let screen = self.core.borrow().screen;
         match method {
+            _ if class == "PlayerScripts" && (method.starts_with("Register") || method.starts_with("Clear") || method.starts_with("GetRegistered")) && method.contains("MovementMode") => {
+                let kind = method.trim_start_matches("GetRegistered").trim_start_matches("Register").trim_start_matches("Clear").trim_end_matches('s').trim_end_matches("MovementMode");
+                let ty = format!("{}MovementMode", kind);
+                let key = (id, ty.clone());
+                if method.starts_with("Register") {
+                    let v = match args.first() {
+                        Some(Wire::E(_, v)) | Some(Wire::N(v)) => Some(*v),
+                        Some(Wire::S(name)) => enum_value(&ty, name).map(|v| v as f64),
+                        _ => None,
+                    };
+                    if let Some(v) = v {
+                        let mut c = self.core.borrow_mut();
+                        let l = c.modes.entry(key).or_default();
+                        if !l.contains(&v) {
+                            l.push(v);
+                        }
+                    }
+                    nil()
+                } else if method.starts_with("Clear") {
+                    self.core.borrow_mut().modes.remove(&key);
+                    nil()
+                } else {
+                    let mut l = self.core.borrow().modes.get(&key).cloned().unwrap_or_default();
+                    if l.is_empty() && ty.ends_with("CameraMovementMode") {
+                        l = swirl_core::classes::table().enums.get(&ty).map(|e| e.iter().take(3).map(|x| x.1 as f64).collect()).unwrap_or_default();
+                    }
+                    ok(vec![Wire::List(l.into_iter().map(|v| Wire::E(ty.clone(), v)).collect())])
+                }
+            }
+            "SetDefaultLoadingGuiRemoved" if class == "ReplicatedFirst" => {
+                let mut c = self.core.borrow_mut();
+                if !c.loading_removed {
+                    c.loading_removed = true;
+                    c.fire_later.push((id, "RemoveDefaultLoadingGuiSignal"));
+                }
+                nil()
+            }
+            "IsDefaultLoadingGuiRemoved" if class == "ReplicatedFirst" => ok(vec![Wire::B(self.core.borrow().loading_removed)]),
+            "IsFinishedReplicating" if class == "ReplicatedFirst" => ok(vec![Wire::B(true)]),
+            "GetAssetThumbnailAsync" if class == "AssetService" => ok(vec![Wire::S(String::new()), Wire::B(true)]),
+            "AddCoreScriptLocal" if class == "ScriptContext" => {
+                if let Some(Wire::S(name)) = args.first() {
+                    let parent = match args.get(1) {
+                        Some(Wire::I(p)) => Some(*p),
+                        _ => None,
+                    };
+                    self.core.borrow_mut().local_scripts.push((name.clone(), parent));
+                }
+                nil()
+            }
+            "GetFFlag" | "GetFastFlag" => ok(vec![Wire::B(matches!(args.first(), Some(Wire::S(s)) if s == "DebugDisableLogServiceExecuteScript"))]),
             "GetLastInputType" if class == "UserInputService" => ok(vec![en("UserInputType", "Keyboard")]),
             "GetPlatform" if class == "UserInputService" => ok(vec![en("Platform", "Windows")]),
             "GetMouseDelta" if class == "UserInputService" => ok(vec![Wire::V2([0.0, 0.0])]),
@@ -288,7 +339,7 @@ impl ClientApi {
             "ReportGoogleAnalyticsEvent" | "ReportInGoogleAnalytics" => nil(),
             "GetNotificationTypeList" if class == "GuiService" => ok(vec![Wire::Dict(vec![])]),
             "GetEmotesMenuOpen" if class == "GuiService" => ok(vec![Wire::B(false)]),
-            "GetSafeZoneOffsets" if class == "GuiService" => ok(vec![Wire::Dict(vec![])]),
+            "GetSafeZoneOffsets" if class == "GuiService" => ok(vec![Wire::Dict(["top", "bottom", "left", "right"].iter().map(|k| (k.to_string(), Wire::N(0.0))).collect())]),
             "GetCameraYInvertValue" | "GetOnboardingCompleted" if class == "UserGameSettings" => ok(vec![Wire::N(0.0)]),
             "SetCameraYInvertValue" | "SetCameraYInvertVisible" | "SetGamepadCameraSensitivityVisible" | "SetOnboardingCompleted" if class == "UserGameSettings" => nil(),
             "IsUserFeatureEnabled" if class == "UserSettings" => ok(vec![Wire::B(false)]),

@@ -25,6 +25,7 @@ cp vendor/chocolate/client/content-index.json "$out.tmp/content-index.json"
 node tools/pack-vendor.mjs vendor/chocolate/content "$out.tmp/content"
 cp vendor/chocolate/client/content2018-index.json "$out.tmp/content2018-index.json"
 node tools/pack-vendor.mjs vendor/chocolate/content2018 "$out.tmp/content2018"
+node tools/pack-vendor.mjs vendor/chocolate/corescripts2018 "$out.tmp/corescripts2018"
 node tools/pack-vendor.mjs vendor/chocolate "$out.tmp/chocolate"
 cat > "$out.tmp/manifest.json" <<JSON
 {"version":"$version","era":[2012,2018],"entry":"entry.js","build":"$short","profile":"$profile"}

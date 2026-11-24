@@ -63,6 +63,9 @@ mod gui;
 mod tags;
 
 #[cfg(target_arch = "wasm32")]
+mod core2018;
+
+#[cfg(target_arch = "wasm32")]
 mod luavm;
 
 #[cfg(target_arch = "wasm32")]

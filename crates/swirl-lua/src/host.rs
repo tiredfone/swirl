@@ -29,6 +29,7 @@ pub enum Wire {
     E(String, f64),
     List(Vec<Wire>),
     Dict(Vec<(String, Wire)>),
+    Ext(String, Vec<f64>),
 }
 
 pub enum Res {
@@ -268,6 +269,12 @@ fn enc_into(lua: &Lua, out: &mut Vec<Value>, w: &Wire) -> mlua::Result<()> {
                 out.push(Value::Number(*x));
             }
         }
+        Wire::Ext(t, v) => {
+            out.push(s(lua, t)?);
+            for x in v {
+                out.push(Value::Number(*x));
+            }
+        }
         Wire::E(ty, n) => {
             out.push(s(lua, "e")?);
             out.push(s(lua, ty)?);
@@ -376,6 +383,17 @@ fn one_wire(a: &[J], i: &mut usize) -> Option<Wire> {
             Wire::Ud2([v[0], v[1], v[2], v[3]])
         }
         "bc" => Wire::Bc(take(i, 1)[0]),
+        "ud" => Wire::Ext("ud".into(), take(i, 2)),
+        "nr" => Wire::Ext("nr".into(), take(i, 2)),
+        "rect" => Wire::Ext("rect".into(), take(i, 4)),
+        "ti" => Wire::Ext("ti".into(), take(i, 6)),
+        "ns" | "cs" => {
+            let per = if tag == "ns" { 3 } else { 4 };
+            let n = take(i, 1)[0] as usize;
+            let mut v = vec![n as f64];
+            v.extend(take(i, n.min(20000) * per));
+            Wire::Ext(tag.clone(), v)
+        }
         "e" => {
             let ty = a.get(*i).and_then(|x| x.as_str()).unwrap_or("").to_string();
             *i += 1;
@@ -465,6 +483,12 @@ fn wire_push(out: &mut Vec<J>, w: &Wire) {
                 wire_push(out, x);
             }
         }
+        Wire::Ext(t, v) => {
+            out.push(J::from(t.as_str()));
+            for x in v {
+                out.push(n(*x));
+            }
+        }
         Wire::Dict(d) => {
             out.push(J::from("d"));
             out.push(J::from(d.len()));
@@ -481,6 +505,11 @@ fn val_to_wire(ty: &str, enum_type: Option<&str>, v: &Val) -> Wire {
         ("enum", Val::Num(n)) if enum_type.is_some() => Wire::E(enum_type.unwrap().to_string(), *n),
         ("V2", Val::Arr(a)) if a.len() >= 2 => Wire::V2([a[0], a[1]]),
         ("UD2", Val::Arr(a)) if a.len() >= 4 => Wire::Ud2([a[0], a[1], a[2], a[3]]),
+        ("UD", Val::Arr(a)) if a.len() >= 2 => Wire::Ext("ud".into(), a.clone()),
+        ("NR", Val::Arr(a)) if a.len() >= 2 => Wire::Ext("nr".into(), a.clone()),
+        ("Rect", Val::Arr(a)) if a.len() >= 4 => Wire::Ext("rect".into(), a.clone()),
+        ("NS", Val::Arr(a)) if !a.is_empty() => Wire::Ext("ns".into(), a.clone()),
+        ("CS", Val::Arr(a)) if !a.is_empty() => Wire::Ext("cs".into(), a.clone()),
         ("bool", Val::Bool(b)) => Wire::B(*b),
         ("string", Val::Str(x)) | ("Content", Val::Str(x)) => Wire::S(x.clone()),
         ("BC", Val::Num(n)) => Wire::Bc(*n),
@@ -512,6 +541,11 @@ fn wire_to_val(ty: &str, w: &Wire) -> Option<Val> {
         ("V3", Wire::V3(a)) | ("C3", Wire::C3(a)) => Val::Arr(a.to_vec()),
         ("V2", Wire::V2(a)) => Val::Arr(a.to_vec()),
         ("UD2", Wire::Ud2(a)) => Val::Arr(a.to_vec()),
+        ("UD", Wire::Ext(t, v)) if t == "ud" => Val::Arr(v.clone()),
+        ("NR", Wire::Ext(t, v)) if t == "nr" => Val::Arr(v.clone()),
+        ("Rect", Wire::Ext(t, v)) if t == "rect" => Val::Arr(v.clone()),
+        ("NS", Wire::Ext(t, v)) if t == "ns" => Val::Arr(v.clone()),
+        ("CS", Wire::Ext(t, v)) if t == "cs" => Val::Arr(v.clone()),
         ("CF", Wire::Cf(a)) => Val::Arr(a.to_vec()),
         ("Ref", Wire::I(i)) => Val::Ref(Some(*i)),
         ("Ref", Wire::Nil) => Val::Ref(None),

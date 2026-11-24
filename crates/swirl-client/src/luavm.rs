@@ -53,6 +53,7 @@ pub struct LuaVm {
     remote_moved: std::collections::HashSet<u32>,
     fired_later: Vec<(u32, &'static str, Vec<swirl_lua::host::Wire>)>,
     t: f64,
+    pack: std::collections::BTreeMap<String, String>,
 }
 
 #[wasm_bindgen]
@@ -64,7 +65,13 @@ impl LuaVm {
         let mut dm = DataModel::new("client");
         dm.local_alloc = true;
         let dm = Rc::new(RefCell::new(dm));
-        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), gui: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), screen: [800.0, 600.0], gui_dom: None, gui_dirty: true, cam: Default::default(), init_terrain: None, terrain_keys: vec![], bridge: Default::default(), hidden: Default::default(), now_ms: 0.0, friends: Default::default(), tags: None, tools: Default::default(), remote_moved: Default::default(), fired_later: vec![], t: 0.0 })
+        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), gui: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), screen: [800.0, 600.0], gui_dom: None, gui_dirty: true, cam: Default::default(), init_terrain: None, terrain_keys: vec![], bridge: Default::default(), hidden: Default::default(), now_ms: 0.0, friends: Default::default(), tags: None, tools: Default::default(), remote_moved: Default::default(), fired_later: vec![], t: 0.0, pack: Default::default() })
+    }
+
+    pub fn set_core_pack(&mut self, text: &str) {
+        if let Ok(serde_json::Value::Object(o)) = serde_json::from_str::<serde_json::Value>(text) {
+            self.pack = o.into_iter().filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string()))).collect();
+        }
     }
 
     pub fn apply(&mut self, text: &str) -> bool {
@@ -90,6 +97,10 @@ impl LuaVm {
                     }
                 }
                 dm.local_player = m["you"].as_u64().map(|v| v as u32);
+                if dm.era == 2018 {
+                    let root = dm.root;
+                    dm.set_prop_quiet(root, "PlaceId", Val::Num(m["place"].as_f64().unwrap_or(0.0)));
+                }
                 if self.run {
                     let mouse = boot(&mut dm, self.screen);
                     self.core.borrow_mut().mouse = mouse;
@@ -98,6 +109,9 @@ impl LuaVm {
                         self.core.borrow_mut().queue.push((37801172, sc, "StarterScript".to_string()));
                     }
                     drop(dm);
+                    if self.dm.borrow().era == 2018 {
+                        self.install_2018();
+                    }
                     self.host = Host::new(self.dm.clone()).ok();
                     if let Some(h) = self.host.as_mut() {
                         h.set_handler(Box::new(swirl_lua::client_api::ClientApi { core: self.core.clone(), anim: self.anim.clone(), gui: self.gui.clone(), measure: Some(Rc::new(WebMeasure::new())) }));
@@ -1047,7 +1061,37 @@ impl LuaVm {
         }
     }
 
+    fn install_2018(&mut self) {
+        let mut dm = self.dm.borrow_mut();
+        for s in ["StarterPlayer", "TweenService", "TextService", "LocalizationService", "VRService", "RobloxReplicatedStorage"] {
+            let _ = dm.service(s);
+        }
+        let rg = dm.services.get("CoreGui").and_then(|cg| dm.get(*cg).and_then(|i| i.children.iter().copied().find(|c| dm.name(*c) == "RobloxGui")));
+        let rg = match rg {
+            Some(r) => r,
+            None => return,
+        };
+        crate::core2018::build_modules(&mut dm, &self.pack, rg);
+        if let Some(cf) = gui(&mut dm, "Frame", "ControlFrame", Some(rg), &[("BackgroundTransparency", Val::Num(1.0)), ("Size", ud([1.0, 0.0, 1.0, 0.0]))]) {
+            gui(&mut dm, "Frame", "BottomLeftControl", Some(cf), &[("BackgroundTransparency", Val::Num(1.0)), ("Position", ud([0.0, 0.0, 1.0, -50.0])), ("Size", ud([0.0, 130.0, 0.0, 50.0]))]);
+        }
+        crate::core2018::core_script(&mut dm, &self.pack, "LoadingScript", rg);
+        if let Some(sc) = dm.services.get("ScriptContext").copied() {
+            crate::core2018::starter_script(&mut dm, &self.pack, sc);
+        }
+    }
+
     fn drain_core(&mut self) {
+        let locals = std::mem::take(&mut self.core.borrow_mut().local_scripts);
+        for (name, parent) in locals {
+            let parent = parent.filter(|p| self.dm.borrow().get(*p).map(|i| !i.destroyed).unwrap_or(false)).or_else(|| self.dm.borrow().services.get("ScriptContext").copied());
+            if let Some(p) = parent {
+                let sid = crate::core2018::core_script(&mut self.dm.borrow_mut(), &self.pack, &name, p);
+                if let (Some(sid), Some(h)) = (sid, self.host.as_mut()) {
+                    h.scan_subtree(sid);
+                }
+            }
+        }
         let queue = std::mem::take(&mut self.core.borrow_mut().queue);
         let mut keep = vec![];
         for (cid, parent, name) in queue {
@@ -1323,7 +1367,10 @@ impl LuaVm {
                 }
             }
             let st = self.chars.as_ref().and_then(|c| c.own.as_ref()).map(|o| (o.hum, o.state));
-            self.core.borrow_mut().own_state = st;
+            let seat = self.chars.as_ref().and_then(|c| c.own.as_ref()).and_then(|o| o.seated_on);
+            let mut cs = self.core.borrow_mut();
+            cs.own_state = st;
+            cs.own_seat = seat;
         }
         {
             let mut g = self.gui.borrow_mut();
@@ -1353,6 +1400,12 @@ impl LuaVm {
                 if ch.own.as_ref().map(|o| o.hum == hum).unwrap_or(false) {
                     ch.move_to = pos;
                 }
+            }
+        }
+        let rs = self.dm.borrow().services.get("RunService").copied();
+        if let (Some(rs), Some(h)) = (rs, self.host.as_mut()) {
+            if h.has_listener(rs, "Stepped") {
+                h.fire(rs, "Stepped", vec![swirl_lua::host::Wire::N(self.t), swirl_lua::host::Wire::N(dt)]);
             }
         }
         let interp = self.core.borrow().cam_interp;
@@ -1413,6 +1466,13 @@ impl LuaVm {
             for e in events {
                 let args = e.arg.map(|a| vec![swirl_lua::host::Wire::S(a)]).unwrap_or_default();
                 h.fire(e.inst, e.name, args);
+            }
+        }
+        if let (Some(rs), Some(h)) = (rs, self.host.as_mut()) {
+            for ev in ["Heartbeat", "RenderStepped"] {
+                if h.has_listener(rs, ev) {
+                    h.fire(rs, ev, vec![swirl_lua::host::Wire::N(dt)]);
+                }
             }
         }
         if self.host.is_some() {
