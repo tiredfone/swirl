@@ -71,14 +71,18 @@ export async function startApp({ client, cfg, canvas }) {
       return {};
     }
   };
-  const [index, rewrite, index2018] = await Promise.all([json(here + 'content-index.json'), json(here + 'content/rewrite.json'), json(here + 'content2018-index.json')]);
+  const [index, rewrite, index2018, rewrite2018] = await Promise.all([json(here + 'content-index.json'), json(here + 'content/rewrite.json'), json(here + 'content2018-index.json'), json(here + 'content2018/rewrite.json')]);
   const contentUrl = (path) => {
     let p = String(path).replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/{2,}/g, '/');
     if (window.solarEra !== 2018 && LOCAL_UI[p.toLowerCase()]) return here + 'ui/' + LOCAL_UI[p.toLowerCase()];
     if (window.solarEra === 2018) {
       const key = p.toLowerCase();
       const hit = index2018[key] || index2018[key.replace(/\.(dds|tex)$/, '.png')] || index2018['platform/' + key] || index2018['platform/' + key.replace(/\.(dds|tex)$/, '.png')];
-      if (hit) return here + 'content2018/' + hit.split('/').map(encodeURIComponent).join('/');
+      if (hit) return here + 'content2018/' + (rewrite2018[hit] || hit).split('/').map(encodeURIComponent).join('/');
+    }
+    if (window.solarEra !== 2018 && !index[p.toLowerCase()]) {
+      const hit18 = index2018[p.toLowerCase()];
+      if (hit18) return here + 'content2018/' + (rewrite2018[hit18] || hit18).split('/').map(encodeURIComponent).join('/');
     }
     p = index[p.toLowerCase()] || p;
     p = rewrite[p] || p;

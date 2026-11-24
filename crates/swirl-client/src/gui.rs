@@ -207,6 +207,7 @@ impl Gui {
             let img = self.el("img", "ch-g-img", &clip).dyn_into::<HtmlImageElement>().ok()?;
             img.set_alt("");
             img.set_draggable(false);
+            style(&img, "visibility", "hidden");
             (Some(clip), Some(img))
         } else {
             (None, None)
