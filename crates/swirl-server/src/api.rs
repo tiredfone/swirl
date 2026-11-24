@@ -55,6 +55,11 @@ pub struct ApiState {
     pub mice: HashMap<InstId, InstId>,
     pub invoke_out: HashMap<u32, (InstId, f64)>,
     pub explosions: HashSet<InstId>,
+    pub friends: HashMap<(i64, i64), i64>,
+    pub libraries: HashMap<String, u64>,
+    pub lib_src: HashMap<u64, String>,
+    pub friend_times: HashMap<InstId, f64>,
+    pub board_impulses: Vec<(InstId, [f64; 3])>,
 }
 
 #[derive(Default, Clone)]
@@ -77,6 +82,8 @@ pub enum SocialKind {
     Friend(i64),
     FriendsOnline,
     Fire,
+    FriendLoad(InstId, bool),
+    FriendChange(InstId, InstId),
 }
 
 pub struct SocialReq {
@@ -129,6 +136,11 @@ pub fn new_state(assets_dir: &str, data_dir: &str, place_id: u64, era: i32) -> S
         mice: HashMap::new(),
         invoke_out: HashMap::new(),
         explosions: HashSet::new(),
+        friends: HashMap::new(),
+        libraries: HashMap::new(),
+        lib_src: HashMap::new(),
+        friend_times: HashMap::new(),
+        board_impulses: vec![],
     }))
 }
 
@@ -157,7 +169,7 @@ fn user_id_of(d: &DataModel, w: Option<&Wire>) -> i64 {
     }
 }
 
-fn anim_asset_id(url: &str) -> Option<u64> {
+pub fn anim_asset_id(url: &str) -> Option<u64> {
     let s = url.trim();
     let digits = |t: &str| -> Option<u64> {
         let d: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
@@ -211,6 +223,36 @@ pub fn make_model(d: &mut DataModel, bytes: &[u8]) -> Result<InstId, String> {
 }
 
 impl ApiState {
+    pub fn user_of(d: &DataModel, p: InstId) -> i64 {
+        match d.get_prop(p, "userId") {
+            Some(Val::Num(n)) => *n as i64,
+            _ => 0,
+        }
+    }
+
+    pub fn friend_status(&self, d: &DataModel, pl: InstId, other: InstId) -> i64 {
+        let (a, b) = (Self::user_of(d, pl), Self::user_of(d, other));
+        if a == 0 || b == 0 || a == b {
+            return 1;
+        }
+        self.friends.get(&(a, b)).copied().unwrap_or(1)
+    }
+
+    pub fn change_friendship(&mut self, d: &DataModel, pl: InstId, other: InstId, on: bool) {
+        let ok = |i: InstId| d.get(i).map(|x| x.class == "Player").unwrap_or(false);
+        if pl == other || !ok(pl) || !ok(other) || d.get(other).and_then(|x| x.parent).is_none() {
+            return;
+        }
+        let now = self.now_ms;
+        if now - self.friend_times.get(&pl).copied().unwrap_or(-1e18) < 1500.0 {
+            return;
+        }
+        self.friend_times.insert(pl, now);
+        self.token += 1;
+        let token = self.token;
+        let body = json!({"action": if on { "request" } else { "revoke" }, "from": Self::user_of(d, pl), "to": Self::user_of(d, other)});
+        self.social.push(SocialReq { token, body, kind: SocialKind::FriendChange(pl, other) });
+    }
     pub fn finish_social(&mut self, kind: SocialKind, r: Option<J>) -> (Result<Vec<Wire>, String>, Option<String>) {
         match kind {
             SocialKind::Bool(field) => (Ok(vec![Wire::B(r.map(|j| j[field].as_bool().unwrap_or(false)).unwrap_or(false))]), None),
@@ -224,7 +266,7 @@ impl ApiState {
                 let list = r.and_then(|j| j["friends"].as_array().cloned()).unwrap_or_default();
                 (Ok(vec![Wire::List(list.iter().map(json_wire).collect())]), None)
             }
-            SocialKind::Fire => (Ok(vec![]), None),
+            SocialKind::Fire | SocialKind::FriendLoad(..) | SocialKind::FriendChange(..) => (Ok(vec![]), None),
             SocialKind::Mkt(..) | SocialKind::Pending(_) | SocialKind::Grant | SocialKind::Report => (Ok(vec![]), None),
             SocialKind::Info => match r.and_then(|j| if j["info"].is_null() { None } else { Some(j["info"].clone()) }) {
                 Some(info) => (Ok(vec![json_wire(&info)]), None),

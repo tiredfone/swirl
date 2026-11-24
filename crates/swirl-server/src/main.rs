@@ -223,7 +223,7 @@ async fn start_instance(sup: &Rc<RefCell<Sup>>, env: &Rc<Env>, place: u64, kind:
     let mut s = sup.borrow_mut();
     s.job_seq += 1;
     let job = format!("{:x}{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0), s.job_seq);
-    let spec = Spec { place, job: job.clone(), kind: kind.to_string(), private_id, era, allow_gear, bytes: Arc::new(bytes), assets: env.assets.clone(), data_dir: env.data_dir.clone(), social: env.redeemer.as_ref().map(|r| (r.clone(), r.sibling_path("social"))), site: env.site.clone() };
+    let spec = Spec { place, job: job.clone(), kind: kind.to_string(), private_id, era, allow_gear, bytes: Arc::new(bytes), assets: env.assets.clone(), data_dir: env.data_dir.clone(), social: env.redeemer.as_ref().map(|r| (r.clone(), r.sibling_path("social"))), site: env.site.clone(), test: None };
     log(&format!("[place {} {}] starting (max {}, {} client)", place, if kind == "public" { job.clone() } else { format!("{} {}", kind, private_id) }, max, era));
     let handle = instance::spawn(spec);
     s.places.insert(job.clone(), Place { job: job.clone(), place, kind: kind.to_string(), private_id, max, era, allow_gear, handle, members: HashMap::new(), started: Instant::now(), empty_since: None, dead: false });
@@ -723,6 +723,8 @@ async fn ws_connection(stream: TcpStream, cid: u32, sup: Rc<RefCell<Sup>>, env: 
             let _ = s.ctl.send(Out::Kick("You joined from another session".into()));
         }
     }
+    let out_tx = instance::OutTx::new(otx.clone());
+    let buffered = out_tx.buffered.clone();
     sup.borrow_mut().socks.insert(cid, Sock { user: uid, ctl: otx.clone() });
     let job = match choose(&sup, &env, &info).await {
         Pick::Place(j) => j,
@@ -784,7 +786,7 @@ async fn ws_connection(stream: TcpStream, cid: u32, sup: Rc<RefCell<Sup>>, env: 
         p.empty_since = None;
         p.members.insert(cid, Member { id: user.id, name: user.name.clone(), joined: now, last_active: now, acts: 0, kinds: HashSet::new(), cells: HashSet::new(), px: None });
         let t = p.handle.tx.clone();
-        let _ = t.send(Cmd::Join { cid, user: user.clone(), look, out: otx.clone() });
+        let _ = t.send(Cmd::Join { cid, user: user.clone(), look, out: out_tx.clone() });
         guard.release();
         s.presence_dirty = true;
         t
@@ -842,7 +844,12 @@ async fn ws_connection(stream: TcpStream, cid: u32, sup: Rc<RefCell<Sup>>, env: 
             }
             out = orx.recv() => {
                 match out {
-                    Some(Out::Text(s)) => { if tx.send(Message::Text(s)).await.is_err() { break; } }
+                    Some(Out::Text(s)) => {
+                        let n = s.len();
+                        let sent = tx.send(Message::Text(s)).await;
+                        buffered.fetch_sub(n, std::sync::atomic::Ordering::Relaxed);
+                        if sent.is_err() { break; }
+                    }
                     Some(Out::Kick(r)) => {
                         let _ = tx.send(Message::Text(kick(r))).await;
                         let _ = tx.close().await;

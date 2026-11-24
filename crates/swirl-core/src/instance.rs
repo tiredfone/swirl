@@ -473,6 +473,18 @@ impl DataModel {
                 }
                 continue;
             }
+            if k == "MeshData" {
+                if let Value::Str(s) = v {
+                    self.get_mut(id).unwrap().props.insert("MeshData".into(), Val::Str(s.clone()));
+                }
+                continue;
+            }
+            if k == "CollisionFidelity" && classes::is_a(&x.cls, "PartOperation") {
+                if let Value::Num(n) = v {
+                    self.get_mut(id).unwrap().props.insert("CollisionFidelity".into(), Val::Num(*n));
+                }
+                continue;
+            }
             let canon = match classes::canonical_prop(&x.cls, k) {
                 Some(c) => c,
                 None => continue,

@@ -3,6 +3,7 @@ use crate::groups;
 use indexmap::{IndexMap, IndexSet};
 use rapier3d::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use swirl_core::instance::{Change, DataModel, InstId, Val};
 
 pub const GRAVITY: f64 = 196.2;
@@ -70,6 +71,22 @@ pub(crate) struct PartRec {
     touch: bool,
 }
 
+pub(crate) struct Hinge {
+    a: InstId,
+    b: InstId,
+    point: [f64; 3],
+    axis: [f64; 3],
+    inst: Option<InstId>,
+    joint: Option<ImpulseJointHandle>,
+    b1: Option<RigidBodyHandle>,
+    b2: Option<RigidBodyHandle>,
+    lp_a: [f64; 3],
+    la_a: [f64; 3],
+    radius_a: f64,
+    radius_b: f64,
+    cmd: f64,
+}
+
 pub(crate) struct Asm {
     pub(crate) parts: IndexSet<InstId>,
     anchored: bool,
@@ -120,6 +137,15 @@ pub struct Physics {
     dirty: IndexSet<InstId>,
     auto_joints: IndexMap<InstId, IndexSet<InstId>>,
     joints: IndexSet<InstId>,
+    hinges: IndexMap<u32, Hinge>,
+    hinges_of: HashMap<InstId, IndexSet<u32>>,
+    hinge_seq: u32,
+    hinges_dirty: bool,
+    fixed_body: Option<RigidBodyHandle>,
+    vehicle_seats: IndexSet<InstId>,
+    skateboards: IndexSet<InstId>,
+    pub board_events: Vec<(InstId, i32, i32)>,
+    board_state: HashMap<InstId, i32>,
     joint_parts: HashMap<InstId, (Option<InstId>, Option<InstId>)>,
     movers: IndexSet<InstId>,
     touching: HashMap<InstId, IndexSet<InstId>>,
@@ -147,6 +173,11 @@ pub struct Physics {
     pub terrain: Option<crate::terrain::TerrainData>,
     pub terrain_inst: Option<InstId>,
     terrain_cols: HashMap<crate::terrain::Key, ColliderHandle>,
+    pub union_enabled: bool,
+    union_meshes: HashMap<u64, Option<Rc<crate::csg::UnionMesh>>>,
+    union_waiting: HashMap<u64, IndexSet<InstId>>,
+    pub union_wanted: Vec<u64>,
+    union_inline: HashMap<InstId, (String, Option<Rc<crate::csg::UnionMesh>>)>,
 }
 
 impl Default for Physics {
@@ -180,6 +211,20 @@ impl Physics {
             dirty: IndexSet::new(),
             auto_joints: IndexMap::new(),
             joints: IndexSet::new(),
+            union_enabled: false,
+            union_meshes: HashMap::new(),
+            union_waiting: HashMap::new(),
+            union_wanted: vec![],
+            union_inline: HashMap::new(),
+            hinges: IndexMap::new(),
+            hinges_of: HashMap::new(),
+            hinge_seq: 0,
+            hinges_dirty: false,
+            fixed_body: None,
+            vehicle_seats: IndexSet::new(),
+            skateboards: IndexSet::new(),
+            board_events: vec![],
+            board_state: HashMap::new(),
             joint_parts: HashMap::new(),
             movers: IndexSet::new(),
             touching: HashMap::new(),
@@ -321,6 +366,12 @@ impl Physics {
             if !self.parts.contains_key(&id) && !self.is_excluded(dm, id) {
                 self.add_part(dm, id);
             }
+            if class == "VehicleSeat" && self.parts.contains_key(&id) {
+                self.vehicle_seats.insert(id);
+            }
+            if class == "SkateboardPlatform" && self.parts.contains_key(&id) {
+                self.skateboards.insert(id);
+            }
         } else if dm.is_a(id, "JointInstance") || class == "WeldConstraint" {
             self.enter_joint(dm, id);
         } else if dm.is_a(id, "BodyMover") {
@@ -333,10 +384,12 @@ impl Physics {
     }
 
     fn leave(&mut self, dm: &DataModel, id: InstId) {
+        self.vehicle_seats.shift_remove(&id);
+        self.skateboards.shift_remove(&id);
         if self.parts.contains_key(&id) {
             self.remove_part(id);
         }
-        if self.joints.contains(&id) {
+        if self.joints.contains(&id) || self.hinges.values().any(|h| h.inst == Some(id)) {
             self.leave_joint(id);
         }
         self.movers.shift_remove(&id);
@@ -346,6 +399,29 @@ impl Physics {
     fn enter_joint(&mut self, dm: &mut DataModel, j: InstId) {
         let class = dm.get(j).map(|i| i.class.clone()).unwrap_or_default();
         const RIGID: [&str; 9] = ["WeldConstraint", "Weld", "ManualWeld", "ManualGlue", "Snap", "Glue", "Motor", "Motor6D", "VelocityMotor"];
+        if matches!(class.as_str(), "Rotate" | "RotateP" | "RotateV") {
+            let a = match dm.get_prop(j, "Part0") {
+                Some(Val::Ref(Some(p))) => *p,
+                _ => return,
+            };
+            let b = match dm.get_prop(j, "Part1") {
+                Some(Val::Ref(Some(p))) => *p,
+                _ => return,
+            };
+            if a == b {
+                return;
+            }
+            if !self.in_world(dm, j) && !self.in_world(dm, a) {
+                return;
+            }
+            let c0 = match dm.get_prop(j, "C0") {
+                Some(Val::Arr(v)) => cf::arr(v).unwrap_or(cf::IDENTITY),
+                _ => cf::IDENTITY,
+            };
+            let at = cf::mul(&Self::get_cf(dm, a), &c0);
+            self.add_hinge(dm, a, b, [at[0], at[1], at[2]], [at[5], at[8], at[11]], Some(j));
+            return;
+        }
         if !RIGID.contains(&class.as_str()) {
             return;
         }
@@ -373,6 +449,10 @@ impl Physics {
     }
 
     fn leave_joint(&mut self, j: InstId) {
+        let keys: Vec<u32> = self.hinges.iter().filter(|(_, h)| h.inst == Some(j)).map(|(k, _)| *k).collect();
+        for k in keys {
+            self.drop_hinge_key(k);
+        }
         if !self.joints.shift_remove(&j) {
             return;
         }
@@ -390,7 +470,7 @@ impl Physics {
         self.dirty.insert(id);
     }
 
-    fn shape_builder(&self, dm: &DataModel, id: InstId) -> (ColliderBuilder, Option<CF>, f64) {
+    fn shape_builder(&self, dm: &DataModel, id: InstId, union: Option<ColliderBuilder>) -> (ColliderBuilder, Option<CF>, f64) {
         let s = Self::get_v3(dm, id, "Size", [4.0, 1.0, 2.0]);
         let half = |v: f64| if v.is_finite() { (v / 2.0).max(0.05).min(1e5) } else { 0.05 };
         let (hx, hy, hz) = (half(s[0]), half(s[1]), half(s[2]));
@@ -398,7 +478,9 @@ impl Physics {
         let has_shape = dm.prop_def(id, "Shape").is_some();
         let shape = Self::get_num(dm, id, "Shape", 1.0) as i32;
         let mut rot = None;
-        let b = if class == "WedgePart" {
+        let b = if union.is_some() {
+            union
+        } else if class == "WedgePart" {
             ColliderBuilder::convex_hull(&wedge_hull(hx, hy, hz))
         } else if class == "CornerWedgePart" {
             ColliderBuilder::convex_hull(&corner_hull(hx, hy, hz))
@@ -414,13 +496,125 @@ impl Physics {
         (b, rot, s[0] * s[1] * s[2])
     }
 
+    fn union_mesh(&mut self, dm: &DataModel, id: InstId) -> Option<Rc<crate::csg::UnionMesh>> {
+        if let Some(Val::Str(inline)) = dm.get(id).and_then(|i| i.props.get("MeshData")) {
+            let stripped: String = {
+                let mut out = String::new();
+                let mut in_tag = false;
+                for c in inline.chars() {
+                    if c == '<' {
+                        in_tag = true;
+                    } else if c == '>' {
+                        in_tag = false;
+                    } else if !in_tag {
+                        out.push(c);
+                    }
+                }
+                out
+            };
+            if stripped.trim().len() > 8 {
+                if let Some((src, mesh)) = self.union_inline.get(&id) {
+                    if src == inline {
+                        return mesh.clone();
+                    }
+                }
+                let mesh = crate::csg::mesh_from_inline(inline).map(Rc::new);
+                self.union_inline.insert(id, (inline.clone(), mesh.clone()));
+                if mesh.is_some() {
+                    return mesh;
+                }
+            }
+        }
+        let url = match dm.get_prop(id, "AssetId") {
+            Some(Val::Str(u)) if !u.is_empty() => u.clone(),
+            _ => return None,
+        };
+        let aid = Self::asset_id_of(&url)?;
+        if let Some(m) = self.union_meshes.get(&aid) {
+            return m.clone();
+        }
+        let first = !self.union_waiting.contains_key(&aid);
+        self.union_waiting.entry(aid).or_default().insert(id);
+        if first {
+            self.union_wanted.push(aid);
+        }
+        None
+    }
+
+    fn asset_id_of(url: &str) -> Option<u64> {
+        let s = url.trim();
+        let digits = |t: &str| -> Option<u64> {
+            let d: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if d.is_empty() { None } else { d.parse().ok() }
+        };
+        let lower = s.to_ascii_lowercase();
+        for (i, _) in lower.match_indices("id=") {
+            if i > 0 && (lower.as_bytes()[i - 1] == b'?' || lower.as_bytes()[i - 1] == b'&') {
+                return digits(&s[i + 3..]);
+            }
+        }
+        if let Some(r) = lower.strip_prefix("rbxassetid://") {
+            return digits(r);
+        }
+        if !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()) {
+            return digits(s);
+        }
+        None
+    }
+
+    pub fn provide_union(&mut self, dm: &DataModel, aid: u64, mesh: Option<crate::csg::UnionMesh>) {
+        let m = mesh.map(Rc::new);
+        self.union_meshes.insert(aid, m.clone());
+        let waiting = self.union_waiting.remove(&aid).unwrap_or_default();
+        if m.is_none() {
+            return;
+        }
+        for p in waiting {
+            if self.parts.contains_key(&p) {
+                self.rebuild_part(dm, p);
+            }
+        }
+    }
+
+    fn union_shape(&mut self, dm: &DataModel, id: InstId) -> Option<ColliderBuilder> {
+        let fid = match dm.get(id).and_then(|i| i.props.get("CollisionFidelity")) {
+            Some(Val::Num(n)) if dm.era == 2018 => *n as i32,
+            _ => 0,
+        };
+        if fid == 2 {
+            return None;
+        }
+        let m = self.union_mesh(dm, id)?;
+        if m.pos.len() < 9 {
+            return None;
+        }
+        let size = Self::get_v3(dm, id, "Size", [4.0, 1.0, 2.0]);
+        let base = match dm.get_prop(id, "InitialSize") {
+            Some(Val::Arr(v)) if v.len() >= 3 && v.iter().take(3).all(|x| *x > 0.0) => [v[0], v[1], v[2]],
+            _ => m.bounds,
+        };
+        let sc = |k: usize| size[k] / if base[k] == 0.0 { 1.0 } else { base[k] };
+        let (sx, sy, sz) = (sc(0), sc(1), sc(2));
+        let pts: Vec<Vector> = m.pos.chunks_exact(3).map(|c| Vector::new((c[0] as f64 * sx) as f32, (c[1] as f64 * sy) as f32, (c[2] as f64 * sz) as f32)).collect();
+        if fid == 1 || !Self::get_bool(dm, id, "Anchored", false) {
+            return ColliderBuilder::convex_hull(&pts);
+        }
+        let idx: Vec<[u32; 3]> = m.idx.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+        let flags = TriMeshFlags::FIX_INTERNAL_EDGES | TriMeshFlags::MERGE_DUPLICATE_VERTICES | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES;
+        match ColliderBuilder::trimesh_with_flags(pts.clone(), idx, flags) {
+            Ok(b) => Some(b),
+            Err(_) => ColliderBuilder::convex_hull(&pts),
+        }
+    }
+
     fn make_collider(&mut self, dm: &DataModel, id: InstId, body: Option<RigidBodyHandle>, offset: Option<CF>) {
         self.stir = true;
         if let Some(old) = self.parts.get_mut(&id).and_then(|r| r.collider.take()) {
             self.by_handle.remove(&old);
             self.colliders.remove(old, &mut self.islands, &mut self.bodies, &mut self.soft, true);
         }
-        let (builder, rot, volume) = self.shape_builder(dm, id);
+        let union = if self.union_enabled && dm.is_a(id, "PartOperation") { self.union_shape(dm, id) } else { None };
+        let (builder, rot, volume) = self.shape_builder(dm, id, union);
         let raw = offset.unwrap_or_else(|| Self::get_cf(dm, id));
         let base = if cf::is_finite(&raw) { raw } else { [0.0, -1e4, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] };
         let full = match &rot {
@@ -531,6 +725,7 @@ impl Physics {
             self.colliders.remove(h, &mut self.islands, &mut self.bodies, &mut self.soft, true);
         }
         self.drop_auto(id);
+        self.drop_hinges(id);
         if let Some(t) = self.touching.remove(&id) {
             for o in t {
                 if let Some(ot) = self.touching.get_mut(&o) {
@@ -569,6 +764,361 @@ impl Physics {
         self.mark_dirty(b);
     }
 
+
+    fn explicit_hinge(&self, part: InstId) -> bool {
+        match self.hinges_of.get(&part) {
+            Some(ks) => ks.iter().any(|k| self.hinges.get(k).map(|h| h.inst.is_some()).unwrap_or(false)),
+            None => false,
+        }
+    }
+
+    fn add_hinge(&mut self, dm: &DataModel, a: InstId, b: InstId, point: [f64; 3], axis: [f64; 3], inst: Option<InstId>) {
+        self.hinge_seq += 1;
+        let key = self.hinge_seq;
+        let cf_a = Self::get_cf(dm, a);
+        let cf_b = Self::get_cf(dm, b);
+        let ia = cf::inv(&cf_a);
+        let ib = cf::inv(&cf_b);
+        let lp_a = cf::point(&ia, point[0], point[1], point[2]);
+        let la_a = cf::vector(&ia, axis[0], axis[1], axis[2]);
+        let la_b = cf::vector(&ib, axis[0], axis[1], axis[2]);
+        let radius_of = |part: InstId, la: [f64; 3]| -> f64 {
+            let sz = Self::get_v3(dm, part, "Size", [4.0, 1.0, 2.0]);
+            let ax = [la[0].abs(), la[1].abs(), la[2].abs()];
+            let mut k = 0;
+            for i in 1..3 {
+                if ax[i] > ax[k] {
+                    k = i;
+                }
+            }
+            let mut m = f64::NEG_INFINITY;
+            for i in 0..3 {
+                if i != k {
+                    m = m.max(sz[i]);
+                }
+            }
+            (m / 2.0).max(0.25)
+        };
+        let h = Hinge { a, b, point, axis, inst, joint: None, b1: None, b2: None, lp_a, la_a, radius_a: radius_of(a, la_a), radius_b: radius_of(b, la_b), cmd: 0.0 };
+        self.hinges.insert(key, h);
+        for p in [a, b] {
+            self.hinges_of.entry(p).or_default().insert(key);
+        }
+        self.hinges_dirty = true;
+        self.mark_dirty(a);
+        self.mark_dirty(b);
+    }
+
+    fn drop_hinge_key(&mut self, key: u32) {
+        let h = match self.hinges.shift_remove(&key) {
+            Some(h) => h,
+            None => return,
+        };
+        for p in [h.a, h.b] {
+            let empty = match self.hinges_of.get_mut(&p) {
+                Some(set) => {
+                    set.shift_remove(&key);
+                    set.is_empty()
+                }
+                None => false,
+            };
+            if empty {
+                self.hinges_of.remove(&p);
+            }
+            self.mark_dirty(p);
+        }
+        self.detach_hinge_joint(h.joint, h.b1, h.b2);
+    }
+
+    fn drop_hinges(&mut self, part: InstId) {
+        let keys: Vec<u32> = match self.hinges_of.get(&part) {
+            Some(s) => s.iter().copied().collect(),
+            None => return,
+        };
+        for k in keys {
+            self.drop_hinge_key(k);
+        }
+    }
+
+    fn detach_hinge_joint(&mut self, joint: Option<ImpulseJointHandle>, b1: Option<RigidBodyHandle>, b2: Option<RigidBodyHandle>) {
+        if let (Some(j), Some(a), Some(b)) = (joint, b1, b2) {
+            if self.bodies.get(a).is_some() && self.bodies.get(b).is_some() {
+                self.joints_set.remove(j, true);
+            }
+        }
+    }
+
+    fn remove_hinge_joint(&mut self, key: u32) {
+        let (j, a, b) = match self.hinges.get_mut(&key) {
+            Some(h) => (h.joint.take(), h.b1.take(), h.b2.take()),
+            None => return,
+        };
+        self.detach_hinge_joint(j, a, b);
+    }
+
+    fn hinge_body(&mut self, asm: usize) -> RigidBodyHandle {
+        if let Some(b) = self.assemblies.get(&asm).and_then(|a| a.body) {
+            return b;
+        }
+        if let Some(f) = self.fixed_body {
+            if self.bodies.get(f).is_some() {
+                return f;
+            }
+        }
+        let f = self.bodies.insert(RigidBodyBuilder::fixed().build());
+        self.fixed_body = Some(f);
+        f
+    }
+
+    fn sync_hinges(&mut self, dm: &DataModel) {
+        self.hinges_dirty = false;
+        let mut pairs: HashMap<(u32, u32, u32, u32), u32> = HashMap::new();
+        let keys: Vec<u32> = self.hinges.keys().copied().collect();
+        for key in keys {
+            let (ha, hb, la, lpa) = {
+                let h = &self.hinges[&key];
+                (h.a, h.b, h.la_a, h.lp_a)
+            };
+            let ra = self.parts.get(&ha).and_then(|r| r.asm);
+            let rb = self.parts.get(&hb).and_then(|r| r.asm);
+            let (aa, ab) = match (ra, rb) {
+                (Some(x), Some(y)) if x != y => (x, y),
+                _ => {
+                    self.remove_hinge_joint(key);
+                    continue;
+                }
+            };
+            let has_body = |ai: usize, s: &Self| s.assemblies.get(&ai).map(|a| a.body.is_some()).unwrap_or(false);
+            if !has_body(aa, self) && !has_body(ab, self) {
+                self.remove_hinge_joint(key);
+                continue;
+            }
+            let b1 = self.hinge_body(aa);
+            let b2 = self.hinge_body(ab);
+            let raw = |b: RigidBodyHandle| b.into_raw_parts();
+            let (r1, r2) = (raw(b1), raw(b2));
+            let pk = if r1 < r2 { (r1.0, r1.1, r2.0, r2.1) } else { (r2.0, r2.1, r1.0, r1.1) };
+            if let Some(o) = pairs.get(&pk) {
+                if *o != key {
+                    self.remove_hinge_joint(key);
+                    continue;
+                }
+            }
+            pairs.insert(pk, key);
+            {
+                let h = &self.hinges[&key];
+                if h.joint.is_some() && h.b1 == Some(b1) && h.b2 == Some(b2) && self.bodies.get(b1).is_some() && self.bodies.get(b2).is_some() {
+                    continue;
+                }
+            }
+            self.remove_hinge_joint(key);
+            let pcf = Self::get_cf(dm, ha);
+            let wp = cf::point(&pcf, lpa[0], lpa[1], lpa[2]);
+            let wa = cf::vector(&pcf, la[0], la[1], la[2]);
+            let local = |bh: RigidBodyHandle, s: &Self| -> ([f64; 3], [f64; 3]) {
+                let body = &s.bodies[bh];
+                let bcf = cf_of(body.translation(), body.rotation());
+                let inv = cf::inv(&bcf);
+                (cf::point(&inv, wp[0], wp[1], wp[2]), cf::vector(&inv, wa[0], wa[1], wa[2]))
+            };
+            let (p1, a1) = local(b1, self);
+            let (p2, a2) = local(b2, self);
+            let v = |x: [f64; 3]| Vector::new(x[0] as f32, x[1] as f32, x[2] as f32);
+            let mut joint: GenericJoint = RevoluteJointBuilder::new(v(a1)).local_anchor1(v(p1)).local_anchor2(v(p2)).build().into();
+            joint.set_local_axis2(v(a2));
+            joint.set_contacts_enabled(false);
+            let jh = self.joints_set.insert(b1, b2, joint, true);
+            let h = self.hinges.get_mut(&key).unwrap();
+            h.joint = Some(jh);
+            h.b1 = Some(b1);
+            h.b2 = Some(b2);
+        }
+    }
+
+    fn drive_vehicles(&mut self, dm: &DataModel) {
+        let seats: Vec<InstId> = self.vehicle_seats.iter().copied().collect();
+        for seat in seats {
+            let asm = match self.parts.get(&seat).and_then(|r| r.asm) {
+                Some(a) => a,
+                None => continue,
+            };
+            let body_h = match self.assemblies.get(&asm).and_then(|a| a.body) {
+                Some(b) => b,
+                None => continue,
+            };
+            if Self::get_bool(dm, seat, "Disabled", false) {
+                continue;
+            }
+            let num = |name: &str| -> f64 {
+                match dm.get_prop(seat, name) {
+                    Some(Val::Num(n)) => *n,
+                    Some(Val::Bool(b)) => *b as i32 as f64,
+                    _ => 0.0,
+                }
+            };
+            let to_i = |x: f64| -> f64 { if x.is_finite() { x.trunc() as i32 as f64 } else { 0.0 } };
+            let th = to_i(num("Throttle"));
+            let st = to_i(num("Steer"));
+            let occupied = matches!(dm.get_prop(seat, "Occupant"), Some(Val::Ref(Some(_))));
+            let on = occupied && (th != 0.0 || st != 0.0);
+            let c = Self::get_cf(dm, seat);
+            let f = [-c[5], -c[8], -c[11]];
+            let u = [c[4], c[7], c[10]];
+            let rt = [c[3], c[6], c[9]];
+            let spin = [u[1] * f[2] - u[2] * f[1], u[2] * f[0] - u[0] * f[2], u[0] * f[1] - u[1] * f[0]];
+            let max_speed = Self::get_num(dm, seat, "MaxSpeed", 0.0).max(0.0);
+            let torque = Self::get_num(dm, seat, "Torque", 0.0).max(0.0);
+            let turn = match dm.get_prop(seat, "TurnSpeed") {
+                Some(Val::Num(n)) => n.max(0.0),
+                _ => 1.0,
+            };
+            if on && st != 0.0 {
+                let (lv, av) = {
+                    let b = &self.bodies[body_h];
+                    (b.linvel(), b.angvel())
+                };
+                let (lvx, lvy, lvz) = (lv.x as f64, lv.y as f64, lv.z as f64);
+                let fwd = lvx * f[0] + lvy * f[1] + lvz * f[2];
+                let rate = -st * turn * (50.0 / fwd.abs().max(8.0)).min(1.6) * (fwd / 6.0).min(1.0).max(-1.0);
+                let cur = av.x as f64 * u[0] + av.y as f64 * u[1] + av.z as f64 * u[2];
+                let k = (20.0 * STEP).min(1.0) * (rate - cur);
+                let nv = Vector::new((av.x as f64 + u[0] * k) as f32, (av.y as f64 + u[1] * k) as f32, (av.z as f64 + u[2] * k) as f32);
+                self.bodies[body_h].set_angvel(nv, true);
+            }
+            let keys: Vec<u32> = self.hinges.keys().copied().collect();
+            for key in keys {
+                let (ha, hb, jt, laa, radius_a, radius_b, cmd0) = {
+                    let h = &self.hinges[&key];
+                    if h.joint.is_none() {
+                        continue;
+                    }
+                    (h.a, h.b, h.joint.unwrap(), h.la_a, h.radius_a, h.radius_b, h.cmd)
+                };
+                let asm_a = self.parts.get(&ha).and_then(|r| r.asm);
+                let asm_b = self.parts.get(&hb).and_then(|r| r.asm);
+                let (wheel, sign) = if asm_a == Some(asm) && asm_b != Some(asm) {
+                    (hb, 1.0)
+                } else if asm_b == Some(asm) && asm_a != Some(asm) {
+                    (ha, -1.0)
+                } else {
+                    continue;
+                };
+                if !on {
+                    if let Some(j) = self.joints_set.get_mut(jt, true) {
+                        j.data.set_motor_velocity(JointAxis::AngX, 0.0, 0.0);
+                    }
+                    self.hinges.get_mut(&key).unwrap().cmd = 0.0;
+                    continue;
+                }
+                let wcf = Self::get_cf(dm, wheel);
+                let side = (wcf[0] - c[0]) * rt[0] + (wcf[1] - c[1]) * rt[1] + (wcf[2] - c[2]) * rt[2];
+                let sgn = if side > 0.0 { 1.0 } else if side < 0.0 { -1.0 } else { 0.0 };
+                let s = max_speed * (th - st * turn * sgn).min(1.0).max(-1.0);
+                let pcf = Self::get_cf(dm, ha);
+                let axis = cf::vector(&pcf, laa[0], laa[1], laa[2]);
+                let wv = (spin[0] * axis[0] + spin[1] * axis[1] + spin[2] * axis[2]) * (s / if sign > 0.0 { radius_b } else { radius_a }) * sign;
+                let wasm = self.parts.get(&wheel).and_then(|r| r.asm);
+                let wb = wasm.and_then(|a| self.assemblies.get(&a)).and_then(|a| a.body);
+                let m = match wb {
+                    Some(b) => self.bodies[b].mass() as f64,
+                    None => 1.0,
+                };
+                let radius = (if sign > 0.0 { radius_b } else { radius_a }).max(0.1);
+                let step = ((1.0f64.max(torque).max(max_speed / 2.0)) * (if st != 0.0 { 3.0 } else { 1.0 }) / radius) * STEP;
+                let cur = if cmd0.is_finite() { cmd0 } else { 0.0 };
+                let cmd = cur + (wv - cur).min(step).max(-step);
+                self.hinges.get_mut(&key).unwrap().cmd = cmd;
+                if let Some(j) = self.joints_set.get_mut(jt, true) {
+                    j.data.set_motor_velocity(JointAxis::AngX, cmd as f32, (0.5f64).max(torque * m * 0.02) as f32);
+                }
+                if let Some(b) = wb {
+                    if self.bodies[b].is_sleeping() {
+                        self.bodies[b].wake_up(true);
+                    }
+                }
+                if self.bodies[body_h].is_sleeping() {
+                    self.bodies[body_h].wake_up(true);
+                }
+            }
+        }
+    }
+
+    pub fn board_impulse(&mut self, part: InstId, dv: [f64; 3]) {
+        let bh = match self.parts.get(&part).and_then(|r| r.asm).and_then(|a| self.assemblies.get(&a)).and_then(|a| a.body) {
+            Some(b) => b,
+            None => return,
+        };
+        let v = self.bodies[bh].linvel();
+        self.bodies[bh].set_linvel(Vector::new((v.x as f64 + dv[0]) as f32, (v.y as f64 + dv[1]) as f32, (v.z as f64 + dv[2]) as f32), true);
+    }
+
+    pub fn board_grounded(&self, dm: &DataModel, board: InstId) -> bool {
+        let c = Self::get_cf(dm, board);
+        let parent = dm.get(board).and_then(|i| i.parent);
+        let ign = [parent.unwrap_or(board)];
+        let f = |q: InstId| Self::get_bool(dm, q, "CanCollide", true) && !(parent.is_some() && dm.is_descendant_of(q, parent.unwrap()));
+        self.raycast(dm, [c[0], c[1], c[2]], [0.0, -2.2, 0.0], &ign, Some(&f)).part.is_some()
+    }
+
+    pub fn clear_board_state(&mut self, board: InstId) {
+        self.board_state.remove(&board);
+    }
+
+    fn drive_skateboards(&mut self, dm: &DataModel, dt: f64) {
+        let boards: Vec<InstId> = self.skateboards.iter().copied().collect();
+        for board in boards {
+            if !matches!(dm.get_prop(board, "ControllingHumanoid"), Some(Val::Ref(Some(_)))) {
+                self.board_state.remove(&board);
+                continue;
+            }
+            let bh = match self.parts.get(&board).and_then(|r| r.asm).and_then(|a| self.assemblies.get(&a)).and_then(|a| a.body) {
+                Some(b) => b,
+                None => continue,
+            };
+            let c = Self::get_cf(dm, board);
+            let (mut fx, mut fz) = (-c[5], -c[11]);
+            let fl = if fx.hypot(fz) == 0.0 { 1.0 } else { fx.hypot(fz) };
+            fx /= fl;
+            fz /= fl;
+            let (rx, rz) = (-fz, fx);
+            let to_i = |x: f64| -> f64 { if x.is_finite() { x.trunc() as i32 as f64 } else { 0.0 } };
+            let th = to_i(Self::get_num(dm, board, "Throttle", 0.0));
+            let st = to_i(Self::get_num(dm, board, "Steer", 0.0));
+            let v = self.bodies[bh].linvel();
+            let (vx, vy, vz) = (v.x as f64, v.y as f64, v.z as f64);
+            let grounded = self.board_grounded(dm, board);
+            let mut fwd = vx * fx + vz * fz;
+            let mut side = vx * rx + vz * rz;
+            let sticky = !matches!(dm.get_prop(board, "StickyWheels"), Some(Val::Bool(false)));
+            if grounded {
+                if th > 0.0 {
+                    fwd = (fwd + 22.0 * dt).min(40.0);
+                } else if th < 0.0 {
+                    fwd = if fwd > 0.0 { (fwd - 45.0 * dt).max(0.0) } else { (fwd - 10.0 * dt).max(-8.0) };
+                } else {
+                    let sg = if fwd > 0.0 { 1.0 } else if fwd < 0.0 { -1.0 } else { 0.0 };
+                    fwd -= sg * fwd.abs().min(2.5 * dt);
+                }
+                if sticky {
+                    side *= (1.0 - 12.0 * dt).max(0.0);
+                }
+            }
+            self.bodies[bh].set_linvel(Vector::new((fx * fwd + rx * side) as f32, vy as f32, (fz * fwd + rz * side) as f32), true);
+            let av = self.bodies[bh].angvel();
+            let yaw = if grounded { -st * (1.2 + (fwd.abs() / 20.0).min(1.6)) * if fwd < -0.5 { -1.0 } else { 1.0 } } else { av.y as f64 };
+            let keep = if sticky && grounded { 0.6 } else { 1.0 };
+            self.bodies[bh].set_angvel(Vector::new((av.x as f64 * keep) as f32, yaw as f32, (av.z as f64 * keep) as f32), true);
+            let speed = vx.hypot(vz);
+            let state = if !grounded { 4 } else if th > 0.0 { 2 } else if th < 0.0 { if speed > 1.0 { 3 } else { 0 } } else if speed > 1.0 { 1 } else { 0 };
+            let cur = self.board_state.get(&board).copied();
+            if cur != Some(state) {
+                let old = cur.unwrap_or(0);
+                self.board_state.insert(board, state);
+                self.board_events.push((board, state, old));
+            }
+        }
+    }
+
     fn drop_auto(&mut self, part: InstId) {
         if let Some(s) = self.auto_joints.shift_remove(&part) {
             for o in s {
@@ -582,6 +1132,7 @@ impl Physics {
 
     pub fn break_joints(&mut self, dm: &mut DataModel, part: InstId) {
         self.drop_auto(part);
+        self.drop_hinges(part);
         let js: Vec<InstId> = self.joints.iter().copied().collect();
         for j in js {
             if let Some((a, b)) = self.joint_parts.get(&j).copied() {
@@ -722,6 +1273,9 @@ impl Physics {
             }
         }
         for &p in list {
+            if self.explicit_hinge(p) {
+                continue;
+            }
             let (lo, hi) = Self::aabb_of(dm, p, 0.1);
             let mut out: IndexSet<InstId> = IndexSet::new();
             let mut test = |e: &(InstId, [f64; 3], [f64; 3])| {
@@ -750,7 +1304,7 @@ impl Physics {
                 }
             }
             for o in out {
-                if o == p {
+                if o == p || self.explicit_hinge(o) {
                     continue;
                 }
                 let f = match Self::face_contact(dm, p, o, true) {
@@ -762,10 +1316,27 @@ impl Physics {
                 if !can_join(sp, so) {
                     continue;
                 }
-                if (6..=8).contains(&sp) || (6..=8).contains(&so) {
-                    continue;
+                let hp = (6..=8).contains(&sp);
+                let ho = (6..=8).contains(&so);
+                if hp || ho {
+                    let (hinge, other, face) = if hp { (p, o, f.0) } else { (o, p, f.1) };
+                    let known = self.hinges_of.get(&hinge).map(|ks| {
+                        ks.iter().any(|k| {
+                            self.hinges.get(k).map(|h| h.inst.is_none() && ((h.a == hinge && h.b == other) || (h.a == other && h.b == hinge))).unwrap_or(false)
+                        })
+                    }).unwrap_or(false);
+                    if known {
+                        continue;
+                    }
+                    let c = Self::get_cf(dm, hinge);
+                    let sz = Self::get_v3(dm, hinge, "Size", [4.0, 1.0, 2.0]);
+                    let (ax, sg) = FACE_AXES[face];
+                    let n = [c[3 + ax] * sg, c[6 + ax] * sg, c[9 + ax] * sg];
+                    let pt = [c[0] + n[0] * sz[ax] / 2.0, c[1] + n[1] * sz[ax] / 2.0, c[2] + n[2] * sz[ax] / 2.0];
+                    self.add_hinge(dm, hinge, other, pt, n, None);
+                } else {
+                    self.add_auto(p, o);
                 }
-                self.add_auto(p, o);
             }
         }
     }
@@ -779,6 +1350,12 @@ impl Physics {
             }
             if let Some(b) = b {
                 explicit.insert(*b);
+            }
+        }
+        for h in self.hinges.values() {
+            if h.inst.is_some() {
+                explicit.insert(h.a);
+                explicit.insert(h.b);
             }
         }
         let list: Vec<InstId> = loose.into_iter().filter(|p| !explicit.contains(p)).collect();
@@ -924,7 +1501,7 @@ impl Physics {
     }
 
     pub fn flush(&mut self, dm: &DataModel) {
-        if !self.pending_join.is_empty() || !self.dirty.is_empty() {
+        if !self.pending_join.is_empty() || !self.dirty.is_empty() || self.hinges_dirty {
             self.stir = true;
         }
         if !self.pending_join.is_empty() {
@@ -933,6 +1510,9 @@ impl Physics {
             self.make_joints(dm, &list);
         }
         if self.dirty.is_empty() {
+            if self.hinges_dirty {
+                self.sync_hinges(dm);
+            }
             return;
         }
         let seeds: Vec<InstId> = self.dirty.iter().copied().filter(|p| self.parts.contains_key(p)).collect();
@@ -948,9 +1528,14 @@ impl Physics {
             }
             self.build_assembly(dm, &group);
         }
+        self.sync_hinges(dm);
     }
 
     fn moved(&mut self, dm: &mut DataModel, id: InstId) {
+        self.moved_opts(dm, id, false);
+    }
+
+    fn moved_opts(&mut self, dm: &mut DataModel, id: InstId, model: bool) {
         let cfv = Self::get_cf(dm, id);
         let (collider, asm, local, rot) = match self.parts.get(&id) {
             Some(r) => (r.collider, r.asm, r.local, r.rot),
@@ -968,7 +1553,7 @@ impl Physics {
                     if let Some(b) = self.bodies.get_mut(bh) {
                         b.set_position(iso_body(&target), true);
                     }
-                    let others: Vec<InstId> = self.assemblies[&ai].parts.iter().copied().filter(|p| *p != id).collect();
+                    let others: Vec<InstId> = if model { vec![] } else { self.assemblies[&ai].parts.iter().copied().filter(|p| *p != id).collect() };
                     for p in others {
                         if let Some(pl) = self.parts.get(&p).and_then(|r| r.local) {
                             self.set_own(dm, p, "CFrame", Val::Arr(cf::mul(&target, &pl).to_vec()));
@@ -978,7 +1563,7 @@ impl Physics {
                 return;
             }
             let (anch, n) = self.assemblies.get(&ai).map(|a| (a.anchored, a.parts.len())).unwrap_or((false, 0));
-            if anch && n > 1 {
+            if anch && n > 1 && !model {
                 if let Some(l) = local {
                     let root_cf = cf::mul(&cfv, &cf::inv(&l));
                     let others: Vec<InstId> = self.assemblies[&ai].parts.iter().copied().filter(|p| *p != id).collect();
@@ -1285,12 +1870,18 @@ impl Physics {
         self.acc = (self.acc + dt).min(STEP * 4.0);
         while self.acc >= STEP {
             self.acc -= STEP;
-            let busy = self.stir || self.any_awake != Some(false) || !self.forced.is_empty();
+            let busy = self.stir || self.any_awake != Some(false) || !self.vehicle_seats.is_empty() || !self.skateboards.is_empty() || !self.forced.is_empty();
             if !busy {
                 continue;
             }
             self.stir = false;
             self.apply_movers(dm, STEP);
+            if !self.vehicle_seats.is_empty() {
+                self.drive_vehicles(dm);
+            }
+            if !self.skateboards.is_empty() {
+                self.drive_skateboards(dm, STEP);
+            }
             let (tx, rx) = std::sync::mpsc::channel::<CollisionEvent>();
             let (ctx, _crx) = std::sync::mpsc::channel::<ContactForceEvent>();
             let (stx, _srx) = std::sync::mpsc::channel::<SoftBodyTearEvent>();
@@ -1476,6 +2067,9 @@ impl Physics {
 
     pub fn write_prop(&mut self, dm: &mut DataModel, id: InstId, name: &'static str, v: Val) {
         self.set_own(dm, id, name, v);
+        if name == "CFrame" && self.parts.contains_key(&id) {
+            self.moved_opts(dm, id, true);
+        }
     }
 
     pub fn remove_char_parts(&mut self, dm: &DataModel, model: InstId) {

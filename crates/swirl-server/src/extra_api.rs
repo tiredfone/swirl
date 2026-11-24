@@ -13,7 +13,7 @@ pub const METHODS: &[&str] = &[
     "Resize", "resize", "CanSetNetworkOwnership", "IsGrounded", "GetSunDirection", "GetMoonDirection", "GetTextSize",
     "CreateCollisionGroup", "CollisionGroupSetCollidable", "CollisionGroupsAreCollidable", "GetCollisionGroupId", "GetCollisionGroupName", "GetCollisionGroups",
     "GetMaxCollisionGroups", "SetPartCollisionGroup", "CollisionGroupContainsPart", "RemoveCollisionGroup", "RenameCollisionGroup",
-    "__invokeClient", "RegisterLibrary", "AddCoreScript", "AddStarterScript", "GenerateGUID", "GetDisplayName", "SetDesiredAngle", "Disable", "ToggleSelect",
+    "__invokeClient", "__librarySource", "ApplySpecificImpulse", "BindButton", "bindButton", "UnbindButton", "unbindButton", "RegisterLibrary", "AddCoreScript", "AddStarterScript", "GenerateGUID", "GetDisplayName", "SetDesiredAngle", "Disable", "ToggleSelect",
 ];
 
 fn text(a: &[Wire], i: usize) -> String {
@@ -129,13 +129,13 @@ pub fn call(st: &mut ApiState, d: &mut DataModel, id: InstId, method: &str, args
             ok(vec![Wire::S(format!("/image/{}?userId={}", kind, uid)), Wire::B(true)])
         }
         "IsFriendsWith" | "isFriendsWith" if class == "Player" => {
-            let me = match d.get_prop(id, "userId") {
-                Some(Val::Num(n)) => *n as i64,
-                _ => 0,
-            };
+            let me = ApiState::user_of(d, id);
             let other = num(args, 0) as i64;
             if me <= 0 || other <= 0 || me == other {
                 return ok(vec![Wire::B(false)]);
+            }
+            if let Some(s) = st.friends.get(&(me, other)) {
+                return ok(vec![Wire::B(*s == 2)]);
             }
             st.token += 1;
             let token = st.token;
@@ -143,33 +143,23 @@ pub fn call(st: &mut ApiState, d: &mut DataModel, id: InstId, method: &str, args
             Some(Res::Async(token))
         }
         "GetFriendsOnline" if class == "Player" => {
-            let me = match d.get_prop(id, "userId") {
-                Some(Val::Num(n)) => *n as i64,
-                _ => 0,
-            };
+            let me = ApiState::user_of(d, id);
             let max = if args.first().is_some() { num(args, 0) as i64 } else { 200 };
             st.token += 1;
             let token = st.token;
             st.social.push(SocialReq { token, body: json!({"action": "friendsOnline", "userId": me, "max": max}), kind: SocialKind::FriendsOnline });
             Some(Res::Async(token))
         }
-        "GetFriendStatus" if class == "Player" => ok(vec![Wire::E("FriendStatus".into(), 1.0)]),
-        "RequestFriendship" | "RevokeFriendship" if class == "Player" => {
-            let from = match d.get_prop(id, "userId") {
-                Some(Val::Num(n)) => *n as i64,
-                _ => 0,
+        "GetFriendStatus" if class == "Player" => {
+            let v = match args.first() {
+                Some(Wire::I(o)) => st.friend_status(d, id, *o),
+                _ => 1,
             };
+            ok(vec![Wire::E("FriendStatus".into(), v as f64)])
+        }
+        "RequestFriendship" | "RevokeFriendship" if class == "Player" => {
             if let Some(Wire::I(o)) = args.first() {
-                let to = match d.get_prop(*o, "userId") {
-                    Some(Val::Num(n)) => *n as i64,
-                    _ => 0,
-                };
-                if from > 0 && to > 0 && from != to {
-                    st.token += 1;
-                    let token = st.token;
-                    let action = if method == "RequestFriendship" { "request" } else { "revoke" };
-                    st.social.push(SocialReq { token, body: json!({"action": action, "from": from, "to": to}), kind: SocialKind::Fire });
-                }
+                st.change_friendship(d, id, *o, method == "RequestFriendship");
             }
             ok(vec![])
         }
@@ -487,7 +477,28 @@ pub fn call(st: &mut ApiState, d: &mut DataModel, id: InstId, method: &str, args
             st.invoke_out.insert(k, (pl, at));
             Some(Res::Async(k))
         }
-        "RegisterLibrary" | "AddCoreScript" | "AddStarterScript" if class == "ScriptContext" => ok(vec![]),
+        "RegisterLibrary" if class == "ScriptContext" => {
+            let name = text(args, 0).rsplit('/').next().unwrap_or("").to_string();
+            let lid = match args.get(1) {
+                Some(Wire::N(n)) => *n as u64,
+                Some(Wire::S(t)) => t.parse().unwrap_or(0),
+                _ => 0,
+            };
+            st.libraries.insert(name, lid);
+            ok(vec![])
+        }
+        "__librarySource" if id == d.root => {
+            let src = st.libraries.get(&text(args, 0)).and_then(|i| st.lib_src.get(i)).cloned();
+            ok(vec![src.map(Wire::S).unwrap_or(Wire::Nil)])
+        }
+        "ApplySpecificImpulse" if class == "SkateboardPlatform" => {
+            if let Some(Wire::V3(v)) = args.first() {
+                st.board_impulses.push((id, *v));
+            }
+            ok(vec![])
+        }
+        "BindButton" | "bindButton" | "UnbindButton" | "unbindButton" if class == "SkateboardController" => ok(vec![]),
+        "AddCoreScript" | "AddStarterScript" if class == "ScriptContext" => ok(vec![]),
         "GenerateGUID" if class == "HttpService" => {
             let wrap = !matches!(args.first(), Some(Wire::B(false)));
             let mut b = [0u8; 16];

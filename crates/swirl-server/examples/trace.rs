@@ -21,13 +21,30 @@ fn main() {
                 lines.push_str(&format!("[{}] {}\n", l.kind, l.msg));
             }
         }
+        for (id, url) in g.host.take_linked() {
+            let r = swirl_server::instance::linked_from_disk(&std::env::var("ASSETS").unwrap_or("/tmp/swirl/fakeassets".into()), &url).unwrap_or(Err("HTTP error".into()));
+            g.host.provide_linked(id, r);
+        }
+        for id in g.union_requests() {
+            let bytes = std::fs::read(format!("{}/assets/{}", std::env::var("ASSETS").unwrap_or("/tmp/swirl/fakeassets".into()), id)).ok();
+            g.union_done(id, bytes);
+        }
         g.flush_all(&[]);
         let dm = g.dm.borrow();
         let ws = dm.services["Workspace"];
         let kids = dm.get(ws).unwrap().children.clone();
         let mut row = vec![];
         if let Some(m) = kids.iter().find(|c| dm.name(**c) == model) {
+            let mut flat: Vec<swirl_core::instance::InstId> = vec![];
             for p in dm.get(*m).unwrap().children.clone() {
+                flat.push(p);
+                if dm.get(p).map(|i| i.class == "Tool").unwrap_or(false) {
+                    for q in dm.get(p).unwrap().children.clone() {
+                        flat.push(q);
+                    }
+                }
+            }
+            for p in flat {
                 if dm.is_a(p, "BasePart") {
                     let cf = match dm.get_prop(p, "CFrame") { Some(Val::Arr(x)) => x.clone(), _ => vec![] };
                     let v = match dm.get_prop(p, "Velocity") { Some(Val::Arr(x)) => x.clone(), _ => vec![] };

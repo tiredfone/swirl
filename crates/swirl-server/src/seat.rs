@@ -87,7 +87,7 @@ impl Game {
             drop(dm);
         }
         if let Some(n) = self.npcs.get_mut(&model) {
-            n.seat = Some(Seat { seat, weld: w });
+            n.seat = Some(Seat { seat, weld: w, board: false, controller: None });
         }
         {
             let mut dm = self.dm.borrow_mut();
@@ -99,7 +99,151 @@ impl Game {
         self.host.fire(hum, "Seated", vec![Wire::B(true), Wire::I(seat)]);
     }
 
+    pub fn mount_board(&mut self, model: InstId, board: InstId) {
+        let (hum, dead, seated) = match self.npcs.get(&model) {
+            Some(n) => (n.hum, n.dead, n.seat.is_some()),
+            None => return,
+        };
+        if seated || dead || matches!(self.dm.borrow().get_prop(board, "ControllingHumanoid"), Some(Val::Ref(Some(_)))) {
+            return;
+        }
+        if self.t - self.last_sit.get(&model).copied().unwrap_or(0.0) < 1.2 {
+            return;
+        }
+        let (w, ctl) = {
+            let mut dm = self.dm.borrow_mut();
+            let torso = match humanoid::root_of(&dm, model) {
+                Some(t) => t,
+                None => return,
+            };
+            let bcf = cf_of(&dm, board, "CFrame");
+            let tcf = cf_of(&dm, torso, "CFrame");
+            if tcf[1] < bcf[1] + 1.0 {
+                return;
+            }
+            let r15 = dm.find_child(model, "UpperTorso", false).is_some();
+            let hip = if r15 {
+                let hh = match dm.get_prop(hum, "HipHeight") {
+                    Some(Val::Num(n)) if *n != 0.0 => *n,
+                    _ => 2.0,
+                };
+                hh + size_of(&dm, torso)[1] / 2.0
+            } else {
+                3.0
+            };
+            let w = match dm.create_any("Weld", None) {
+                Ok(w) => w,
+                Err(_) => return,
+            };
+            dm.set_prop_quiet(w, "Name", Val::Str("SeatWeld".into()));
+            dm.get_mut_name(w, "SeatWeld");
+            dm.set_prop_quiet(w, "Part0", Val::Ref(Some(board)));
+            dm.set_prop_quiet(w, "Part1", Val::Ref(Some(torso)));
+            let c0 = [0.0, size_of(&dm, board)[1] / 2.0 + hip, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+            dm.set_prop_quiet(w, "C0", Val::Arr(c0.to_vec()));
+            dm.set_prop_quiet(w, "C1", Val::Arr(cf::IDENTITY.to_vec()));
+            let _ = dm.set_parent(w, Some(board));
+            let ctl = match dm.create_any("SkateboardController", None) {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            dm.set_prop_quiet(ctl, "Name", Val::Str("SkateboardController".into()));
+            dm.get_mut_name(ctl, "SkateboardController");
+            let _ = dm.set_parent(ctl, Some(board));
+            (w, ctl)
+        };
+        self.host.notify_parent(w, None, Some(board));
+        self.host.notify_parent(ctl, None, Some(board));
+        self.board_ctl.insert(ctl, (0, std::collections::HashMap::new()));
+        {
+            let ph = self.physics.clone();
+            if let Some(p) = self.npcs.get_mut(&model).and_then(|n| n.proxy.as_mut()) {
+                p.set_seated(&mut ph.borrow_mut(), true);
+            }
+        }
+        if let Some(n) = self.npcs.get_mut(&model) {
+            n.seat = Some(Seat { seat: board, weld: w, board: true, controller: Some(ctl) });
+        }
+        {
+            let mut dm = self.dm.borrow_mut();
+            let _ = dm.set_prop(hum, "PlatformStand", Val::Bool(true));
+            let _ = dm.set_prop(board, "ControllingHumanoid", Val::Ref(Some(hum)));
+            let _ = dm.set_prop(board, "Controller", Val::Ref(Some(ctl)));
+        }
+        self.host.fire(hum, "Changed", vec![Wire::S("PlatformStand".into())]);
+        self.host.fire(board, "Changed", vec![Wire::S("ControllingHumanoid".into())]);
+        self.host.fire(board, "Changed", vec![Wire::S("Controller".into())]);
+        self.host.fire(board, "equipped", vec![Wire::I(hum), Wire::I(ctl)]);
+        self.host.fire(board, "Equipped", vec![Wire::I(hum), Wire::I(ctl)]);
+    }
+
+    fn unseat_board(&mut self, model: InstId) {
+        let (board, weld, ctl, hum, owner) = match self.npcs.get_mut(&model) {
+            Some(n) => match n.seat.take() {
+                Some(s) => (s.seat, s.weld, s.controller, n.hum, n.owner),
+                None => return,
+            },
+            None => return,
+        };
+        {
+            let ph = self.physics.clone();
+            if let Some(p) = self.npcs.get_mut(&model).and_then(|n| n.proxy.as_mut()) {
+                p.set_seated(&mut ph.borrow_mut(), false);
+            }
+        }
+        self.last_sit.insert(model, self.t);
+        let alive = |s: &Self, i: InstId| s.dm.borrow().get(i).map(|x| !x.destroyed).unwrap_or(false);
+        if alive(self, weld) {
+            self.dm.borrow_mut().destroy(weld);
+        }
+        if alive(self, board) {
+            {
+                let mut dm = self.dm.borrow_mut();
+                let _ = dm.set_prop(board, "Throttle", Val::Num(0.0));
+                let _ = dm.set_prop(board, "Steer", Val::Num(0.0));
+                let _ = dm.set_prop(board, "ControllingHumanoid", Val::Ref(None));
+                let _ = dm.set_prop(board, "Controller", Val::Ref(None));
+            }
+            for p in ["Throttle", "Steer", "ControllingHumanoid", "Controller"] {
+                self.host.fire(board, "Changed", vec![Wire::S(p.into())]);
+            }
+            self.host.fire(board, "unequipped", vec![Wire::I(board)]);
+            self.host.fire(board, "Unequipped", vec![Wire::I(board)]);
+        }
+        if let Some(c) = ctl {
+            if alive(self, c) {
+                self.dm.borrow_mut().destroy(c);
+            }
+            self.board_ctl.remove(&c);
+        }
+        if alive(self, hum) {
+            let _ = self.dm.borrow_mut().set_prop(hum, "PlatformStand", Val::Bool(false));
+            self.host.fire(hum, "Changed", vec![Wire::S("PlatformStand".into())]);
+        }
+        let n = self.npcs.get_mut(&model).unwrap();
+        n.torso_cf = cf::mul(&n.torso_cf, &[0.0, 1.5, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+        n.vel = [0.0, 20.0, 0.0];
+        let tc = n.torso_cf;
+        if let Some(pl) = owner {
+            n.tp_seq += 1;
+            let s = n.tp_seq;
+            self.pending.entry(pl).or_default().retain(|m| m["t"] != "tp");
+            self.pending.entry(pl).or_default().push(json!({"t": "tp", "s": s, "c": flat(&tc), "v": [0, 25, 0]}));
+        } else {
+            let ph = self.physics.clone();
+            let dmc = self.dm.clone();
+            let dm = dmc.borrow();
+            if let Some(c) = self.npcs.get_mut(&model).and_then(|n| n.ctrl.as_mut()) {
+                c.teleport(&mut ph.borrow_mut(), &dm, &tc);
+            }
+        }
+    }
+
     pub fn unseat(&mut self, model: InstId) {
+        if self.npcs.get(&model).and_then(|n| n.seat.as_ref()).map(|s| s.board).unwrap_or(false) {
+            self.unseat_board(model);
+            return;
+        }
         let (seat, weld, hum, owner) = match self.npcs.get_mut(&model) {
             Some(n) => match n.seat.take() {
                 Some(s) => (s.seat, s.weld, n.hum, n.owner),
@@ -176,6 +320,9 @@ impl Game {
             };
             if (class == "Seat" || class == "VehicleSeat") && !seated {
                 self.sit(model, part);
+            }
+            if class == "SkateboardPlatform" && !seated {
+                self.mount_board(model, part);
             }
             if name == "Handle" && in_ws {
                 if let (Some(tool), Some(pl)) = (parent_tool, owner) {
@@ -271,5 +418,115 @@ impl Game {
             n.fall_speed = 0.0;
         }
         self.npc_events_pub(model, prev);
+    }
+}
+
+impl Game {
+    pub fn jump_message(&mut self, player: InstId) {
+        let model = match self.npcs.iter().find(|(_, n)| n.owner == Some(player)).map(|(m, _)| *m) {
+            Some(m) => m,
+            None => return,
+        };
+        if self.npcs.get(&model).map(|n| n.seat.is_some()).unwrap_or(false) {
+            self.unseat(model);
+        }
+    }
+
+    pub fn drive_message(&mut self, player: InstId, v: &serde_json::Value) {
+        let model = match self.npcs.iter().find(|(_, n)| n.owner == Some(player)).map(|(m, _)| *m) {
+            Some(m) => m,
+            None => return,
+        };
+        let (seat, ctl, board) = match self.npcs.get(&model).and_then(|n| n.seat.as_ref()) {
+            Some(s) => (s.seat, s.controller, s.board),
+            None => return,
+        };
+        let clamp = |x: &serde_json::Value| -> i64 {
+            let f = x.as_f64().filter(|f| f.is_finite()).unwrap_or(0.0);
+            (f.trunc() as i32 as i64).clamp(-1, 1)
+        };
+        let th = clamp(&v["th"]);
+        let st = clamp(&v["st"]);
+        if board {
+            let (cur_th, cur_st) = {
+                let dm = self.dm.borrow();
+                let g = |k: &str| match dm.get_prop(seat, k) {
+                    Some(Val::Num(n)) => *n as i64,
+                    _ => 0,
+                };
+                (g("Throttle"), g("Steer"))
+            };
+            let axis = th != cur_th || st != cur_st;
+            {
+                let mut dm = self.dm.borrow_mut();
+                let _ = dm.set_prop(seat, "Throttle", Val::Num(th as f64));
+                let _ = dm.set_prop(seat, "Steer", Val::Num(st as f64));
+            }
+            self.host.fire(seat, "Changed", vec![Wire::S("Throttle".into())]);
+            self.host.fire(seat, "Changed", vec![Wire::S("Steer".into())]);
+            if let Some(c) = ctl {
+                if self.dm.borrow().get(c).map(|i| !i.destroyed).unwrap_or(false) {
+                    {
+                        let mut dm = self.dm.borrow_mut();
+                        let _ = dm.set_prop(c, "Throttle", Val::Num(th as f64));
+                        let _ = dm.set_prop(c, "Steer", Val::Num(st as f64));
+                    }
+                    self.host.fire(c, "Changed", vec![Wire::S("Throttle".into())]);
+                    self.host.fire(c, "Changed", vec![Wire::S("Steer".into())]);
+                    let last_th = self.board_ctl.get(&c).map(|d| d.0).unwrap_or(0);
+                    if axis {
+                        let which = if th != last_th { "Throttle" } else { "Steer" };
+                        self.host.fire(c, "AxisChanged", vec![Wire::S(which.into())]);
+                    }
+                    self.board_ctl.entry(c).or_insert((0, std::collections::HashMap::new())).0 = th;
+                    for (key, code) in [("j", 32i64), ("d", 33i64)] {
+                        let down = match &v[key] {
+                            serde_json::Value::Bool(b) => *b,
+                            serde_json::Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(false),
+                            serde_json::Value::String(s) => !s.is_empty(),
+                            _ => false,
+                        };
+                        let was = self.board_ctl.get(&c).and_then(|d| d.1.get(&code).copied()).unwrap_or(false);
+                        if down == was {
+                            continue;
+                        }
+                        self.board_ctl.entry(c).or_insert((0, std::collections::HashMap::new())).1.insert(code, down);
+                        self.host.fire(c, "ButtonChanged", vec![Wire::E("Button".into(), code as f64)]);
+                        if down && code == 32 && !self.host.has_listener(c, "ButtonChanged") {
+                            let grounded = {
+                                let dm = self.dm.borrow();
+                                self.physics.borrow().board_grounded(&dm, seat)
+                            };
+                            if grounded {
+                                self.physics.borrow_mut().board_impulse(seat, [0.0, 32.0, 0.0]);
+                            }
+                        }
+                        if down && code == 33 {
+                            self.unseat(model);
+                            return;
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        let is_vehicle = self.dm.borrow().get(seat).map(|i| i.class == "VehicleSeat").unwrap_or(false);
+        if !is_vehicle {
+            return;
+        }
+        {
+            let mut dm = self.dm.borrow_mut();
+            let _ = dm.set_prop(seat, "Throttle", Val::Num(th as f64));
+            let _ = dm.set_prop(seat, "Steer", Val::Num(st as f64));
+        }
+        self.host.fire(seat, "Changed", vec![Wire::S("Throttle".into())]);
+        self.host.fire(seat, "Changed", vec![Wire::S("Steer".into())]);
+    }
+
+    pub fn board_state_events(&mut self) {
+        let evs = std::mem::take(&mut self.physics.borrow_mut().board_events);
+        for (board, state, old) in evs {
+            self.host.fire(board, "MoveStateChanged", vec![Wire::E("MoveState".into(), state as f64), Wire::E("MoveState".into(), old as f64)]);
+        }
     }
 }

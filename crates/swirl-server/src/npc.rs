@@ -17,6 +17,8 @@ pub struct MoveTo {
 pub struct Seat {
     pub seat: InstId,
     pub weld: InstId,
+    pub board: bool,
+    pub controller: Option<InstId>,
 }
 
 pub struct Npc {
@@ -84,7 +86,7 @@ impl Game {
         let mut dirty: Vec<InstId> = vec![];
         {
             let dm = self.dm.borrow();
-            for ch in dm.journal.iter() {
+            for ch in dm.journal.iter().skip(self.npc_scan) {
                 match ch {
                     Change::Parent { id, .. } => {
                         if let Some(m) = self.model_of(&dm, *id) {
@@ -198,7 +200,7 @@ impl Game {
         let ids: Vec<InstId> = {
             let dm = self.dm.borrow();
             let mut out = vec![];
-            for ch in dm.journal.iter() {
+            for ch in dm.journal.iter().skip(self.npc_scan) {
                 if let Change::Parent { id, new: Some(_), .. } = ch {
                     let mut list = vec![*id];
                     dm.descendants(*id, &mut list);
@@ -214,6 +216,7 @@ impl Game {
         for m in ids {
             self.track_npc(m);
         }
+        self.npc_scan = self.dm.borrow().journal.len();
     }
 
     pub fn track_npc(&mut self, model: InstId) {

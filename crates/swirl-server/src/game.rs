@@ -81,6 +81,9 @@ pub struct Game {
     pub kicks: Vec<(InstId, String)>,
     pub(crate) last_sit: HashMap<InstId, f64>,
     pub(crate) avatars: HashMap<InstId, (bool, [f64; 4])>,
+    pub(crate) friend_retry: Vec<(f64, InstId)>,
+    pub(crate) board_ctl: HashMap<InstId, (i64, HashMap<i64, bool>)>,
+    pub(crate) npc_scan: usize,
 }
 
 impl Game {
@@ -89,6 +92,10 @@ impl Game {
     }
 
     pub fn load_with(place_id: u64, bytes: &[u8], era: i32, assets_dir: &str, data_dir: &str) -> Result<Game, String> {
+        Game::load_opts(place_id, bytes, era, assets_dir, data_dir, None)
+    }
+
+    pub fn load_opts(place_id: u64, bytes: &[u8], era: i32, assets_dir: &str, data_dir: &str, test: Option<J>) -> Result<Game, String> {
         let mut tree = swirl_core::rbx::parse_limit(bytes, 256 * 1024 * 1024)?;
         let mut dm = DataModel::new("server");
         dm.era = era;
@@ -149,6 +156,7 @@ impl Game {
             b.prepare(&mut dm)?;
         }
         let mut physics = swirl_physics::Physics::new();
+        physics.union_enabled = true;
         physics.attach_workspace(&mut dm, ws);
         if let Some(t) = dm.find_child_of_class(ws, "Terrain") {
             let mut td = swirl_physics::terrain::TerrainData::new(era);
@@ -166,6 +174,21 @@ impl Game {
         let api = crate::api::new_state(assets_dir, data_dir, place_id, era);
         host.set_handler(Box::new(crate::api::Api(api.clone(), physics.clone())));
         host.add_methods(crate::api::METHODS);
+        if let Some(init) = &test {
+            crate::debugger::DebugAgent::attach(&mut host)?;
+            if !init.is_null() {
+                crate::debugger::DebugAgent::handle(&mut host, &json!({"cmd": "bps", "bps": init["bps"]}));
+                crate::debugger::DebugAgent::handle(&mut host, &json!({"cmd": "watches", "watches": init["watches"]}));
+            }
+        }
+        host.enable_linked_source();
+        {
+            let mut a = api.borrow_mut();
+            for (name, id) in crate::instance::LIBRARIES {
+                a.libraries.insert(name.to_string(), *id);
+            }
+            a.lib_src = crate::instance::libraries_disk(assets_dir);
+        }
         host.scan_scripts();
         if let Some(b) = bundle.as_ref() {
             let started = b.server_starter(&mut dm.borrow_mut());
@@ -173,7 +196,7 @@ impl Game {
                 host.scan_subtree(id);
             }
         }
-        let mut g = Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], anim_state: HashMap::new(), last_chat: HashMap::new(), api, job: String::new(), chat_log: vec![], last_report: HashMap::new(), mkt_ids: HashMap::new(), bought: HashMap::new(), receipt_busy: HashSet::new(), receipt_queue: HashMap::new(), receipt_wait: HashMap::new(), receipt_seq: 0, receipt_retry: vec![], mkt_window: HashMap::new(), physics, npcs: crate::npc::Npcs::new(), frame: 0, ph_cache: vec![], asm_sent: HashMap::new(), asm_seen: 0, asm_diff: None, ph_far: HashMap::new(), ph_n: HashMap::new(), flush_at: 0.0, allow_gear: true, pre_logs: vec![], kicks: vec![], last_sit: HashMap::new(), avatars: HashMap::new() };
+        let mut g = Game { place_id, era, dm, roots, host, next_user: 1, t: 0.0, chars: HashMap::new(), pending: HashMap::new(), dirty: HashSet::new(), touching: HashSet::new(), dead: HashMap::new(), debris: vec![], spawn_cache: vec![], spawn_refresh: 0.0, mice: HashMap::new(), loose: vec![], loose_refresh: 0.0, joined_at: HashMap::new(), looks: HashMap::new(), gui_copied: HashSet::new(), invokes: HashMap::new(), invoke_seq: 1, remote_out: vec![], anim_state: HashMap::new(), last_chat: HashMap::new(), api, job: String::new(), chat_log: vec![], last_report: HashMap::new(), mkt_ids: HashMap::new(), bought: HashMap::new(), receipt_busy: HashSet::new(), receipt_queue: HashMap::new(), receipt_wait: HashMap::new(), receipt_seq: 0, receipt_retry: vec![], mkt_window: HashMap::new(), physics, npcs: crate::npc::Npcs::new(), frame: 0, ph_cache: vec![], asm_sent: HashMap::new(), asm_seen: 0, asm_diff: None, ph_far: HashMap::new(), ph_n: HashMap::new(), flush_at: 0.0, allow_gear: true, pre_logs: vec![], kicks: vec![], last_sit: HashMap::new(), avatars: HashMap::new(), friend_retry: vec![], board_ctl: HashMap::new(), npc_scan: 0 };
         g.scan_npcs_all();
         for _ in 0..3 {
             g.host.tick(0.0);
@@ -264,11 +287,43 @@ impl Game {
         let players = self.dm.borrow().services["Players"];
         self.host.fire(players, "PlayerAdded", vec![swirl_lua::host::Wire::I(player)]);
         self.spawn_character(player, name);
+        self.friend_load(player, false);
         let msg = json!({
             "t": "init", "place": self.place_id, "era": self.era, "you": player,
             "user": { "id": uid, "name": name }, "snap": snap, "asm": [], "anims": [], "terrain": self.terrain_init()
         });
         (msg, player)
+    }
+
+    pub fn friend_load(&mut self, me: InstId, retried: bool) {
+        let (uid, others) = {
+            let dm = self.dm.borrow();
+            let ps = dm.services.get("Players").and_then(|p| dm.get(*p)).map(|p| p.children.clone()).unwrap_or_default();
+            let others: Vec<i64> = ps.into_iter().filter(|p| *p != me).map(|p| crate::api::ApiState::user_of(&dm, p)).collect();
+            (crate::api::ApiState::user_of(&dm, me), others)
+        };
+        if others.is_empty() || uid == 0 {
+            return;
+        }
+        let mut a = self.api.borrow_mut();
+        a.token += 1;
+        let token = a.token;
+        a.social.push(crate::api::SocialReq { token, body: json!({"action": "statuses", "userId": uid, "others": others}), kind: crate::api::SocialKind::FriendLoad(me, retried) });
+    }
+
+    fn set_friend_status(&mut self, a: InstId, b: InstId, st: i64) {
+        let (ua, ub) = {
+            let dm = self.dm.borrow();
+            (crate::api::ApiState::user_of(&dm, a), crate::api::ApiState::user_of(&dm, b))
+        };
+        let rev = if st == 3 { 4 } else if st == 4 { 3 } else { st };
+        {
+            let mut ap = self.api.borrow_mut();
+            ap.friends.insert((ua, ub), st);
+            ap.friends.insert((ub, ua), rev);
+        }
+        self.remote_out.push((vec![a], json!({"t": "fs", "s": {b.to_string(): st}})));
+        self.remote_out.push((vec![b], json!({"t": "fs", "s": {a.to_string(): rev}})));
     }
 
     pub fn spawn_character(&mut self, player: InstId, name: &str) {
@@ -504,8 +559,6 @@ impl Game {
                     let grip = character::cf_prop(&dm, tool, "Grip");
                     dm.set_prop_quiet(w, "C1", Val::Arr(grip.to_vec()));
                     let _ = dm.set_parent(w, Some(a));
-                    dm.set_prop_quiet(h, "CanCollide", Val::Bool(false));
-                    dm.set_prop_quiet(h, "Anchored", Val::Bool(false));
                     Some((w, a))
                 }
                 _ => None,
@@ -572,7 +625,6 @@ impl Game {
             if let (Some(h), Some(c)) = (dm.find_child(tool, "Handle", false), self.npcs.get(&model).map(|n| n.torso_cf)) {
                 let f = [c[0] - c[5] * 3.0, c[1] + 2.0, c[2] - c[11] * 3.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
                 dm.set_prop_quiet(h, "CFrame", Val::Arr(f.to_vec()));
-                dm.set_prop_quiet(h, "CanCollide", Val::Bool(true));
             }
             dm.services["Workspace"]
         };
@@ -583,6 +635,24 @@ impl Game {
         let _ = self.dm.borrow_mut().set_parent(tool, Some(ws));
         self.host.notify_parent(tool, Some(model), Some(ws));
         self.dirty.insert(model);
+    }
+
+    pub fn debug_message(&mut self, msg: &J) {
+        crate::debugger::DebugAgent::handle(&mut self.host, msg);
+    }
+
+    pub fn take_debug(&mut self) -> Vec<J> {
+        crate::debugger::DebugAgent::drain(&mut self.host)
+    }
+
+    pub fn union_requests(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.physics.borrow_mut().union_wanted)
+    }
+
+    pub fn union_done(&mut self, id: u64, bytes: Option<Vec<u8>>) {
+        let mesh = bytes.and_then(|b| swirl_physics::csg::mesh_data_from_asset(&b));
+        let dm = self.dm.borrow();
+        self.physics.borrow_mut().provide_union(&dm, id, mesh);
     }
 
     pub fn social_requests(&mut self) -> Vec<crate::api::SocialReq> {
@@ -628,6 +698,47 @@ impl Game {
                 return;
             }
             SocialKind::Grant | SocialKind::Report => return,
+            SocialKind::FriendLoad(me, retried) => {
+                let map = r.as_ref().and_then(|j| j["statuses"].as_object().cloned());
+                match map {
+                    None => {
+                        if !retried {
+                            self.friend_retry.push((self.t + 2.0, me));
+                        }
+                    }
+                    Some(m) => {
+                        let alive = self.dm.borrow().get(me).map(|i| !i.destroyed).unwrap_or(false);
+                        if alive {
+                            let ps = {
+                                let dm = self.dm.borrow();
+                                dm.services.get("Players").and_then(|p| dm.get(*p)).map(|p| p.children.clone()).unwrap_or_default()
+                            };
+                            for o in ps {
+                                let uid = crate::api::ApiState::user_of(&self.dm.borrow(), o);
+                                if let Some(st) = m.get(&uid.to_string()).and_then(|v| v.as_i64()) {
+                                    if st != 0 && o != me {
+                                        self.set_friend_status(me, o, st);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+            SocialKind::FriendChange(a, b) => {
+                let alive = |i: InstId| self.dm.borrow().get(i).map(|x| !x.destroyed).unwrap_or(false);
+                if let Some(j) = r {
+                    if alive(a) && alive(b) {
+                        let st = j["status"].as_i64().filter(|v| *v != 0).unwrap_or(1);
+                        self.set_friend_status(a, b, st);
+                        if let Some(e) = j["event"].as_i64() {
+                            self.remote_out.push((vec![a, b], json!({"t": "fre", "a": a, "b": b, "e": e})));
+                        }
+                    }
+                }
+                return;
+            }
             _ => {}
         }
         let (res, msg) = self.api.borrow_mut().finish_social(kind, r);
@@ -780,6 +891,117 @@ impl Game {
                 let others: Vec<InstId> = ps.into_iter().filter(|p| *p != player).collect();
                 if !others.is_empty() {
                     self.remote_out.push((others, m));
+                }
+            }
+            "jump" => self.jump_message(player),
+            "drive" => self.drive_message(player, &v),
+            "click" | "hover" => {
+                let cd = match tool {
+                    Some(c) => c,
+                    None => return,
+                };
+                let ok = self.dm.borrow().get(cd).map(|i| !i.destroyed && swirl_core::classes::is_a(&i.class, "ClickDetector")).unwrap_or(false);
+                if !ok {
+                    return;
+                }
+                if v["t"] == "hover" {
+                    let ev = if v["on"].as_bool().unwrap_or(false) || v["on"].as_i64().unwrap_or(0) != 0 { "MouseHoverEnter" } else { "MouseHoverLeave" };
+                    self.host.fire(cd, ev, vec![Wire::I(player)]);
+                    return;
+                }
+                let model = match self.char_of(player) {
+                    Some(m) => m,
+                    None => return,
+                };
+                let near = {
+                    let dm = self.dm.borrow();
+                    let ws = dm.services["Workspace"];
+                    let part = dm.get(cd).and_then(|i| i.parent);
+                    let pp = part.and_then(|p| if dm.is_a(p, "BasePart") { Some(p) } else { dm.get(p).and_then(|i| i.children.iter().copied().find(|c| dm.is_a(*c, "BasePart"))) });
+                    match (pp, self.npcs.get(&model)) {
+                        (Some(pp), Some(n)) if dm.is_descendant_of(cd, ws) => {
+                            let pcf = match dm.get_prop(pp, "CFrame") {
+                                Some(Val::Arr(a)) if a.len() >= 3 => [a[0], a[1], a[2]],
+                                _ => [0.0; 3],
+                            };
+                            let sz = match dm.get_prop(pp, "Size") {
+                                Some(Val::Arr(a)) if a.len() >= 3 => a[0].max(a[1]).max(a[2]),
+                                _ => 0.0,
+                            };
+                            let d = ((pcf[0] - n.torso_cf[0]).powi(2) + (pcf[1] - n.torso_cf[1]).powi(2) + (pcf[2] - n.torso_cf[2]).powi(2)).sqrt();
+                            let max = match dm.get_prop(cd, "MaxActivationDistance") {
+                                Some(Val::Num(m)) => *m,
+                                _ => 32.0,
+                            };
+                            d <= max + 8.0 + sz
+                        }
+                        _ => false,
+                    }
+                };
+                if near {
+                    self.host.fire(cd, "MouseClick", vec![Wire::I(player)]);
+                }
+            }
+            "key" => {
+                let k: String = v["k"].as_str().unwrap_or("").chars().map(|c| if c.is_control() { ' ' } else { c }).take(8).collect::<String>().to_lowercase();
+                if k.is_empty() {
+                    return;
+                }
+                let mouse = self.mouse_of(player);
+                let ev = if v["down"].as_bool().unwrap_or(false) || v["down"].as_i64().unwrap_or(0) != 0 { "KeyDown" } else { "KeyUp" };
+                self.host.fire(mouse, ev, vec![Wire::S(k)]);
+            }
+            "hp" => {
+                let model = match self.char_of(player) {
+                    Some(m) => m,
+                    None => return,
+                };
+                let hv = match v["v"].as_f64() {
+                    Some(x) if x.is_finite() => x,
+                    _ => return,
+                };
+                let hum = self.dm.borrow().find_child_of_class(model, "Humanoid");
+                if let Some(h) = hum {
+                    let cur = match self.dm.borrow().get_prop(h, "Health") {
+                        Some(Val::Num(c)) => *c,
+                        _ => 100.0,
+                    };
+                    if hv < cur {
+                        let _ = self.dm.borrow_mut().set_prop(h, "Health", Val::Num(hv.max(0.0)));
+                        self.host.fire(h, "Changed", vec![Wire::S("Health".into())]);
+                        self.host.fire(h, "HealthChanged", vec![Wire::N(hv.max(0.0))]);
+                    }
+                }
+            }
+            "break" => {
+                let model = match self.char_of(player) {
+                    Some(m) => m,
+                    None => return,
+                };
+                if let Some(part) = tool {
+                    let ok = {
+                        let dm = self.dm.borrow();
+                        dm.get(part).map(|i| !i.destroyed).unwrap_or(false) && dm.is_a(part, "BasePart") && dm.is_descendant_of(part, model)
+                    };
+                    if ok {
+                        let mut dm = self.dm.borrow_mut();
+                        self.physics.borrow_mut().break_joints(&mut dm, part);
+                        drop(dm);
+                        if let Some(n) = self.npcs.get_mut(&model) {
+                            n.dirty = true;
+                        }
+                    }
+                }
+            }
+            "rcpt" => {
+                self.queue_receipts(player);
+            }
+            "unimpl" => {}
+            "friend" => {
+                let other = v["id"].as_u64().map(|x| x as InstId);
+                if let Some(o) = other {
+                    let dm = self.dm.borrow();
+                    self.api.borrow_mut().change_friendship(&dm, player, o, v["on"].as_bool().unwrap_or(false) || v["on"].as_i64().unwrap_or(0) != 0);
                 }
             }
             "report" => {
@@ -1035,6 +1257,22 @@ impl Game {
                         dm.set_prop_quiet(mouse, "Target", Val::Ref(Some(t as InstId)));
                     }
                 }
+                if let Some(x) = v["x"].as_i64() {
+                    dm.set_prop_quiet(mouse, "X", Val::Num(x as f64));
+                }
+                if let Some(y) = v["y"].as_i64() {
+                    dm.set_prop_quiet(mouse, "Y", Val::Num(y as f64));
+                }
+                drop(dm);
+                if let Some(b) = v["b"].as_str() {
+                    let ev = match b {
+                        "down" => "Button1Down",
+                        "up" => "Button1Up",
+                        "move" => "Move",
+                        _ => "Idle",
+                    };
+                    self.host.fire(mouse, ev, vec![]);
+                }
             }
             _ => {}
         }
@@ -1144,11 +1382,23 @@ impl Game {
                     }
                 }
             }
+            let fdue: Vec<InstId> = self.friend_retry.iter().filter(|(t, _)| *t <= self.t).map(|(_, p)| *p).collect();
+            self.friend_retry.retain(|(t, _)| *t > self.t);
+            for p in fdue {
+                if self.dm.borrow().get(p).map(|i| !i.destroyed).unwrap_or(false) {
+                    self.friend_load(p, true);
+                }
+            }
             let due: Vec<InstId> = self.receipt_retry.iter().filter(|(t, _)| *t <= self.t).map(|(_, p)| *p).collect();
             self.receipt_retry.retain(|(t, _)| *t > self.t);
             for p in due {
                 self.queue_receipts(p);
             }
+        }
+        let tkeys = self.physics.borrow_mut().terrain_flush();
+        if !tkeys.is_empty() {
+            let d = self.physics.borrow().terrain.as_ref().map(|t| t.encode(Some(&tkeys))).unwrap_or_default();
+            self.remote_out.push((vec![], json!({"t": "terrain", "d": d})));
         }
         for r in self.host.take_requests() {
             match r {
@@ -1206,11 +1456,6 @@ impl Game {
             }
         }
         self.step_physics();
-        let tkeys = self.physics.borrow_mut().terrain_flush();
-        if !tkeys.is_empty() {
-            let d = self.physics.borrow().terrain.as_ref().map(|t| t.encode(Some(&tkeys))).unwrap_or_default();
-            self.remote_out.push((vec![], json!({"t": "terrain", "d": d})));
-        }
         let due: Vec<InstId> = self.debris.iter().filter(|(t, _)| *t <= self.t).map(|(_, i)| *i).collect();
         if !due.is_empty() {
             self.debris.retain(|(t, _)| *t > self.t);
@@ -1251,10 +1496,15 @@ impl Game {
         self.scan_npcs_journal();
         self.update_npcs(1.0 / 30.0);
         self.handle_explosions();
+        let impulses = std::mem::take(&mut self.api.borrow_mut().board_impulses);
+        for (b, v) in impulses {
+            self.physics.borrow_mut().board_impulse(b, v);
+        }
         {
             let mut dm = self.dm.borrow_mut();
             self.physics.borrow_mut().step(&mut dm, 1.0 / 30.0);
         }
+        self.board_state_events();
         let touches = std::mem::take(&mut self.physics.borrow_mut().touches);
         for t in touches {
             let alive = {
@@ -1345,9 +1595,14 @@ impl Game {
     }
 
     pub fn flush_all(&mut self, players: &[InstId]) -> Vec<(InstId, String)> {
+        self.scan_npcs_journal();
         let journal = {
             let mut dm = self.dm.borrow_mut();
-            std::mem::take(&mut dm.journal)
+            self.physics.borrow_mut().sync(&mut dm);
+            let taken = std::mem::take(&mut dm.journal);
+            self.physics.borrow_mut().reset_cursor();
+            self.npc_scan = 0;
+            taken
         };
         self.dirty.clear();
         let mut out = vec![];

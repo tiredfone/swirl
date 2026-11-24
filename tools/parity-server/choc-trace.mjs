@@ -44,7 +44,7 @@ for (let i = 0; i < +ticks; i++) {
   origTick.call(game);
   const row = [];
   const m = ws.children.find((c) => c.props.get('Name') === (model || 'Dummy'));
-  if (m) for (const p of m.children) if (p.isA('BasePart')) row.push([p.props.get('Name'), p.props.get('CFrame'), p.props.get('Velocity')]);
+  if (m) for (const p of m.children) { if (p.isA('BasePart')) row.push([p.props.get('Name'), p.props.get('CFrame'), p.props.get('Velocity')]); else if (p.ClassName === 'Tool') for (const q of p.children) if (q.isA('BasePart')) row.push([q.props.get('Name'), q.props.get('CFrame'), q.props.get('Velocity')]); }
   for (const p of ws.children) if (p.isA('BasePart') && !p.props.get('Anchored')) row.push([p.props.get('Name'), p.props.get('CFrame'), p.props.get('Velocity')]);
   trace.push(row);
 }

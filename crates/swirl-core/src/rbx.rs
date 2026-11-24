@@ -350,7 +350,7 @@ fn xml_prop(el: &El) -> Option<Value> {
     let txt = el.text.trim();
     match el.tag.as_str() {
         "string" | "ProtectedString" => Some(Value::Str(el.text.clone())),
-        "BinaryString" if el.attrs.get("name").map(|n| n == "ChocolateTerrain").unwrap_or(false) => Some(Value::Str(el.text.clone())),
+        "BinaryString" if el.attrs.get("name").map(|n| n == "ChocolateTerrain" || n == "MeshData").unwrap_or(false) => Some(Value::Str(el.text.clone())),
         "bool" => Some(Value::Bool(txt == "true")),
         "int" | "int64" | "token" | "float" | "double" => Some(Value::Num(pf(txt))),
         "BrickColor" => Some(Value::Brick(php_int(txt))),

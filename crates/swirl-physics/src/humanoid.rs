@@ -328,6 +328,7 @@ pub struct Controller {
     air_for: f64,
     slope_deg: f64,
     drop: f64,
+    swimming: bool,
     lift_age: f64,
     lift_value: Option<f64>,
 }
@@ -381,6 +382,7 @@ impl Controller {
             air_for: 0.0,
             slope_deg: -1.0,
             drop: 0.0,
+            swimming: false,
             lift_age: 0.0,
             lift_value: None,
         }
@@ -834,7 +836,19 @@ impl Controller {
         };
         let climbing = moving || holding;
         let mut fell = false;
-        let swimming = false;
+        let mut swimming = false;
+        let mut water_top = 0.0;
+        if !climbing && !platform {
+            if let Some(td) = ph.terrain.as_ref() {
+                if let Some(surf) = td.water_surface(self.pos[0], self.pos[1], self.pos[2]) {
+                    if surf - (self.pos[1] - 2.45) > if self.swimming { 3.4 } else { 4.2 } {
+                        swimming = true;
+                        water_top = surf;
+                    }
+                }
+            }
+        }
+        self.swimming = swimming;
         if holding {
             let cd = self.climb_dir.unwrap();
             self.vel[1] = if dotc < -0.5 { -ws * 0.7 } else { 0.0 };
@@ -851,6 +865,15 @@ impl Controller {
             let up = (2.0 * ph.gravity() * rise).sqrt();
             self.vel[1] = if ledge_hop { up } else { self.vel[1].max(up) };
             self.ledge_top = None;
+        } else if swimming {
+            let target = water_top - if want_jump { 0.9 } else { 1.5 };
+            let lim = ws * 0.6;
+            let want = ((target - self.pos[1]) * 4.0).min(lim).max(-lim);
+            self.vel[1] += (want - self.vel[1]) * (dt * 6.0).min(1.0);
+            self.vel[0] *= 0.8;
+            self.vel[2] *= 0.8;
+            self.jumped = false;
+            self.jump_held_for = 0.0;
         } else {
             let lift = self.body_lift(dm, dt);
             self.vel[1] -= (ph.gravity() - lift) * dt;
@@ -945,7 +968,19 @@ impl Controller {
             self.yaw_cf = cf::lerp(&cf::rot_only(&self.yaw_cf), &target, (dt * 12.0).min(1.0));
         }
         self.turn_box(ph, dm);
-        let drop = 0.0;
+        let mut drop = 0.0;
+        if e18 && grounded && self.vel[1] <= 0.0 && !climbing && !platform && !swimming {
+            let f = |q: InstId| Physics::get_bool(dm, q, "CanCollide", true);
+            let hit = ph.raycast(dm, [self.pos[0], self.pos[1] - 1.0, self.pos[2]], [0.0, -4.0, 0.0], &[self.model], Some(&f));
+            if let Some(p) = hit.part {
+                if dm.get(p).map(|i| i.class == "Terrain").unwrap_or(false) && hit.normal[1] > 0.5 {
+                    let gap = self.pos[1] - 2.49 - hit.point[1];
+                    if gap > 0.02 && gap < 1.6 {
+                        drop = gap;
+                    }
+                }
+            }
+        }
         self.drop += (drop - self.drop) * (dt * 15.0).min(1.0);
         if self.drop < 0.005 {
             self.drop = 0.0;

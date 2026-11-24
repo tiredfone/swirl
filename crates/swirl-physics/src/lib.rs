@@ -1,5 +1,6 @@
 pub mod animator;
 pub mod cf;
+pub mod csg;
 pub mod groups;
 pub mod humanoid;
 pub mod path;
