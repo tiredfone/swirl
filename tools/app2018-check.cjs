@@ -59,7 +59,8 @@ const srv = http.createServer((req, res) => {
   if (diff < 0.05) fails.push('walk animation did not move the rendered left leg (' + diff.toFixed(3) + ')');
   await wait(500);
   await pg.keyboard.press('Escape');
-  await wait(1800);
+  await pg.waitForFunction(() => [...document.querySelectorAll('*')].some((e) => !e.children.length && e.textContent === 'Player1' && e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().y > 100), { timeout: 8000 }).catch(() => {});
+  await wait(500);
   if (process.env.SHOT_ESC) await pg.screenshot({ path: process.env.SHOT_ESC });
   const info = await pg.evaluate(() => {
     const out = { tab: null, leave: null, row: null };
