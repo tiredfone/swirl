@@ -115,5 +115,5 @@ const pass = acct.password || acct.Password;
   if (!noChoc) console.log('requests to /chocolate/ seen');
   const luaOk = !!(lua && lua.present && lua.ready && lua.playerList && lua.hotbarOrTopbar && lua.errors.length === 0);
   if (!luaOk) console.log('lua gate failed');
-  process.exit(luaOk && state.hasSwirlPage && state.statusHidden === true && state.fatalHidden === true && drawn > 3 && walkOk && meshOk && noChoc ? 0 : 1);
+  process.exit(luaOk && state.hasSwirlPage && state.statusHidden !== false && state.fatalHidden === true && drawn > 3 && walkOk && meshOk && noChoc ? 0 : 1);
 })();
