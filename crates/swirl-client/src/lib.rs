@@ -45,6 +45,9 @@ impl Default for Scene {
 }
 
 #[cfg(target_arch = "wasm32")]
+mod boot;
+
+#[cfg(target_arch = "wasm32")]
 mod gl;
 
 #[cfg(target_arch = "wasm32")]

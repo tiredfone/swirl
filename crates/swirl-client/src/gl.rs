@@ -949,6 +949,29 @@ impl Client {
         self.st.borrow().world.parts().len()
     }
 
+    pub fn era(&self) -> i32 {
+        self.st.borrow().world.era
+    }
+
+    pub fn boot_counts(&self) -> Vec<u32> {
+        let st = self.st.borrow();
+        let w = &st.world;
+        let mut out = vec![0u32, 0u32];
+        let ws = w.insts.values().find(|i| i.class == "Workspace");
+        let mut stack: Vec<u32> = ws.map(|i| i.children.clone()).unwrap_or_default();
+        while let Some(id) = stack.pop() {
+            if let Some(i) = w.insts.get(&id) {
+                if swirl_core::classes::is_a(&i.class, "BasePart") {
+                    out[0] += 1;
+                } else if swirl_core::classes::is_a(&i.class, "JointInstance") {
+                    out[1] += 1;
+                }
+                stack.extend(i.children.iter().copied());
+            }
+        }
+        out
+    }
+
     pub fn frame(&self, now: f64) {
         let mut st = self.st.borrow_mut();
         let w = st.canvas.client_width().max(1) as u32;
