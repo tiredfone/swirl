@@ -9,7 +9,7 @@ const page = `<!doctype html><meta charset=utf-8><body style="margin:0;backgroun
 import init from '/dist/entry.js';
 </script></body>`;
 const gui = fs.readFileSync(path.join(__dirname, 'swirl-gui-test.cjs'), 'utf8');
-const pageHtml = /const page = `([\s\S]*?)`;/.exec(gui)[1];
+const pageHtml = /const page = `([\s\S]*?)`;/.exec(gui)[1].replace('window.solarClientConfig={}', 'window.solarClientConfig={endpoints:{thumbnail:"/image/headshot?userId={id}",avatarThumbnail:"/thumbnail/user/{id}",asset:"/asset/?id={id}",itemThumbnail:"/Image/Item.ashx?ID={id}"}}');
 const types = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm', '.json': 'application/json', '.css': 'text/css', '.png': 'image/png', '.ttf': 'font/ttf', '.otf': 'font/otf', '.svg': 'image/svg+xml', '.txt': 'text/plain' };
 const srv = http.createServer((req, res) => {
   if (req.url.startsWith('/dist/')) {
@@ -78,6 +78,68 @@ const srv = http.createServer((req, res) => {
   if (!info.tab || info.tab.px < 20) fails.push('Players tab label size ' + JSON.stringify(info.tab));
   if (!info.leave || info.leave.h > 30) fails.push('Leave Game wraps or is missing ' + JSON.stringify(info.leave));
   if (!info.row) fails.push('Players tab has no player row');
+  if (mode !== 'js') {
+    const logsOf = () => pg.evaluate(() => (window.solarApp.logs || []).map((x) => String(x.msg)));
+    const run = (code) => pg.evaluate((c) => window.solarApp.vm.run_script(c), code);
+    const centre = (re) => pg.evaluate((re) => { const rx = new RegExp(re); for (const e of document.querySelectorAll('[data-ipath]')) { if (rx.test(e.getAttribute('data-ipath'))) { const r = e.getBoundingClientRect(); if (r.width > 0 && r.height > 0) return [r.x + r.width / 2, r.y + r.height / 2]; } } return null; }, re);
+    const press = async (pt) => {
+      await pg.mouse.move(pt[0] - 8, pt[1] - 3, { steps: 3 });
+      await pg.mouse.move(pt[0], pt[1], { steps: 2 });
+      await wait(250);
+      await pg.mouse.down();
+      await wait(250);
+      await pg.mouse.up();
+      await wait(1200);
+    };
+    const cursor = await pg.evaluate(() => document.documentElement.style.getPropertyValue('--ch-cursor'));
+    if (!/url\(/.test(cursor)) fails.push('custom cursor not set for GUI elements: ' + cursor);
+    await run('local p = game.Players.LocalPlayer print("THUMB", pcall(function() return game.Players:GetUserThumbnailAsync(5, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size48x48) end))');
+    await wait(1200);
+    if (!(await logsOf()).some((m) => m.startsWith('THUMB') && m.includes('/image/headshot?userId=5'))) fails.push('GetUserThumbnailAsync gave no headshot URL: ' + (await logsOf()).filter((m) => m.startsWith('THUMB')).join(','));
+    await run('local g = Instance.new("ScreenGui") g.Parent = game.Players.LocalPlayer:WaitForChild("PlayerGui") local f = Instance.new("Frame") f.Active = true f.Size = UDim2.new(0, 200, 0, 100) f.Position = UDim2.new(0, 700, 0, 450) f.Parent = g local b = Instance.new("ImageButton") b.Size = UDim2.new(0, 50, 0, 50) b.Position = UDim2.new(0, 10, 0, 10) b.Parent = f f.InputChanged:Connect(function() print("GUI-C") end) b.InputBegan:Connect(function(io) print("GUI-B", io.UserInputType == Enum.UserInputType.MouseButton1) end) b.InputEnded:Connect(function() print("GUI-E") end)');
+    await wait(1500);
+    await pg.keyboard.press('Escape');
+    await wait(800);
+    await pg.mouse.move(690, 480);
+    await pg.mouse.move(725, 520, { steps: 3 });
+    await pg.mouse.down();
+    await wait(200);
+    await pg.mouse.up();
+    await wait(1000);
+    const gl = await logsOf();
+    if (!gl.includes('GUI-C') || !gl.includes('GUI-B true') || !gl.includes('GUI-E')) fails.push('GuiObject InputBegan/Changed/Ended not delivered: ' + gl.filter((m) => m.startsWith('GUI')).join(','));
+    await pg.keyboard.press('Escape');
+    await wait(1200);
+    const tabShown = (marker) => pg.evaluate((t) => [...document.querySelectorAll('*')].some((e) => !e.children.length && e.textContent.trim() === t && e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().y > 100 && e.getBoundingClientRect().y < 650), marker);
+    const openTab = async (name, marker) => {
+      for (let i = 0; i < 4 && !(await tabShown(marker)); i++) {
+        const pt = await pg.evaluate((t) => { for (const e of document.querySelectorAll('*')) if (!e.children.length && e.textContent.trim() === t) { const r = e.getBoundingClientRect(); if (r.width > 0 && r.height > 0) return [r.x + r.width / 2, r.y + r.height / 2]; } return null; }, name);
+        if (pt) await press(pt);
+      }
+      return tabShown(marker);
+    };
+    if (!(await openTab('Settings', 'Shift Lock Switch'))) fails.push('Settings tab did not open');
+    else {
+      const st = await centre('VolumeFrame.*\\.Step1$');
+      if (!st) fails.push('volume slider missing');
+      else {
+        await press(st);
+        const sel = await pg.evaluate(() => { let step1 = '', step2 = ''; for (const e of document.querySelectorAll('[data-ipath]')) { const p = e.getAttribute('data-ipath'); if (/VolumeFrame.*\.Step2$/.test(p) && e.getBoundingClientRect().width > 0) step2 = getComputedStyle(e).backgroundColor; if (/VolumeFrame.*\.Step1$/.test(p) && e.getBoundingClientRect().width > 0) step1 = (e.querySelector('img') || {}).src || ''; } return [step1, step2]; });
+        if (!/SelectedBarLeft/.test(sel[0]) || /0, 162, 255/.test(sel[1])) fails.push('volume slider did not follow a click: ' + JSON.stringify(sel));
+      }
+    }
+    if (!(await openTab('Report', 'Type Of Abuse'))) fails.push('Report tab did not open');
+    else {
+      const tb = await centre('Short Description \\(Optional\\)Frame\\.TextBox$');
+      if (tb) {
+        await press(tb);
+        await pg.keyboard.type('hello');
+        await wait(600);
+        const val = await pg.evaluate(() => [...document.querySelectorAll('textarea,input')].filter((e) => e.getBoundingClientRect().width > 0).map((e) => e.value).join('|'));
+        if (!val.includes('hello')) fails.push('report text box did not take typing: ' + val);
+      } else fails.push('report text box missing');
+    }
+  }
   console.log(JSON.stringify({ info, diff, fails }));
   await b.close();
   srv.close();

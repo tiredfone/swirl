@@ -181,7 +181,21 @@ impl ClientApi {
                 ok(vec![Wire::V2(b)])
             }
             "FilterStringAsync" if class == "TextService" => ok(vec![args.first().cloned().unwrap_or(Wire::S(String::new()))]),
-            "GetUserThumbnailAsync" if class == "Players" => ok(vec![Wire::S(String::new()), Wire::B(true)]),
+            "GetUserThumbnailAsync" if class == "Players" => {
+                let uid = match args.first() {
+                    Some(Wire::N(n)) => *n as i64,
+                    Some(Wire::I(n)) => *n as i64,
+                    _ => 0,
+                };
+                let head = match args.get(1) {
+                    Some(Wire::E(_, v)) | Some(Wire::N(v)) => *v == 0.0,
+                    _ => true,
+                };
+                let c = self.core.borrow();
+                let t = if head { &c.thumb_urls[0] } else { &c.thumb_urls[1] };
+                let t = if t.is_empty() { &c.thumb_urls[0] } else { t };
+                ok(vec![Wire::S(t.replace("{id}", &uid.max(0).to_string())), Wire::B(true)])
+            }
             "GetCharacterAppearanceInfoAsync" | "GetFriendsAsync" if class == "Players" => ok(vec![Wire::Dict(vec![])]),
             "SetCharacterAppearanceTimeout" if class == "Players" => nil(),
             "GetGameSessionID" if class == "Player" => ok(vec![Wire::S(String::new())]),

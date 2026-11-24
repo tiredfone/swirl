@@ -310,6 +310,7 @@ impl Gui {
             }));
         }
         let _ = e.set_attribute("data-ipath", &d.full_name(inst));
+        let _ = e.set_attribute("data-iid", &inst.to_string());
         self.nodes.insert(inst, Node { el: e, kids, text: text_el, img, clip, sizer: None, state, img_url: String::new(), img_src: None });
         Some(())
     }
@@ -1056,6 +1057,29 @@ impl Gui {
             Some(e) => e.closest(".ch-g").ok().flatten().is_some() && e.closest("canvas").ok().flatten().is_none(),
             None => false,
         }
+    }
+
+    pub fn objects_at(&self, d: &DataModel, x: f64, y: f64) -> Vec<InstId> {
+        let mut out: Vec<InstId> = vec![];
+        let list = self.doc.elements_from_point(x as f32, y as f32);
+        for i in 0..list.length() {
+            let mut cur = list.get(i).dyn_into::<web_sys::Element>().ok();
+            while let Some(e) = cur {
+                if e == *self.overlay.as_ref() {
+                    break;
+                }
+                if let Some(id) = e.get_attribute("data-iid").and_then(|v| v.parse::<InstId>().ok()) {
+                    if !out.contains(&id) && d.get(id).map(|i| !i.destroyed).unwrap_or(false) && d.is_a(id, "GuiObject") {
+                        let r = e.get_bounding_client_rect();
+                        if x >= r.left() && x <= r.right() && y >= r.top() && y <= r.bottom() {
+                            out.push(id);
+                        }
+                    }
+                }
+                cur = e.parent_element();
+            }
+        }
+        out
     }
 
     pub fn focus_box(&mut self, inst: InstId, on: bool) {

@@ -52,6 +52,8 @@ pub struct LuaVm {
     tools: crate::clientchars::Tools,
     remote_moved: std::collections::HashSet<u32>,
     fired_later: Vec<(u32, &'static str, Vec<swirl_lua::host::Wire>)>,
+    gui_ptr: Option<[f64; 2]>,
+    gui_down: Vec<u32>,
     t: f64,
     pack: std::collections::BTreeMap<String, String>,
     io_keys: std::collections::HashMap<i64, u32>,
@@ -90,7 +92,7 @@ impl LuaVm {
         let mut dm = DataModel::new("client");
         dm.local_alloc = true;
         let dm = Rc::new(RefCell::new(dm));
-        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), gui: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), screen: [800.0, 600.0], gui_dom: None, gui_dirty: true, cam: Default::default(), init_terrain: None, terrain_keys: vec![], bridge: Default::default(), hidden: Default::default(), now_ms: 0.0, friends: Default::default(), tags: None, tools: Default::default(), remote_moved: Default::default(), fired_later: vec![], t: 0.0, pack: Default::default(), io_keys: Default::default(), io_btn: Default::default(), io_move: None, io_wheel: None, io_destroy: vec![], last_behavior: 0.0, behavior_req: None, touches: Default::default(), menu: None, exit_btns: vec![], leave_req: false, clicks: vec![], own_cam: None })
+        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), gui: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), screen: [800.0, 600.0], gui_dom: None, gui_dirty: true, cam: Default::default(), init_terrain: None, terrain_keys: vec![], bridge: Default::default(), hidden: Default::default(), now_ms: 0.0, friends: Default::default(), tags: None, tools: Default::default(), remote_moved: Default::default(), fired_later: vec![], gui_ptr: None, gui_down: vec![], t: 0.0, pack: Default::default(), io_keys: Default::default(), io_btn: Default::default(), io_move: None, io_wheel: None, io_destroy: vec![], last_behavior: 0.0, behavior_req: None, touches: Default::default(), menu: None, exit_btns: vec![], leave_req: false, clicks: vec![], own_cam: None })
     }
 
     fn make_io(&mut self, ty: &str, key: i64) -> Option<u32> {
@@ -110,6 +112,55 @@ impl LuaVm {
         if let (Some(u), Some(h)) = (uis, self.host.as_mut()) {
             use swirl_lua::host::Wire;
             h.fire(u, "__Input", vec![Wire::I(io), Wire::B(processed), Wire::S(kind.into())]);
+        }
+    }
+
+    pub fn set_gui_pointer(&mut self, x: f64, y: f64, on: bool) {
+        self.gui_ptr = if on { Some([x, y]) } else { None };
+    }
+
+    fn fire_gui_input(&mut self, kind: &str, io: u32) {
+        use swirl_lua::host::Wire;
+        let p = match self.gui_ptr {
+            Some(p) => p,
+            None => return,
+        };
+        let mut list = {
+            let dm = self.dm.borrow();
+            self.gui_dom.as_ref().map(|g| g.objects_at(&dm, p[0], p[1])).unwrap_or_default()
+        };
+        if kind == "b" || kind == "e" {
+            if kind == "e" {
+                for g in std::mem::take(&mut self.gui_down) {
+                    if !list.contains(&g) {
+                        list.push(g);
+                    }
+                }
+            }
+            let mut targets = vec![];
+            {
+                let dm = self.dm.borrow();
+                for g in list {
+                    targets.push(g);
+                    if dm.is_a(g, "GuiButton") || matches!(dm.get_prop(g, "Active"), Some(Val::Bool(true))) {
+                        break;
+                    }
+                }
+            }
+            list = targets;
+            if kind == "b" {
+                self.gui_down = list.clone();
+            }
+        }
+        let name = match kind {
+            "b" => "InputBegan",
+            "e" => "InputEnded",
+            _ => "InputChanged",
+        };
+        if let Some(h) = self.host.as_mut() {
+            for g in list {
+                h.fire(g, name, vec![Wire::I(io)]);
+            }
         }
     }
 
@@ -446,6 +497,7 @@ impl LuaVm {
             self.io_btn.insert(id, io);
             self.core.borrow_mut().buttons_down.insert(id);
             self.set_last_input("MouseButton1");
+            self.fire_gui_input("b", io);
             self.send_input(io, over_gui, "b");
         } else if let Some(io) = self.io_btn.remove(&id) {
             self.core.borrow_mut().buttons_down.remove(&id);
@@ -454,6 +506,7 @@ impl LuaVm {
                 dm.set_prop_quiet(io, "UserInputState", Val::Num(2.0));
                 dm.set_prop_quiet(io, "Position", Val::Arr(pos));
             }
+            self.fire_gui_input("e", io);
             self.send_input(io, over_gui, "e");
             self.io_destroy.push((io, self.t + 1.0));
         }
@@ -483,6 +536,7 @@ impl LuaVm {
             dm.set_prop_quiet(io, "Delta", Val::Arr(vec![dx, dy, 0.0]));
         }
         self.set_last_input("MouseMovement");
+        self.fire_gui_input("c", io);
         self.send_input(io, over_gui, "c");
     }
 
@@ -662,7 +716,13 @@ impl LuaVm {
                                     }
                                 }
                             }
-                            Some("tp") => ch.teleport(&dm, &c, a["s"].as_i64().unwrap_or(0)),
+                            Some("tp") => {
+                                let v: Vec<f64> = a["v"].as_array().map(|c| c.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect()).unwrap_or_default();
+                                ch.teleport(&dm, &c, a["s"].as_i64().unwrap_or(0));
+                                if v.len() >= 3 {
+                                    ch.set_velocity([v[0], v[1], v[2]]);
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -1210,6 +1270,17 @@ impl LuaVm {
         self.dm.borrow().era
     }
 
+    pub fn own_ready(&self) -> bool {
+        if self.chars.as_ref().map(|c| c.own.is_some()).unwrap_or(false) {
+            return true;
+        }
+        let dm = self.dm.borrow();
+        match dm.services.get("Players").and_then(|p| dm.get_prop(*p, "CharacterAutoLoads")) {
+            Some(Val::Bool(false)) => true,
+            _ => false,
+        }
+    }
+
     pub fn terrain_era(&self) -> i32 {
         self.chars.as_ref().and_then(|c| c.ph.borrow().terrain.as_ref().map(|t| t.era)).unwrap_or(2012)
     }
@@ -1515,6 +1586,10 @@ impl LuaVm {
             Some(Val::Ref(Some(_))) => "arrow".into(),
             _ => "far".into(),
         }
+    }
+
+    pub fn set_thumbnail_urls(&mut self, head: &str, avatar: &str) {
+        self.core.borrow_mut().thumb_urls = [head.to_string(), avatar.to_string()];
     }
 
     pub fn set_screen(&mut self, w: f64, h: f64) {

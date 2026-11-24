@@ -21,6 +21,7 @@ pub struct CoreState {
     pub gui_inset: [f64; 4],
     pub verbs: HashMap<InstId, String>,
     pub screen: (f64, f64),
+    pub thumb_urls: [String; 2],
     pub sound_ops: Vec<serde_json::Value>,
     pub fire_later: Vec<(InstId, &'static str)>,
     pub focus_req: Vec<(InstId, bool)>,

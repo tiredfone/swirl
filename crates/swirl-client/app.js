@@ -89,9 +89,41 @@ export async function startApp({ client, cfg, canvas }) {
     return here + 'content/' + p.split('/').map(encodeURIComponent).join('/');
   };
   const assetUrl = (id) => ((cfg.endpoints && cfg.endpoints.asset) || '/asset/?id={id}').replace('{id}', id);
+  const endpointUrl = (name, id) => {
+    const t = cfg.endpoints && cfg.endpoints[name];
+    const n = Number(id);
+    return t ? String(t).replace(/\{id\}/g, String(Number.isSafeInteger(n) && n > 0 ? n : 0)) : null;
+  };
+  const thumbnailSrc = (url) => {
+    let s = String(url || '').trim();
+    if (!s) return null;
+    if (/^(https?:)?\/\/([a-z0-9-]+\.)*roblox\.com\//i.test(s)) {
+      const user = /[?&]user(?:Id)?=(\d+)/i.exec(s) || /\/users\/(\d+)/i.exec(s);
+      if (user && /headshot|\/head\.ashx/i.test(s)) return endpointUrl('thumbnail', +user[1]) || null;
+      if (user && /thumb|avatar|bust/i.test(s)) return endpointUrl('avatarThumbnail', +user[1]) || endpointUrl('thumbnail', +user[1]) || null;
+      const asset = /[?&](?:assetId|placeId|aid)=(\d+)/i.exec(s) || (/thumb|icon/i.test(s) && /[?&]id=(\d+)/i.exec(s));
+      if (asset && /thumb|icon/i.test(s)) return endpointUrl('placeThumbnail', +asset[1]) || null;
+      return null;
+    }
+    const origin = location.origin.toLowerCase();
+    if (s.toLowerCase().startsWith(origin + '/')) s = s.slice(origin.length);
+    if (s[0] !== '/' || s[1] === '/') return null;
+    const lower = s.toLowerCase();
+    for (const name of ['thumbnail', 'avatarThumbnail', 'placeThumbnail']) {
+      const t = endpointUrl(name, 1);
+      if (!t) continue;
+      const base = t.toLowerCase().split('?')[0].replace(/\/1$/, '/');
+      if (lower.split('?')[0] === base || lower.startsWith(base.endsWith('/') ? base : base + '?') || (base.endsWith('/') && lower.startsWith(base))) return s;
+    }
+    return null;
+  };
   const imageUrl = (url) => {
     const t = String(url || '').trim();
     if (!t) return null;
+    const th = thumbnailSrc(t);
+    if (th) return th;
+    const ia = /(?:^|\/)thumbs\/asset\.ashx\?(?:[^#]*&)?assetid=(\d+)/i.exec(t);
+    if (ia) return endpointUrl('itemThumbnail', +ia[1]) || null;
     const m = /^rbxasset:\/\/(.+)$/i.exec(t);
     if (m) return contentUrl(m[1]);
     const id = /[?&]id=(\d+)/i.exec(t) || /^rbxassetid:\/\/(\d+)/i.exec(t) || /^(\d+)$/.exec(t);
@@ -230,14 +262,34 @@ export async function startApp({ client, cfg, canvas }) {
     const r = canvas.getBoundingClientRect();
     ms.x = e.clientX - r.left;
     ms.y = e.clientY - r.top;
-    if (vm && window.solarEra === 2018) vm.input_move(e.movementX || 0, e.movementY || 0, false, locked());
-    else if (vm) vm.mouse_event('Move');
+    if (vm && window.solarEra === 2018) {
+      vm.set_gui_pointer(e.clientX, e.clientY, !locked());
+      vm.input_move(e.movementX || 0, e.movementY || 0, false, locked());
+    } else if (vm) vm.mouse_event('Move');
   });
+  const overGuiTarget = (e) => e.target !== canvas && root.contains(e.target);
+  window.addEventListener('pointermove', (e) => {
+    if (e.pointerType === 'touch' || !vm || window.solarEra !== 2018 || e.target === canvas || !overGuiTarget(e)) return;
+    const r = canvas.getBoundingClientRect();
+    ms.x = e.clientX - r.left;
+    ms.y = e.clientY - r.top;
+    vm.set_gui_pointer(e.clientX, e.clientY, true);
+    vm.input_move(e.movementX || 0, e.movementY || 0, true, false);
+  });
+  root.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'touch' || !vm || window.solarEra !== 2018 || !overGuiTarget(e)) return;
+    const r = canvas.getBoundingClientRect();
+    ms.x = e.clientX - r.left;
+    ms.y = e.clientY - r.top;
+    vm.set_gui_pointer(e.clientX, e.clientY, true);
+    vm.input_button(e.button, true, true);
+  }, true);
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   canvas.addEventListener('pointerdown', (e) => {
     if (e.pointerType === 'touch' || !vm) return;
     if (typing() && document.activeElement) document.activeElement.blur();
     if (window.solarEra === 2018) {
+      vm.set_gui_pointer(e.clientX, e.clientY, !locked());
       vm.input_button(e.button, true, false);
       return;
     }
@@ -256,7 +308,11 @@ export async function startApp({ client, cfg, canvas }) {
   window.addEventListener('pointerup', (e) => {
     if (e.pointerType === 'touch' || !vm) return;
     if (window.solarEra === 2018) {
-      vm.input_button(e.button, false, false);
+      const r = canvas.getBoundingClientRect();
+      ms.x = e.clientX - r.left;
+      ms.y = e.clientY - r.top;
+      vm.set_gui_pointer(e.clientX, e.clientY, !locked());
+      vm.input_button(e.button, false, overGuiTarget(e));
       return;
     }
     if (e.button === 2 && dragging) {
@@ -481,11 +537,30 @@ export async function startApp({ client, cfg, canvas }) {
 
   const CURSOR_URLS = { arrow: 'rbxasset://textures/ArrowCursor.png', far: 'rbxasset://textures/ArrowFarCursor.png', hand: 'rbxasset://textures/DragCursor.png', lock: 'rbxasset://textures/MouseLockedCursor.png' };
   let cursorKey = null;
+  const cursorCache = new Map();
+  const resolveCursor = (key) => {
+    let p = cursorCache.get(key);
+    if (!p) {
+      const u = imageUrl(CURSOR_URLS[key] || key);
+      p = u ? new Promise((res) => {
+        const img = new Image();
+        img.onload = () => res(img.naturalWidth && img.naturalWidth <= 128 && img.naturalHeight <= 128 ? { src: u, w: img.naturalWidth, h: img.naturalHeight } : null);
+        img.onerror = () => res(null);
+        img.src = u;
+      }) : Promise.resolve(null);
+      cursorCache.set(key, p);
+    }
+    return p;
+  };
   const setCursor = (key) => {
     if (key === cursorKey) return;
     cursorKey = key;
-    const u = imageUrl(CURSOR_URLS[key] || key);
-    canvas.style.cursor = u ? `url("${u}") 0 0, auto` : '';
+    resolveCursor(key).then((c) => {
+      if (cursorKey !== key) return;
+      const css = c ? `url("${c.src}") ${c.w >> 1} ${c.h >> 1}, default` : 'default';
+      canvas.style.cursor = css;
+      document.documentElement.style.setProperty('--ch-cursor', css);
+    });
   };
 
   const applySky = async () => {
@@ -585,6 +660,7 @@ export async function startApp({ client, cfg, canvas }) {
         vm.set_run(true);
         vm.set_screen(canvas.clientWidth || 800, canvas.clientHeight || 600);
         window.solarApp.vm = vm;
+        vm.set_thumbnail_urls(String((cfg.endpoints || {}).thumbnail || ''), String((cfg.endpoints || {}).avatarThumbnail || ''));
         vm.set_touch(touch);
         booted = false;
       }

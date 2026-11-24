@@ -91,15 +91,24 @@ export async function start(opts = {}) {
     void luaStart;
     let shown = false;
     let loaded = false;
+    let loadedAt = 0;
+    let ownSince = 0;
     const loop = () => {
       const now = performance.now();
       if (lua) lua.frame(now);
       client.frame(now);
       if (client.ready() && !loaded) {
         loaded = true;
+        loadedAt = now;
         setStatus('Loading the world');
       }
-      if (loaded && !shown && luaDone) {
+      let ownOk = true;
+      if (useApp && loaded && !shown) {
+        const v = window.solarApp && window.solarApp.vm;
+        if (v && v.own_ready()) ownSince = ownSince || now;
+        ownOk = (ownSince && now - ownSince > 600) || now - loadedAt > 30000;
+      }
+      if (loaded && !shown && luaDone && ownOk) {
         shown = true;
         setStatus('Starting');
         const c = client.boot_counts();

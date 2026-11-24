@@ -162,6 +162,12 @@ impl ClientChars {
         self.own = Some(Own { model, hum, ctrl, rig, cf, vel: [0.0; 3], state: humanoid::FALL, run_state: None, last_run: None, swim_state: None, last_swim: None, climb_state: None, last_climb: None, fall_for: 0.0, fall_sent: false, target: None, seated_on: None, drive: None });
     }
 
+    pub fn set_velocity(&mut self, v: [f64; 3]) {
+        if let Some(o) = self.own.as_mut() {
+            o.ctrl.vel = v;
+        }
+    }
+
     pub fn teleport(&mut self, dm: &DataModel, c: &[f64], seq: i64) {
         self.tp_seq = seq;
         if let (Some(o), Some(c)) = (self.own.as_mut(), cf12(c)) {
