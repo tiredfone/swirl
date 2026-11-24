@@ -4,6 +4,33 @@ const STARTER = 37801172;
 const FONT_SIZES = [8, 9, 10, 11, 12, 14, 18, 24, 36, 48, 28, 32, 42, 60, 96];
 void FONT_SIZES;
 
+const LOCAL_UI = {
+  'textures/ui/touchcontrolssheet.png': 'TouchControlsSheet.png',
+  'textures/roblox-logo.png': 'roblox-logo.png',
+  'textures/ui/leavemenubkgd.png': 'LeaveMenuBkgd.png',
+  'textures/ui/leavemenuleavebtn.png': 'LeaveMenuLeaveBtn.png',
+  'textures/ui/leavemenucancelbtn.png': 'LeaveMenuCancelBtn.png',
+};
+
+const detectTouch = () => {
+  const q = new URLSearchParams(location.search).get('touch');
+  if (q === '1') return true;
+  if (q === '0') return false;
+  const ua = navigator.userAgent || '';
+  const points = navigator.maxTouchPoints || 0;
+  const mq = (x) => typeof matchMedia === 'function' && matchMedia(x).matches;
+  const mouse = mq('(any-pointer: fine)') || mq('(pointer: fine)');
+  const uad = navigator.userAgentData;
+  if (uad && uad.mobile === true) return true;
+  if (/Android|iPhone|iPod/i.test(ua)) return true;
+  if (/iPad/i.test(ua)) return !mouse || points > 1;
+  if (/Macintosh/i.test(ua)) return points > 1 && !mouse;
+  if (/Windows NT|X11|CrOS/i.test(ua) && !/Mobile/i.test(ua)) return false;
+  if (/Mobile/i.test(ua)) return true;
+  if (points <= 0) return false;
+  return mq('(pointer: coarse)') && !mouse && !mq('(any-hover: hover)');
+};
+
 const fetchCoreSource = async (id) => {
   try {
     const r = await fetch('/asset/?id=' + id, { credentials: 'same-origin' });
@@ -47,6 +74,7 @@ export async function startApp({ client, cfg, canvas }) {
   const [index, rewrite, index2018] = await Promise.all([json(here + 'content-index.json'), json(here + 'content/rewrite.json'), json(here + 'content2018-index.json')]);
   const contentUrl = (path) => {
     let p = String(path).replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/{2,}/g, '/');
+    if (window.solarEra !== 2018 && LOCAL_UI[p.toLowerCase()]) return here + 'ui/' + LOCAL_UI[p.toLowerCase()];
     if (window.solarEra === 2018) {
       const key = p.toLowerCase();
       const hit = index2018[key] || index2018[key.replace(/\.(dds|tex)$/, '.png')] || index2018['platform/' + key] || index2018['platform/' + key.replace(/\.(dds|tex)$/, '.png')];
@@ -92,6 +120,14 @@ export async function startApp({ client, cfg, canvas }) {
   root.id = 'chocolate';
   root.className = 'swirl-gui-root';
   root.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:5';
+  const touch = detectTouch();
+  if (touch) {
+    root.classList.add('ch-touch');
+    canvas.style.touchAction = 'none';
+    document.documentElement.style.touchAction = 'none';
+    document.body.style.overscrollBehavior = 'none';
+  }
+  const guiK = () => (touch ? Math.max(1, 640 / Math.min(canvas.clientWidth || 1, canvas.clientHeight || 1)) : 1);
   document.body.appendChild(root);
 
   const errors = [];
@@ -112,6 +148,11 @@ export async function startApp({ client, cfg, canvas }) {
   window.addEventListener('keydown', (e) => {
     if (!vm) return;
     if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key && e.key.length === 1 && !typing() && !'cvxaz'.includes(e.key.toLowerCase())) e.preventDefault();
+    if (window.solarEra === 2018) {
+      if (!typing() && (e.key === 'Tab' || e.key === ' ' || e.key.startsWith('Arrow'))) e.preventDefault();
+      vm.input_key(e.code, true, typing(), e.repeat);
+      return;
+    }
     if (typing()) return;
     const k = e.key.toLowerCase();
     if (k === '/' && vm.gui_key_claimed('special:5')) {
@@ -151,6 +192,10 @@ export async function startApp({ client, cfg, canvas }) {
   });
   window.addEventListener('keyup', (e) => {
     if (!vm) return;
+    if (window.solarEra === 2018) {
+      vm.input_key(e.code, false, typing(), false);
+      return;
+    }
     const k = e.key.toLowerCase();
     held.delete(k);
     if (e.code) codes.delete(e.code);
@@ -159,6 +204,7 @@ export async function startApp({ client, cfg, canvas }) {
     if (lua) vm.key_event(lua, false);
   });
   window.addEventListener('blur', () => {
+    if (vm && window.solarEra === 2018) vm.input_blur();
     held.clear();
     codes.clear();
     keyYaw = 0;
@@ -168,12 +214,17 @@ export async function startApp({ client, cfg, canvas }) {
     const r = canvas.getBoundingClientRect();
     ms.x = e.clientX - r.left;
     ms.y = e.clientY - r.top;
-    if (vm) vm.mouse_event('Move');
+    if (vm && window.solarEra === 2018) vm.input_move(e.movementX || 0, e.movementY || 0, false, locked());
+    else if (vm) vm.mouse_event('Move');
   });
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   canvas.addEventListener('pointerdown', (e) => {
     if (e.pointerType === 'touch' || !vm) return;
     if (typing() && document.activeElement) document.activeElement.blur();
+    if (window.solarEra === 2018) {
+      vm.input_button(e.button, true, false);
+      return;
+    }
     if (e.button === 2) {
       dragging = true;
       try {
@@ -188,6 +239,10 @@ export async function startApp({ client, cfg, canvas }) {
   });
   window.addEventListener('pointerup', (e) => {
     if (e.pointerType === 'touch' || !vm) return;
+    if (window.solarEra === 2018) {
+      vm.input_button(e.button, false, false);
+      return;
+    }
     if (e.button === 2 && dragging) {
       dragging = false;
       if (locked() && !vm.cam_first_person()) document.exitPointerLock();
@@ -195,13 +250,55 @@ export async function startApp({ client, cfg, canvas }) {
     if (e.button === 0) vm.mouse_button(0, false);
   }, true);
   window.addEventListener('pointermove', (e) => {
-    if (!vm) return;
+    if (!vm || window.solarEra === 2018) return;
     if (dragging || (locked() && JSON.parse(vm.cam_state()).fp)) vm.cam_drag(e.movementX, e.movementY);
   });
+  const isField = (e) => !!(e.target && e.target.closest && e.target.closest('input,textarea'));
+  const touchPos = (e) => {
+    const r = canvas.getBoundingClientRect();
+    return [e.clientX - r.left, e.clientY - r.top];
+  };
+  const tapMouse = (x, y) => {
+    ms.x = x;
+    ms.y = y;
+    vm.mouse_event('Move');
+    vm.mouse_frame(x, y, canvas.clientWidth || 1, canvas.clientHeight || 1, guiK(), false, false);
+    vm.mouse_button(0, true);
+    setTimeout(() => vm && vm.mouse_button(0, false), 60);
+  };
+  const isTouch = (e) => e.pointerType === 'touch' || e.pointerType === 'pen';
+  if (touch) {
+    const opts = { capture: true, passive: false };
+    window.addEventListener('pointerdown', (e) => {
+      if (!isTouch(e) || !vm) return;
+      if (typing() && !isField(e) && document.activeElement) document.activeElement.blur();
+      const [x, y] = touchPos(e);
+      vm.touch_down(e.pointerId, x, y, guiK());
+      if (!isField(e)) e.preventDefault();
+    }, opts);
+    window.addEventListener('pointermove', (e) => {
+      if (!isTouch(e) || !vm) return;
+      const [x, y] = touchPos(e);
+      if (vm.touch_move(e.pointerId, x, y, guiK())) e.preventDefault();
+    }, opts);
+    const end = (cancelled) => (e) => {
+      if (!isTouch(e) || !vm) return;
+      const [x, y] = touchPos(e);
+      if (vm.touch_up(e.pointerId, x, y, guiK(), cancelled)) tapMouse(x, y);
+    };
+    window.addEventListener('pointerup', end(false), opts);
+    window.addEventListener('pointercancel', end(true), opts);
+    root.addEventListener('contextmenu', (e) => e.preventDefault());
+    root.addEventListener('gesturestart', (e) => e.preventDefault());
+  }
   let wheelAcc = 0;
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
     if (!vm) return;
+    if (window.solarEra === 2018) {
+      vm.input_wheel(e.deltaY > 0 ? -1 : 1, false);
+      return;
+    }
     const unit = e.deltaMode === 1 ? 3 : e.deltaMode === 2 ? 1 : 100;
     if (Math.sign(e.deltaY) !== Math.sign(wheelAcc)) wheelAcc = 0;
     wheelAcc += e.deltaY / unit;
@@ -443,7 +540,10 @@ export async function startApp({ client, cfg, canvas }) {
   let due = 0;
   let pingT = 0;
   let booted = false;
-  const frameMs = 1000 / 60;
+  let screenK = 0;
+  let screenW = 0;
+  let screenH = 0;
+  const frameMs = 1000 / (touch ? 30 : 60);
   let holdMsgs = [];
   let bundle = null;
   let bundleP = null;
@@ -469,12 +569,16 @@ export async function startApp({ client, cfg, canvas }) {
         vm.set_run(true);
         vm.set_screen(canvas.clientWidth || 800, canvas.clientHeight || 600);
         window.solarApp.vm = vm;
+        vm.set_touch(touch);
         booted = false;
       }
       if (!vm) continue;
       try {
         vm.apply(raw);
-        if (m.t === 'init') window.solarEra = vm.client_era();
+        if (m.t === 'init') {
+          window.solarEra = vm.client_era();
+          vm.set_touch(touch);
+        }
       } catch (e) {
         errors.push('apply: ' + e);
       }
@@ -506,11 +610,24 @@ export async function startApp({ client, cfg, canvas }) {
       }
       vm.cam_key_yaw(keyYaw);
       vm.frame(dt, fw, sd, jump, held.has('backspace'), locked());
+      const mb = vm.take_mouse_behavior();
+      if (mb > 0 && !locked() && canvas.requestPointerLock) {
+        try {
+          const r = canvas.requestPointerLock();
+          if (r && r.catch) r.catch(() => {});
+        } catch (err) {}
+      } else if (mb === 0 && locked()) document.exitPointerLock();
       const cs = JSON.parse(vm.cam_state());
       const centered = locked() && (cs.shift || cs.fp);
-      const k = 1;
+      const k = guiK();
+      if (k !== screenK || canvas.clientWidth !== screenW || canvas.clientHeight !== screenH) {
+        screenK = k;
+        screenW = canvas.clientWidth;
+        screenH = canvas.clientHeight;
+        vm.set_screen(Math.round((screenW || 800) * k), Math.round((screenH || 600) * k));
+      }
       vm.mouse_frame(ms.x, ms.y, canvas.clientWidth || 1, canvas.clientHeight || 1, k, false, centered);
-      vm.gui_frame(canvas.clientWidth || 1, canvas.clientHeight || 1, 1, 0, 0, 0, 0, true, now);
+      vm.gui_frame(canvas.clientWidth || 1, canvas.clientHeight || 1, k, 0, 0, 0, 0, true, now);
       pump();
       const ops = vm.render_ops();
       if (ops !== '[]') client.apply_local(ops);
@@ -522,6 +639,11 @@ export async function startApp({ client, cfg, canvas }) {
       for (const o of JSON.parse(vm.take_sound_ops())) audio(o);
       listener(cam);
       for (const o of JSON.parse(vm.take_out())) send(o);
+      if (vm.take_leave()) {
+        window.chocolateLeaving = true;
+        client.close_connection && client.close_connection();
+        location.href = (cfg.endpoints && cfg.endpoints.gamePage ? cfg.endpoints.gamePage : '/game/{id}').replace('{id}', cfg.placeId);
+      }
       const kicked = vm.take_kicked();
       if (kicked) client.close_connection && client.close_connection();
       terrainSync();

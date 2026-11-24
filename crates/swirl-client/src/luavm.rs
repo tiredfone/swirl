@@ -54,6 +54,30 @@ pub struct LuaVm {
     fired_later: Vec<(u32, &'static str, Vec<swirl_lua::host::Wire>)>,
     t: f64,
     pack: std::collections::BTreeMap<String, String>,
+    io_keys: std::collections::HashMap<i64, u32>,
+    io_btn: std::collections::HashMap<i32, u32>,
+    io_move: Option<u32>,
+    io_wheel: Option<u32>,
+    io_destroy: Vec<(u32, f64)>,
+    last_behavior: f64,
+    behavior_req: Option<i32>,
+    touches: std::collections::HashMap<i32, TouchRec>,
+    menu: Option<[u32; 5]>,
+    exit_btns: Vec<u32>,
+    leave_req: bool,
+    clicks: Vec<u32>,
+}
+
+struct TouchRec {
+    io: u32,
+    x: f64,
+    y: f64,
+    sx: f64,
+    sy: f64,
+    t0: f64,
+    began: Vec<u32>,
+    processed: bool,
+    moved: f64,
 }
 
 #[wasm_bindgen]
@@ -65,7 +89,405 @@ impl LuaVm {
         let mut dm = DataModel::new("client");
         dm.local_alloc = true;
         let dm = Rc::new(RefCell::new(dm));
-        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), gui: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), screen: [800.0, 600.0], gui_dom: None, gui_dirty: true, cam: Default::default(), init_terrain: None, terrain_keys: vec![], bridge: Default::default(), hidden: Default::default(), now_ms: 0.0, friends: Default::default(), tags: None, tools: Default::default(), remote_moved: Default::default(), fired_later: vec![], t: 0.0, pack: Default::default() })
+        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), gui: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), screen: [800.0, 600.0], gui_dom: None, gui_dirty: true, cam: Default::default(), init_terrain: None, terrain_keys: vec![], bridge: Default::default(), hidden: Default::default(), now_ms: 0.0, friends: Default::default(), tags: None, tools: Default::default(), remote_moved: Default::default(), fired_later: vec![], t: 0.0, pack: Default::default(), io_keys: Default::default(), io_btn: Default::default(), io_move: None, io_wheel: None, io_destroy: vec![], last_behavior: 0.0, behavior_req: None, touches: Default::default(), menu: None, exit_btns: vec![], leave_req: false, clicks: vec![] })
+    }
+
+    fn make_io(&mut self, ty: &str, key: i64) -> Option<u32> {
+        let mut dm = self.dm.borrow_mut();
+        let io = dm.create_any("InputObject", None).ok()?;
+        dm.set_prop_quiet(io, "Name", Val::Str("InputObject".into()));
+        dm.set_prop_quiet(io, "UserInputType", Val::Num(swirl_core::classes::enum_value("UserInputType", ty).unwrap_or(0) as f64));
+        dm.set_prop_quiet(io, "KeyCode", Val::Num(key as f64));
+        dm.set_prop_quiet(io, "UserInputState", Val::Num(4.0));
+        dm.set_prop_quiet(io, "Position", Val::Arr(vec![0.0, 0.0, 0.0]));
+        dm.set_prop_quiet(io, "Delta", Val::Arr(vec![0.0, 0.0, 0.0]));
+        Some(io)
+    }
+
+    fn send_input(&mut self, io: u32, processed: bool, kind: &str) {
+        let uis = self.dm.borrow().services.get("UserInputService").copied();
+        if let (Some(u), Some(h)) = (uis, self.host.as_mut()) {
+            use swirl_lua::host::Wire;
+            h.fire(u, "__Input", vec![Wire::I(io), Wire::B(processed), Wire::S(kind.into())]);
+        }
+    }
+
+    fn set_last_input(&mut self, ty: &str) {
+        let v = swirl_core::classes::enum_value("UserInputType", ty).unwrap_or(0) as f64;
+        let changed = {
+            let mut c = self.core.borrow_mut();
+            let ch = c.last_input != v;
+            c.last_input = v;
+            ch
+        };
+        if changed {
+            let uis = self.dm.borrow().services.get("UserInputService").copied();
+            if let (Some(u), Some(h)) = (uis, self.host.as_mut()) {
+                h.fire(u, "LastInputTypeChanged", vec![swirl_lua::host::Wire::E("UserInputType".into(), v)]);
+            }
+        }
+    }
+
+    fn io_pos(&self) -> Vec<f64> {
+        let k = 1.0;
+        vec![self.mouse_state.x * k, self.mouse_state.y * k - 36.0, 0.0]
+    }
+
+    pub fn input_key(&mut self, code: &str, down: bool, typing: bool, is_repeat: bool) {
+        let name = match key_name(code) {
+            Some(n) => n,
+            None => return,
+        };
+        let key = swirl_core::classes::enum_value("KeyCode", &name).unwrap_or(0);
+        if key == 0 {
+            return;
+        }
+        if down {
+            if is_repeat {
+                return;
+            }
+            let io = match self.make_io("Keyboard", key) {
+                Some(i) => i,
+                None => return,
+            };
+            self.dm.borrow_mut().set_prop_quiet(io, "UserInputState", Val::Num(0.0));
+            self.io_keys.insert(key, io);
+            self.core.borrow_mut().keys_code.insert(key);
+            self.set_last_input("Keyboard");
+            self.send_input(io, typing, "b");
+        } else if let Some(io) = self.io_keys.remove(&key) {
+            self.core.borrow_mut().keys_code.remove(&key);
+            self.dm.borrow_mut().set_prop_quiet(io, "UserInputState", Val::Num(2.0));
+            self.send_input(io, typing, "e");
+            self.io_destroy.push((io, self.t + 1.0));
+        }
+    }
+
+    fn handle_clicks(&mut self) {
+        let clicks = std::mem::take(&mut self.clicks);
+        for c in clicks {
+            if self.exit_btns.contains(&c) {
+                self.leave_req = true;
+            }
+            let m = match self.menu {
+                Some(m) => m,
+                None => continue,
+            };
+            let [leave, shield, yes, no, toggle] = m;
+            let show = |vm: &mut LuaVm, on: bool| {
+                let mut dm = vm.dm.borrow_mut();
+                let _ = dm.set_prop(shield, "Visible", Val::Bool(on));
+                if let Some(u) = dm.services.get("UserInputService").copied() {
+                    let _ = dm.set_prop(u, "ModalEnabled", Val::Bool(on));
+                }
+            };
+            if c == leave {
+                show(self, true);
+            } else if c == no {
+                show(self, false);
+            } else if c == yes {
+                self.leave_req = true;
+            } else if c == toggle {
+                if let Some(st) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+                    let _ = st.set_item("swirl-touch-menu", "hidden");
+                }
+                let _ = self.dm.borrow_mut().set_prop(leave, "Visible", Val::Bool(false));
+                show(self, false);
+            }
+        }
+    }
+
+    pub fn take_leave(&mut self) -> bool {
+        std::mem::take(&mut self.leave_req)
+    }
+
+    pub fn set_touch(&mut self, on: bool) {
+        self.core.borrow_mut().touch = on;
+        let mut dm = self.dm.borrow_mut();
+        if let Some(u) = dm.services.get("UserInputService").copied() {
+            dm.set_prop_quiet(u, "TouchEnabled", Val::Bool(on));
+            dm.set_prop_quiet(u, "MouseEnabled", Val::Bool(!on));
+            dm.set_prop_quiet(u, "KeyboardEnabled", Val::Bool(!on));
+        }
+    }
+
+    fn touch_xy(&self, x: f64, y: f64, k: f64) -> [f64; 2] {
+        let top = if self.dm.borrow().era == 2018 { 36.0 } else { 0.0 };
+        [x * k, y * k - top]
+    }
+
+    fn gui_hits(&self, x: f64, y: f64) -> Vec<u32> {
+        let dm = self.dm.borrow();
+        let mut roots: Vec<(u32, f64)> = vec![];
+        let order = |dm: &DataModel, sg: u32, core: bool| (if core { 1000.0 } else { 10.0 }) + match dm.get_prop(sg, "DisplayOrder") {
+            Some(Val::Num(n)) => *n,
+            _ => 0.0,
+        };
+        if let Some(cg) = dm.services.get("CoreGui") {
+            for c in dm.get(*cg).map(|i| i.children.clone()).unwrap_or_default() {
+                if dm.is_a(c, "ScreenGui") {
+                    roots.push((c, order(&dm, c, true)));
+                }
+            }
+        }
+        if let Some(pg) = dm.local_player.and_then(|p| dm.find_child_of_class(p, "PlayerGui")) {
+            for c in dm.get(pg).map(|i| i.children.clone()).unwrap_or_default() {
+                if dm.is_a(c, "ScreenGui") {
+                    roots.push((c, order(&dm, c, false)));
+                }
+            }
+        }
+        let mut found: Vec<(u32, [f64; 4])> = vec![];
+        let mut seq = 0.0;
+        fn walk(dm: &DataModel, inst: u32, base: f64, depth: f64, x: f64, y: f64, seq: &mut f64, out: &mut Vec<(u32, [f64; 4])>) {
+            for c in dm.get(inst).map(|i| i.children.clone()).unwrap_or_default() {
+                if !dm.is_a(c, "GuiObject") {
+                    continue;
+                }
+                if !matches!(dm.get_prop(c, "Visible"), Some(Val::Bool(true))) {
+                    continue;
+                }
+                let order = *seq;
+                *seq += 1.0;
+                let z = match dm.get_prop(c, "ZIndex") {
+                    Some(Val::Num(n)) => *n,
+                    _ => 1.0,
+                };
+                if let (Some(Val::Arr(p)), Some(Val::Arr(s))) = (dm.get_prop(c, "AbsolutePosition"), dm.get_prop(c, "AbsoluteSize")) {
+                    if p.len() >= 2 && s.len() >= 2 && x >= p[0] && y >= p[1] && x < p[0] + s[0] && y < p[1] + s[1] {
+                        out.push((c, [base, z, depth, order]));
+                    }
+                }
+                walk(dm, c, base, depth + 1.0, x, y, seq, out);
+            }
+        }
+        for (sg, base) in roots {
+            if matches!(dm.get_prop(sg, "Enabled"), Some(Val::Bool(false))) {
+                continue;
+            }
+            walk(&dm, sg, base, 0.0, x, y, &mut seq, &mut found);
+        }
+        found.sort_by(|a, b| {
+            for i in 0..4 {
+                if a.1[i] != b.1[i] {
+                    return b.1[i].partial_cmp(&a.1[i]).unwrap_or(std::cmp::Ordering::Equal);
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+        found.into_iter().map(|f| f.0).collect()
+    }
+
+    fn touch_io_prop(&mut self, io: u32, state: f64, pos: [f64; 2], delta: [f64; 2]) {
+        let mut dm = self.dm.borrow_mut();
+        dm.set_prop_quiet(io, "UserInputState", Val::Num(state));
+        dm.set_prop_quiet(io, "Position", Val::Arr(vec![pos[0], pos[1], 0.0]));
+        dm.set_prop_quiet(io, "Delta", Val::Arr(vec![delta[0], delta[1], 0.0]));
+    }
+
+    fn touch_uis(&mut self, io: u32, processed: bool, kind: &str) {
+        if self.dm.borrow().era == 2018 {
+            self.send_input(io, processed, kind);
+        } else {
+            let name = match kind {
+                "b" => "InputBegan",
+                "e" => "InputEnded",
+                _ => "InputChanged",
+            };
+            self.touch_emit(name, io, processed, &[], true);
+        }
+    }
+
+    fn touch_emit(&mut self, name: &str, io: u32, processed: bool, targets: &[u32], with_processed: bool) {
+        use swirl_lua::host::Wire;
+        let uis = self.dm.borrow().services.get("UserInputService").copied();
+        if let (Some(u), Some(h)) = (uis, self.host.as_mut()) {
+            if with_processed {
+                h.fire(u, name, vec![Wire::I(io), Wire::B(processed)]);
+            }
+        }
+        let _ = targets;
+    }
+
+    pub fn touch_down(&mut self, id: i32, x: f64, y: f64, k: f64) -> bool {
+        use swirl_lua::host::Wire;
+        if self.touches.contains_key(&id) || self.host.is_none() {
+            return false;
+        }
+        let [x, y] = self.touch_xy(x, y, k);
+        let io = match self.make_io("Touch", 0) {
+            Some(i) => i,
+            None => return false,
+        };
+        self.touch_io_prop(io, 0.0, [x, y], [0.0, 0.0]);
+        let hits = self.gui_hits(x, y);
+        let processed = {
+            let dm = self.dm.borrow();
+            hits.iter().any(|g| dm.is_a(*g, "GuiButton") || dm.get(*g).map(|i| i.class == "TextBox").unwrap_or(false) || matches!(dm.get_prop(*g, "Active"), Some(Val::Bool(true))))
+        };
+        self.touches.insert(id, TouchRec { io, x, y, sx: x, sy: y, t0: self.now_ms, began: hits.clone(), processed, moved: 0.0 });
+        self.set_last_input("Touch");
+        self.touch_emit("TouchStarted", io, processed, &[], true);
+        self.touch_uis(io, processed, "b");
+        if let Some(h) = self.host.as_mut() {
+            for g in &hits {
+                h.fire(*g, "InputBegan", vec![Wire::I(io)]);
+            }
+        }
+        self.touch_emit("ProcessedEvent", io, processed, &[], true);
+        !processed || hits.is_empty()
+    }
+
+    pub fn touch_move(&mut self, id: i32, x: f64, y: f64, k: f64) -> bool {
+        use swirl_lua::host::Wire;
+        let [x, y] = self.touch_xy(x, y, k);
+        let (io, prev, processed, targets) = match self.touches.get_mut(&id) {
+            None => return false,
+            Some(r) => {
+                if x == r.x && y == r.y {
+                    return true;
+                }
+                let prev = [r.x, r.y];
+                r.x = x;
+                r.y = y;
+                r.moved = r.moved.max(((x - r.sx).powi(2) + (y - r.sy).powi(2)).sqrt());
+                (r.io, prev, r.processed, r.began.clone())
+            }
+        };
+        self.touch_io_prop(io, 1.0, [x, y], [x - prev[0], y - prev[1]]);
+        self.touch_emit("TouchMoved", io, processed, &[], true);
+        self.touch_uis(io, processed, "c");
+        let mut list = self.gui_hits(x, y);
+        for g in targets {
+            if !list.contains(&g) {
+                list.push(g);
+            }
+        }
+        if let Some(h) = self.host.as_mut() {
+            for g in &list {
+                h.fire(*g, "InputChanged", vec![Wire::I(io)]);
+            }
+        }
+        true
+    }
+
+    pub fn touch_up(&mut self, id: i32, x: f64, y: f64, k: f64, cancelled: bool) -> bool {
+        use swirl_lua::host::Wire;
+        let [x, y] = self.touch_xy(x, y, k);
+        let rec = match self.touches.remove(&id) {
+            Some(r) => r,
+            None => return false,
+        };
+        self.touch_io_prop(rec.io, 2.0, [x, y], [x - rec.x, y - rec.y]);
+        self.touch_emit("TouchEnded", rec.io, rec.processed, &[], true);
+        self.touch_uis(rec.io, rec.processed, "e");
+        let mut list = self.gui_hits(x, y);
+        for g in &rec.began {
+            if !list.contains(g) {
+                list.push(*g);
+            }
+        }
+        if let Some(h) = self.host.as_mut() {
+            for g in &list {
+                h.fire(*g, "InputEnded", vec![Wire::I(rec.io)]);
+            }
+        }
+        self.io_destroy.push((rec.io, self.t + 5.0));
+        !cancelled && !rec.processed && rec.moved < 20.0 && self.now_ms - rec.t0 < 600.0
+    }
+
+    pub fn input_blur(&mut self) {
+        let keys: Vec<(i64, u32)> = self.io_keys.drain().collect();
+        for (k, io) in keys {
+            self.core.borrow_mut().keys_code.remove(&k);
+            self.dm.borrow_mut().set_prop_quiet(io, "UserInputState", Val::Num(2.0));
+            self.send_input(io, false, "e");
+        }
+    }
+
+    pub fn input_button(&mut self, button: i32, down: bool, over_gui: bool) {
+        let (ty, id): (&str, i32) = match button {
+            0 => ("MouseButton1", 0),
+            1 => ("MouseButton3", 1),
+            2 => ("MouseButton2", 2),
+            _ => return,
+        };
+        let pos = self.io_pos();
+        if down {
+            let io = match self.make_io(ty, 0) {
+                Some(i) => i,
+                None => return,
+            };
+            {
+                let mut dm = self.dm.borrow_mut();
+                dm.set_prop_quiet(io, "UserInputState", Val::Num(0.0));
+                dm.set_prop_quiet(io, "Position", Val::Arr(pos));
+            }
+            self.io_btn.insert(id, io);
+            self.core.borrow_mut().buttons_down.insert(id);
+            self.set_last_input("MouseButton1");
+            self.send_input(io, over_gui, "b");
+        } else if let Some(io) = self.io_btn.remove(&id) {
+            self.core.borrow_mut().buttons_down.remove(&id);
+            {
+                let mut dm = self.dm.borrow_mut();
+                dm.set_prop_quiet(io, "UserInputState", Val::Num(2.0));
+                dm.set_prop_quiet(io, "Position", Val::Arr(pos));
+            }
+            self.send_input(io, over_gui, "e");
+            self.io_destroy.push((io, self.t + 1.0));
+        }
+    }
+
+    pub fn input_move(&mut self, dx: f64, dy: f64, over_gui: bool, locked: bool) {
+        let sens = 1.0;
+        let _ = locked;
+        let (dx, dy) = (dx * sens, dy * sens);
+        {
+            let mut c = self.core.borrow_mut();
+            c.mouse_delta[0] += dx;
+            c.mouse_delta[1] += dy;
+        }
+        if self.io_move.is_none() {
+            self.io_move = self.make_io("MouseMovement", 0);
+        }
+        let io = match self.io_move {
+            Some(i) => i,
+            None => return,
+        };
+        let pos = self.io_pos();
+        {
+            let mut dm = self.dm.borrow_mut();
+            dm.set_prop_quiet(io, "UserInputState", Val::Num(1.0));
+            dm.set_prop_quiet(io, "Position", Val::Arr(pos));
+            dm.set_prop_quiet(io, "Delta", Val::Arr(vec![dx, dy, 0.0]));
+        }
+        self.set_last_input("MouseMovement");
+        self.send_input(io, over_gui, "c");
+    }
+
+    pub fn input_wheel(&mut self, dir: f64, over_gui: bool) {
+        if self.io_wheel.is_none() {
+            self.io_wheel = self.make_io("MouseWheel", 0);
+        }
+        let io = match self.io_wheel {
+            Some(i) => i,
+            None => return,
+        };
+        let mut pos = self.io_pos();
+        pos[2] = dir / 4.0;
+        for _ in 0..4 {
+            {
+                let mut dm = self.dm.borrow_mut();
+                dm.set_prop_quiet(io, "UserInputState", Val::Num(1.0));
+                dm.set_prop_quiet(io, "Position", Val::Arr(pos.clone()));
+            }
+            self.send_input(io, over_gui, "c");
+        }
+    }
+
+    pub fn take_mouse_behavior(&mut self) -> i32 {
+        self.behavior_req.take().unwrap_or(-1)
     }
 
     pub fn set_core_pack(&mut self, text: &str) {
@@ -102,7 +524,10 @@ impl LuaVm {
                     dm.set_prop_quiet(root, "PlaceId", Val::Num(m["place"].as_f64().unwrap_or(0.0)));
                 }
                 if self.run {
-                    let mouse = boot(&mut dm, self.screen);
+                    let touch = self.core.borrow().touch;
+                    let (mouse, exits, menu) = boot(&mut dm, self.screen, touch);
+                    self.exit_btns = exits;
+                    self.menu = menu;
                     self.core.borrow_mut().mouse = mouse;
                     if dm.era != 2018 {
                         let sc = dm.services.get("ScriptContext").copied();
@@ -572,6 +997,9 @@ impl LuaVm {
             for e in evs {
                 match e {
                     crate::gui::GuiEv::Fire(inst, name, a, rep) => {
+                        if name == "MouseButton1Click" {
+                            self.clicks.push(inst);
+                        }
                         let wire: Vec<swirl_lua::host::Wire> = if name.ends_with("Click") { vec![] } else { vec![swirl_lua::host::Wire::N(a.first().copied().unwrap_or(0.0).trunc()), swirl_lua::host::Wire::N(a.get(1).copied().unwrap_or(0.0).trunc())] };
                         fired.push((inst, name, if name.ends_with("Click") { vec![] } else { wire }));
                         if rep {
@@ -611,6 +1039,7 @@ impl LuaVm {
             g.apply_pending_focus();
             count = g.node_count();
         }
+        self.handle_clicks();
         if show {
             if let (Some(t), Some(ch)) = (self.tags.as_mut(), self.chars.as_ref()) {
                 let dm = self.dm.borrow();
@@ -878,13 +1307,70 @@ impl LuaVm {
         serde_json::json!({"yaw": self.cam.yaw, "pitch": self.cam.pitch, "zoom": self.cam.target_zoom, "fp": self.cam.first_person, "shift": self.cam.shift_lock}).to_string()
     }
 
+    fn face_dir(&self, pointer_locked: bool) -> Option<[f64; 3]> {
+        let dm = self.dm.borrow();
+        let ws = dm.services.get("Workspace").copied()?;
+        let cam = match dm.get_prop(ws, "CurrentCamera") {
+            Some(Val::Ref(Some(c))) => *c,
+            _ => return None,
+        };
+        if dm.era == 2018 {
+            let us = self.host.as_ref().and_then(|h| h.user_settings_id())?;
+            let gs = dm.find_child(us, "GameSettings", false)?;
+            if !matches!(dm.get_prop(gs, "RotationType"), Some(Val::Num(n)) if (*n as i64) == 1) {
+                return None;
+            }
+            return match dm.get_prop(cam, "CFrame") {
+                Some(Val::Arr(c)) if c.len() >= 12 && c[5].hypot(c[11]) > 1e-3 => Some([-c[5], 0.0, -c[11]]),
+                _ => None,
+            };
+        }
+        if !(pointer_locked && (self.cam.shift_lock || self.cam.first_person)) {
+            return None;
+        }
+        let t = match dm.get_prop(cam, "CameraType") {
+            Some(Val::Num(n)) => *n as i64,
+            _ => 0,
+        };
+        if t == 6 || t == 0 {
+            return None;
+        }
+        Some(self.cam.forward_flat())
+    }
+
     pub fn frame(&mut self, dt: f64, fw: f64, sd: f64, jump: bool, dismount: bool, pointer_locked: bool) {
+        let (mut fw, mut sd, mut jump) = (fw, sd, jump);
+        let (rots, zooms) = {
+            let mut c = self.core.borrow_mut();
+            if let Some(tm) = c.touch_move {
+                if fw == 0.0 && sd == 0.0 {
+                    fw = -tm[1];
+                    sd = tm[0];
+                }
+            }
+            if c.touch_jump {
+                jump = true;
+                c.touch_jump = false;
+            }
+            (std::mem::take(&mut c.cam_rot), std::mem::take(&mut c.cam_zoom))
+        };
+        for r in rots {
+            self.cam.rotate_by(r[0], r[1]);
+        }
+        for z in zooms {
+            let dm = self.dm.borrow();
+            self.cam.zoom_by(&dm, (-z * 0.15).exp());
+        }
         let f = self.cam.forward_flat();
         let r = self.cam.right_flat();
         let mx = f[0] * fw + r[0] * sd;
         let mz = f[2] * fw + r[2] * sd;
         if let Some(c) = self.chars.as_mut() {
             c.drive_in = [fw > 0.3, fw < -0.3, sd < -0.3, sd > 0.3, dismount];
+        }
+        let face = self.face_dir(pointer_locked);
+        if let Some(c) = self.chars.as_mut() {
+            c.face = face;
         }
         self.update(dt, mx, mz, jump);
         let own = self.chars.as_ref().and_then(|c| c.own.as_ref()).map(|o| o.model);
@@ -1050,37 +1536,6 @@ impl LuaVm {
                 }
             }
             for (kind, _who, id, ok) in finished {
-    fn face_dir(&self, pointer_locked: bool) -> Option<[f64; 3]> {
-        let dm = self.dm.borrow();
-        let ws = dm.services.get("Workspace").copied()?;
-        let cam = match dm.get_prop(ws, "CurrentCamera") {
-            Some(Val::Ref(Some(c))) => *c,
-            _ => return None,
-        };
-        if dm.era == 2018 {
-            let us = self.host.as_ref().and_then(|h| h.user_settings_id())?;
-            let gs = dm.find_child(us, "GameSettings", false)?;
-            if !matches!(dm.get_prop(gs, "RotationType"), Some(Val::Num(n)) if (*n as i64) == 1) {
-                return None;
-            }
-            return match dm.get_prop(cam, "CFrame") {
-                Some(Val::Arr(c)) if c.len() >= 12 && c[5].hypot(c[11]) > 1e-3 => Some([-c[5], 0.0, -c[11]]),
-                _ => None,
-            };
-        }
-        if !(pointer_locked && (self.cam.shift_lock || self.cam.first_person)) {
-            return None;
-        }
-        let t = match dm.get_prop(cam, "CameraType") {
-            Some(Val::Num(n)) => *n as i64,
-            _ => 0,
-        };
-        if t == 6 || t == 0 {
-            return None;
-        }
-        Some(self.cam.forward_flat())
-    }
-
                 if kind == "gamepass" {
                     h.fire(mps, "PromptGamePassPurchaseFinished", vec![Wire::I(lp), Wire::N(id as f64), Wire::B(ok)]);
                 } else if kind == "asset" {
@@ -1089,10 +1544,6 @@ impl LuaVm {
                     h.fire(mps, "PromptProductPurchaseFinished", vec![Wire::N(uid.unwrap_or(0.0)), Wire::N(id as f64), Wire::B(ok)]);
                 }
             }
-        let face = self.face_dir(pointer_locked);
-        if let Some(c) = self.chars.as_mut() {
-            c.face = face;
-        }
         }
     }
 
@@ -1308,6 +1759,15 @@ impl LuaVm {
         String::new()
     }
 
+    pub fn debug_state(&self) -> String {
+        let rs = self.dm.borrow().services.get("RunService").copied();
+        let l = |n: &str| match (rs, self.host.as_ref()) {
+            (Some(r), Some(h)) => h.has_listener(r, n),
+            _ => false,
+        };
+        serde_json::json!({"removed": self.core.borrow().loading_removed, "lm": self.core.borrow().lua_move, "keys": self.core.borrow().keys_code.len(), "era": self.dm.borrow().era, "rs": l("RenderStepped"), "hb": l("Heartbeat"), "st": l("Stepped"), "t": self.t, "touches": self.touches.len(), "rot": self.core.borrow().cam_rot.len(), "tj": self.core.borrow().touch_jump, "tm": self.core.borrow().touch_move}).to_string()
+    }
+
     pub fn dump_named(&self, name: &str) -> String {
         let d = self.dm.borrow();
         let mut all = vec![];
@@ -1324,7 +1784,7 @@ impl LuaVm {
                     Some(Val::Arr(a)) => serde_json::json!(a),
                     _ => serde_json::Value::Null,
                 };
-                serde_json::json!({"n": d.full_name(i), "c": d.get(i).map(|x| x.class.clone()), "t": t, "p": pos, "s": match d.get_prop(i, "Size") { Some(Val::Arr(a)) => serde_json::json!(a), _ => serde_json::Value::Null }, "v": d.get_prop(i, "Visible").map(|v| matches!(v, Val::Bool(true))), "a": match d.get_prop(i, "AbsoluteSize") { Some(Val::Arr(a)) => serde_json::json!(a), _ => serde_json::Value::Null }, "id": i})
+                serde_json::json!({"n": d.full_name(i), "c": d.get(i).map(|x| x.class.clone()), "t": t, "p": pos, "s": match d.get_prop(i, "Size") { Some(Val::Arr(a)) => serde_json::json!(a), _ => serde_json::Value::Null }, "v": d.get_prop(i, "Visible").map(|v| matches!(v, Val::Bool(true))), "a": match d.get_prop(i, "AbsoluteSize") { Some(Val::Arr(a)) => serde_json::json!(a), _ => serde_json::Value::Null }, "bt": d.get_prop(i, "BackgroundTransparency").map(|v| matches!(v, Val::Num(n) if *n > 0.5)), "id": i})
             })
             .collect();
         serde_json::to_string(&v).unwrap_or_default()
@@ -1434,6 +1894,24 @@ impl LuaVm {
             if let Some(ch) = self.chars.as_mut() {
                 if ch.own.as_ref().map(|o| o.hum == hum).unwrap_or(false) {
                     ch.move_to = pos;
+                }
+            }
+        }
+        {
+            let now = self.t;
+            let dead: Vec<u32> = self.io_destroy.iter().filter(|(_, t)| *t <= now).map(|(i, _)| *i).collect();
+            self.io_destroy.retain(|(_, t)| *t > now);
+            let mut dm = self.dm.borrow_mut();
+            for i in dead {
+                dm.destroy(i);
+            }
+            let uis = dm.services.get("UserInputService").copied();
+            if let Some(u) = uis {
+                if let Some(Val::Num(b)) = dm.get_prop(u, "MouseBehavior") {
+                    if *b != self.last_behavior {
+                        self.last_behavior = *b;
+                        self.behavior_req = Some(*b as i32);
+                    }
                 }
             }
         }
@@ -1664,16 +2142,42 @@ fn control_button(dm: &mut DataModel, parent: u32, name: &str, image: &str, pos:
     gui(dm, "ImageButton", name, Some(parent), &[("Image", Val::Str(format!("rbxasset://textures/{}.png", image))), ("BackgroundTransparency", Val::Num(1.0)), ("Position", ud(pos)), ("Size", ud(size)), ("ZIndex", Val::Num(2.0))]);
 }
 
-fn build_control_frame(dm: &mut DataModel, robloxgui: u32) {
+fn kid_named(dm: &DataModel, parent: u32, name: &str) -> Option<u32> {
+    dm.get(parent).and_then(|i| i.children.iter().copied().find(|c| dm.name(*c) == name))
+}
+
+fn build_leave_menu(dm: &mut DataModel, cf: u32, hidden: bool) -> Option<[u32; 5]> {
+    let img = |n: &str| Val::Str(format!("rbxasset://textures/ui/{}.png", n));
     let t = |v: f64| ("BackgroundTransparency", Val::Num(v));
+    let leave = gui(dm, "ImageButton", "LeaveButton", Some(cf), &[("Image", img("LeaveMenuLeaveBtn")), t(1.0), ("Position", ud([0.0, 6.0, 0.0, 6.0])), ("Size", ud([0.0, 150.0, 0.0, 56.0])), ("ZIndex", Val::Num(8.0))])?;
+    let shield = gui(dm, "TextButton", "LeaveMenuShield", Some(cf), &[("Text", Val::Str(String::new())), ("AutoButtonColor", Val::Bool(false)), ("Active", Val::Bool(true)), ("Visible", Val::Bool(false)), ("BackgroundColor3", Val::Arr(vec![0.0, 0.0, 0.0])), t(0.5), ("BorderSizePixel", Val::Num(0.0)), ("Size", ud([1.0, 0.0, 1.0, 0.0])), ("ZIndex", Val::Num(9.0))])?;
+    let menu = gui(dm, "ImageLabel", "LeaveMenu", Some(shield), &[("Image", img("LeaveMenuBkgd")), t(1.0), ("Position", ud([0.5, -220.0, 0.5, -160.0])), ("Size", ud([0.0, 440.0, 0.0, 256.0])), ("ZIndex", Val::Num(9.0))])?;
+    gui(dm, "TextLabel", "Title", Some(menu), &[("Text", Val::Str("Leave this game?".into())), t(1.0), ("Position", ud([0.0, 0.0, 0.0, 40.0])), ("Size", ud([1.0, 0.0, 0.0, 60.0])), ("Font", Val::Num(2.0)), ("FontSize", Val::Num(7.0)), ("TextColor3", Val::Arr(vec![1.0, 1.0, 1.0])), ("ZIndex", Val::Num(10.0))]);
+    let yes = gui(dm, "ImageButton", "Leave", Some(menu), &[("Image", img("LeaveMenuLeaveBtn")), t(1.0), ("Position", ud([0.5, -160.0, 1.0, -86.0])), ("Size", ud([0.0, 150.0, 0.0, 56.0])), ("ZIndex", Val::Num(10.0))])?;
+    let no = gui(dm, "ImageButton", "Cancel", Some(menu), &[("Image", img("LeaveMenuCancelBtn")), t(1.0), ("Position", ud([0.5, 10.0, 1.0, -86.0])), ("Size", ud([0.0, 150.0, 0.0, 56.0])), ("ZIndex", Val::Num(10.0))])?;
+    let toggle = gui(dm, "TextButton", "HideMenuButton", Some(menu), &[("Text", Val::Str("Hide menu button".into())), ("BackgroundColor3", Val::Arr(vec![0.2, 0.2, 0.2])), t(0.3), ("BorderSizePixel", Val::Num(0.0)), ("Position", ud([0.5, -110.0, 0.0, 120.0])), ("Size", ud([0.0, 220.0, 0.0, 36.0])), ("Font", Val::Num(2.0)), ("FontSize", Val::Num(5.0)), ("TextColor3", Val::Arr(vec![1.0, 1.0, 1.0])), ("ZIndex", Val::Num(10.0))])?;
+    if hidden {
+        dm.set_prop_quiet(leave, "Visible", Val::Bool(false));
+    }
+    Some([leave, shield, yes, no, toggle])
+}
+
+fn menu_hidden() -> bool {
+    web_sys::window().and_then(|w| w.local_storage().ok().flatten()).and_then(|s| s.get_item("swirl-touch-menu").ok().flatten()).map(|v| v == "hidden").unwrap_or(false)
+}
+
+fn build_control_frame(dm: &mut DataModel, robloxgui: u32, touch: bool) -> (Vec<u32>, Option<[u32; 5]>) {
+    let t = |v: f64| ("BackgroundTransparency", Val::Num(v));
+    let mut exits = vec![];
     let cf = match gui(dm, "Frame", "ControlFrame", Some(robloxgui), &[t(1.0), ("Size", ud([1.0, 0.0, 1.0, 0.0]))]) {
         Some(c) => c,
-        None => return,
+        None => return (exits, None),
     };
     if let Some(bl) = gui(dm, "Frame", "BottomLeftControl", Some(cf), &[t(1.0), ("Position", ud([0.0, 0.0, 1.0, -50.0])), ("Size", ud([0.0, 130.0, 0.0, 50.0]))]) {
         control_button(dm, bl, "Exit", "Exit", [0.0, 0.0, 0.0, -1.0], [0.0, 70.0, 0.0, 51.0]);
     }
-    if let Some(br) = gui(dm, "Frame", "BottomRightControl", Some(cf), &[t(1.0), ("Position", ud([1.0, -50.0, 1.0, -48.0])), ("Size", ud([0.0, 48.0, 0.0, 46.0]))]) {
+    if touch {
+    } else if let Some(br) = gui(dm, "Frame", "BottomRightControl", Some(cf), &[t(1.0), ("Position", ud([1.0, -50.0, 1.0, -48.0])), ("Size", ud([0.0, 48.0, 0.0, 46.0]))]) {
         control_button(dm, br, "CameraTiltUp", "CameraTiltUp", [0.0, 2.0, 0.0, 0.0], [0.0, 22.0, 0.0, 22.0]);
         control_button(dm, br, "CameraTiltDown", "CameraTiltDown", [0.0, 2.0, 0.0, 23.0], [0.0, 22.0, 0.0, 22.0]);
         control_button(dm, br, "CameraZoomIn", "CameraZoomIn", [0.0, 25.0, 0.0, 0.0], [0.0, 22.0, 0.0, 22.0]);
@@ -1683,9 +2187,18 @@ fn build_control_frame(dm: &mut DataModel, robloxgui: u32) {
         control_button(dm, tl, "Help", "Help", [0.0, 0.0, 0.0, 0.0], [0.0, 45.0, 0.0, 51.0]);
         control_button(dm, tl, "Exit", "Exit", [0.0, 45.0, 0.0, 0.0], [0.0, 70.0, 0.0, 51.0]);
     }
+    for p in [kid_named(dm, cf, "BottomLeftControl"), kid_named(dm, cf, "TopLeftControl")].into_iter().flatten() {
+        if let Some(e) = kid_named(dm, p, "Exit") {
+            exits.push(e);
+        }
+    }
+    let menu = if touch { build_leave_menu(dm, cf, menu_hidden()) } else { None };
+    (exits, menu)
 }
 
-fn boot(dm: &mut DataModel, screen: [f64; 2]) -> Option<u32> {
+fn boot(dm: &mut DataModel, screen: [f64; 2], touch: bool) -> (Option<u32>, Vec<u32>, Option<[u32; 5]>) {
+    let mut exits = vec![];
+    let mut menu = None;
     let mut mouse_id = None;
     for s in ["ScriptContext", "GuiService", "LogService", "MarketplaceService", "TeleportService", "InsertService", "ChangeHistoryService", "PersonalServerService", "PointsService", "HttpService", "ContextActionService", "NetworkClient", "CollectionService", "LocalBackpack", "CoreGui", "UserInputService", "RunService"] {
         let _ = dm.service(s);
@@ -1711,11 +2224,13 @@ fn boot(dm: &mut DataModel, screen: [f64; 2]) -> Option<u32> {
     if let Some(cg) = dm.services.get("CoreGui").copied() {
         if let Some(g) = gui(dm, "ScreenGui", "RobloxGui", Some(cg), &[("AbsoluteSize", Val::Arr(vec![screen[0], screen[1]]))]) {
             if dm.era != 2018 {
-                build_control_frame(dm, g);
+                let r = build_control_frame(dm, g, touch);
+                exits = r.0;
+                menu = r.1;
             }
         }
     }
-    mouse_id
+    (mouse_id, exits, menu)
 }
 
 fn flag_true(dm: &DataModel, id: u32, k: &str) -> bool {
@@ -1768,4 +2283,37 @@ fn json_to_wire(j: &serde_json::Value) -> swirl_lua::host::Wire {
         serde_json::Value::Array(a) => Wire::List(a.iter().map(json_to_wire).collect()),
         serde_json::Value::Object(o) => Wire::Dict(o.iter().map(|(k, v)| (k.clone(), json_to_wire(v))).collect()),
     }
+}
+
+fn key_name(code: &str) -> Option<String> {
+    let fixed = [
+        ("Backspace", "Backspace"), ("Tab", "Tab"), ("Enter", "Return"), ("NumpadEnter", "KeypadEnter"), ("Escape", "Escape"), ("Space", "Space"),
+        ("Quote", "Quote"), ("Comma", "Comma"), ("Minus", "Minus"), ("Period", "Period"), ("Slash", "Slash"), ("Semicolon", "Semicolon"), ("Equal", "Equals"),
+        ("BracketLeft", "LeftBracket"), ("Backslash", "BackSlash"), ("BracketRight", "RightBracket"), ("Backquote", "Backquote"),
+        ("Delete", "Delete"), ("Insert", "Insert"), ("Home", "Home"), ("End", "End"), ("PageUp", "PageUp"), ("PageDown", "PageDown"),
+        ("ArrowUp", "Up"), ("ArrowDown", "Down"), ("ArrowLeft", "Left"), ("ArrowRight", "Right"),
+        ("ShiftLeft", "LeftShift"), ("ShiftRight", "RightShift"), ("ControlLeft", "LeftControl"), ("ControlRight", "RightControl"),
+        ("AltLeft", "LeftAlt"), ("AltRight", "RightAlt"), ("MetaLeft", "LeftSuper"), ("MetaRight", "RightSuper"), ("CapsLock", "CapsLock"),
+        ("NumLock", "NumLock"), ("ScrollLock", "ScrollLock"), ("Pause", "Pause"), ("PrintScreen", "Print"),
+        ("NumpadDecimal", "KeypadPeriod"), ("NumpadDivide", "KeypadDivide"), ("NumpadMultiply", "KeypadMultiply"), ("NumpadSubtract", "KeypadMinus"), ("NumpadAdd", "KeypadPlus"),
+    ];
+    if let Some((_, n)) = fixed.iter().find(|(c, _)| *c == code) {
+        return Some(n.to_string());
+    }
+    let digits = ["Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine"];
+    if let Some(d) = code.strip_prefix("Digit").and_then(|d| d.parse::<usize>().ok()).filter(|d| *d < 10) {
+        return Some(digits[d].to_string());
+    }
+    if let Some(d) = code.strip_prefix("Numpad").and_then(|d| d.parse::<usize>().ok()).filter(|d| *d < 10) {
+        return Some(format!("Keypad{}", digits[d]));
+    }
+    if let Some(l) = code.strip_prefix("Key") {
+        if l.len() == 1 {
+            return Some(l.to_string());
+        }
+    }
+    if let Some(n) = code.strip_prefix('F').and_then(|n| n.parse::<u32>().ok()).filter(|n| (1..=15).contains(n)) {
+        return Some(format!("F{}", n));
+    }
+    None
 }

@@ -43,7 +43,17 @@ pub struct CoreState {
     pub own_seat: Option<InstId>,
     pub modes: HashMap<(InstId, String), Vec<f64>>,
     pub loading_removed: bool,
+    pub keys_down: std::collections::HashSet<i64>,
+    pub buttons_down: std::collections::HashSet<i32>,
+    pub mouse_delta: [f64; 2],
+    pub last_input: f64,
     pub lua_move: Option<[f64; 3]>,
+    pub touch: bool,
+    pub touch_settings: bool,
+    pub touch_move: Option<[f64; 2]>,
+    pub touch_jump: bool,
+    pub cam_rot: Vec<[f64; 2]>,
+    pub cam_zoom: Vec<f64>,
     pub cam_interp: Option<(InstId, [f64; 12], [f64; 12], Option<[f64; 3]>, f64, f64)>,
 }
 
@@ -374,7 +384,12 @@ impl ApiHandler for ClientApi {
                     Some(Wire::S(n)) => n.clone(),
                     _ => "CoreScript".to_string(),
                 };
-                self.core.borrow_mut().queue.push((cid, parent, name));
+                let mut c = self.core.borrow_mut();
+                if c.touch && cid == 153556783 && !c.touch_settings {
+                    c.touch_settings = true;
+                    c.queue.push((46295863, parent, "CoreScripts/Settings".to_string()));
+                }
+                c.queue.push((cid, parent, name));
                 ok(vec![])
             }
             "AddStarterScript" if class == "ScriptContext" => {
@@ -449,7 +464,11 @@ impl ApiHandler for ClientApi {
                 ok(vec![])
             }
             "OpenBrowserWindow" | "CloseBrowserWindow" if class == "GuiService" => ok(vec![]),
-            "IsTenFootInterface" | "IsTouchDevice" if class == "GuiService" => ok(vec![Wire::B(false)]),
+            "IsTenFootInterface" if class == "GuiService" => ok(vec![Wire::B(false)]),
+            "IsTouchDevice" if class == "GuiService" => {
+                let t = self.core.borrow().touch;
+                ok(vec![Wire::B(t)])
+            }
             "GetTeams" if class == "Teams" => {
                 let kids: Vec<Wire> = d.get(id).map(|i| i.children.iter().copied().filter(|c| d.get(*c).map(|x| x.class == "Team").unwrap_or(false)).map(Wire::I).collect()).unwrap_or_default();
                 ok(vec![Wire::List(kids)])
@@ -580,8 +599,45 @@ impl ApiHandler for ClientApi {
                 let m = self.core.borrow().mouse_pos;
                 ok(vec![Wire::V2(m)])
             }
-            "IsLuaTouchControls" if class == "UserInputService" => ok(vec![Wire::B(false)]),
-            "RotateCamera" | "ZoomCamera" if class == "UserInputService" => ok(vec![]),
+            "IsLuaTouchControls" if class == "UserInputService" => {
+                let t = self.core.borrow().touch;
+                ok(vec![Wire::B(t)])
+            }
+            "RotateCamera" if class == "UserInputService" => {
+                if let Some(Wire::V2(v)) = args.first() {
+                    self.core.borrow_mut().cam_rot.push(*v);
+                }
+                ok(vec![])
+            }
+            "ZoomCamera" if class == "UserInputService" => {
+                let z = num(args, 0).unwrap_or(0.0);
+                self.core.borrow_mut().cam_zoom.push(z);
+                ok(vec![])
+            }
+            "MoveCharacter" if class == "Player" => {
+                if d.local_player != Some(id) {
+                    return ok(vec![]);
+                }
+                let v = match args.first() {
+                    Some(Wire::V2(v)) => *v,
+                    _ => return ok(vec![]),
+                };
+                let m = num(args, 1).unwrap_or(1.0).abs().max(1e-3);
+                let (mut x, mut y) = (v[0] / m, v[1] / m);
+                let len = (x * x + y * y).sqrt();
+                if len > 1.0 {
+                    x /= len;
+                    y /= len;
+                }
+                self.core.borrow_mut().touch_move = if len < 1e-3 { None } else { Some([x, y]) };
+                ok(vec![])
+            }
+            "JumpCharacter" if class == "Player" => {
+                if d.local_player == Some(id) {
+                    self.core.borrow_mut().touch_jump = true;
+                }
+                ok(vec![])
+            }
             "Create" if class == "TweenService" => ok(vec![Wire::Nil]),
             "Message" if class == "TestService" => ok(vec![]),
             "Check" | "Require" | "Fail" | "Error" | "Warn" | "Checkpoint" | "Done" if class == "TestService" => ok(vec![]),
