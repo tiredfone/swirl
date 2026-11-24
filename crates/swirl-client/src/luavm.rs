@@ -66,6 +66,7 @@ pub struct LuaVm {
     exit_btns: Vec<u32>,
     leave_req: bool,
     clicks: Vec<u32>,
+    own_cam: Option<u32>,
 }
 
 struct TouchRec {
@@ -89,7 +90,7 @@ impl LuaVm {
         let mut dm = DataModel::new("client");
         dm.local_alloc = true;
         let dm = Rc::new(RefCell::new(dm));
-        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), gui: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), screen: [800.0, 600.0], gui_dom: None, gui_dirty: true, cam: Default::default(), init_terrain: None, terrain_keys: vec![], bridge: Default::default(), hidden: Default::default(), now_ms: 0.0, friends: Default::default(), tags: None, tools: Default::default(), remote_moved: Default::default(), fired_later: vec![], t: 0.0, pack: Default::default(), io_keys: Default::default(), io_btn: Default::default(), io_move: None, io_wheel: None, io_destroy: vec![], last_behavior: 0.0, behavior_req: None, touches: Default::default(), menu: None, exit_btns: vec![], leave_req: false, clicks: vec![] })
+        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), gui: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), screen: [800.0, 600.0], gui_dom: None, gui_dirty: true, cam: Default::default(), init_terrain: None, terrain_keys: vec![], bridge: Default::default(), hidden: Default::default(), now_ms: 0.0, friends: Default::default(), tags: None, tools: Default::default(), remote_moved: Default::default(), fired_later: vec![], t: 0.0, pack: Default::default(), io_keys: Default::default(), io_btn: Default::default(), io_move: None, io_wheel: None, io_destroy: vec![], last_behavior: 0.0, behavior_req: None, touches: Default::default(), menu: None, exit_btns: vec![], leave_req: false, clicks: vec![], own_cam: None })
     }
 
     fn make_io(&mut self, ty: &str, key: i64) -> Option<u32> {
@@ -202,7 +203,13 @@ impl LuaVm {
     }
 
     pub fn set_touch(&mut self, on: bool) {
-        self.core.borrow_mut().touch = on;
+        {
+            let mut c = self.core.borrow_mut();
+            c.touch = on;
+            if c.last_input == 0.0 {
+                c.last_input = swirl_core::classes::enum_value("UserInputType", if on { "Touch" } else { "Keyboard" }).unwrap_or(8) as f64;
+            }
+        }
         let mut dm = self.dm.borrow_mut();
         if let Some(u) = dm.services.get("UserInputService").copied() {
             dm.set_prop_quiet(u, "TouchEnabled", Val::Bool(on));
@@ -307,6 +314,19 @@ impl LuaVm {
             }
         }
         let _ = targets;
+    }
+
+    pub fn abs_of(&self, name: &str) -> String {
+        let dm = self.dm.borrow();
+        let mut all = vec![];
+        dm.descendants(dm.root, &mut all);
+        all.into_iter().filter(|i| dm.name(*i) == name).map(|id| format!("{}:{:?}:{:?}", id, dm.get_prop(id, "AbsolutePosition"), dm.get_prop(id, "AbsoluteSize"))).collect::<Vec<_>>().join(";")
+    }
+
+    pub fn touch_hits(&self, x: f64, y: f64, k: f64) -> String {
+        let [x, y] = self.touch_xy(x, y, k);
+        let dm = self.dm.borrow();
+        serde_json::to_string(&self.gui_hits(x, y).into_iter().take(12).map(|g| format!("{}:{}{}", dm.name(g), dm.get(g).map(|i| i.class.clone()).unwrap_or_default(), if matches!(dm.get_prop(g, "Active"), Some(Val::Bool(true))) { ":A" } else { "" })).collect::<Vec<_>>()).unwrap_or_default()
     }
 
     pub fn touch_down(&mut self, id: i32, x: f64, y: f64, k: f64) -> bool {
@@ -528,6 +548,10 @@ impl LuaVm {
                     let (mouse, exits, menu) = boot(&mut dm, self.screen, touch);
                     self.exit_btns = exits;
                     self.menu = menu;
+                    self.own_cam = dm.services.get("Workspace").copied().and_then(|w| match dm.get_prop(w, "CurrentCamera") {
+                        Some(Val::Ref(Some(c))) => Some(*c),
+                        _ => None,
+                    });
                     self.core.borrow_mut().mouse = mouse;
                     if dm.era != 2018 {
                         let sc = dm.services.get("ScriptContext").copied();
@@ -1852,6 +1876,19 @@ impl LuaVm {
     pub fn update(&mut self, dt: f64, mx: f64, mz: f64, jump: bool) {
         self.t += dt;
         swirl_lua::clock::set_now(self.t);
+        if let Some(oc) = self.own_cam {
+            let mut dm = self.dm.borrow_mut();
+            if let Some(ws) = dm.services.get("Workspace").copied() {
+                if !matches!(dm.get_prop(ws, "CurrentCamera"), Some(Val::Ref(Some(c))) if *c == oc) {
+                    dm.set_prop_quiet(ws, "CurrentCamera", Val::Ref(Some(oc)));
+                }
+            }
+            if let Some(hum) = self.chars.as_ref().and_then(|c| c.own.as_ref()).map(|o| o.hum) {
+                if !matches!(dm.get_prop(oc, "CameraSubject"), Some(Val::Ref(Some(h))) if *h == hum) {
+                    let _ = dm.set_prop(oc, "CameraSubject", Val::Ref(Some(hum)));
+                }
+            }
+        }
         self.drain_core();
         self.drain_market();
         {
@@ -1987,6 +2024,9 @@ impl LuaVm {
                     h.fire(rs, ev, vec![swirl_lua::host::Wire::N(dt)]);
                 }
             }
+        }
+        if let Some(h) = self.host.as_mut() {
+            h.render_step(dt);
         }
         if self.host.is_some() {
             let mut dm = self.dm.borrow_mut();

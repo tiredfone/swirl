@@ -491,6 +491,8 @@ impl Gui {
             style(&self.screen, "--ch-k", &format!("{}", k));
         }
         let [l, t, r, b] = inset;
+        let era18 = d.era == 2018;
+        let (t, top18) = if era18 { (0.0, if t != 0.0 { t } else { 36.0 }) } else { (t, 0.0) };
         let w = (sw - l - r).max(0.0);
         let h = (sh - t - b).max(0.0);
         let mut live: HashSet<InstId> = HashSet::new();
@@ -512,9 +514,12 @@ impl Gui {
         let screen = self.screen.clone();
         for (order, sg) in guis.into_iter().enumerate() {
             let _ = order;
+            let ignore = flag(d, sg, "IgnoreGuiInset", false);
+            let top = if era18 && !ignore { top18 } else { 0.0 };
+            let gh = (h - top).max(0.0);
             let abs = arr2(d, sg, "AbsoluteSize", [-1.0, -1.0]);
-            if abs[0] != w || abs[1] != h {
-                d.set_prop_quiet(sg, "AbsoluteSize", Val::Arr(vec![w, h]));
+            if abs[0] != w || abs[1] != gh {
+                d.set_prop_quiet(sg, "AbsoluteSize", Val::Arr(vec![w, gh]));
                 fired.push((sg, "Changed", vec![Wire::S("AbsoluteSize".into())]));
                 fired.push((sg, "P:AbsoluteSize", vec![]));
             }
@@ -527,8 +532,9 @@ impl Gui {
             let el = self.nodes[&sg].el.clone();
             style(&el, "z-index", &format!("{}", z));
             style(&el, "display", if flag(d, sg, "Enabled", true) { "" } else { "none" });
-            style(&el, "inset", &format!("{}px {}px {}px {}px", t, r, b, l));
-            self.layout_children(d, sg, [l, t], [w, h], &mut live, fired);
+            style(&el, "inset", &format!("{}px {}px {}px {}px", t + top, r, b, l));
+            let origin = if era18 { [l, if ignore { -top18 } else { 0.0 }] } else { [l, t] };
+            self.layout_children(d, sg, origin, [w, gh], &mut live, fired);
         }
         let mut hint_text: Option<String> = None;
         let mut msg_text: Option<String> = self.forced_message.clone().filter(|m| !m.is_empty());

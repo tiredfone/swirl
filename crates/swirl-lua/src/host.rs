@@ -87,6 +87,7 @@ pub struct Host {
     st: Rc<RefCell<State>>,
     step: Function,
     ext: Function,
+    last_tick: Option<f64>,
 }
 
 const METHODS: &[&str] = &[
@@ -1381,7 +1382,7 @@ impl Host {
                 "now",
                 lua.create_function(move |_, what: Option<String>| {
                     if what.as_deref() == Some("tick") {
-                        Ok(crate::clock::wall())
+                        Ok(crate::clock::tick())
                     } else {
                         Ok(st2.borrow().t0.elapsed())
                     }
@@ -1398,7 +1399,7 @@ impl Host {
             ext.call::<()>((include_str!("../data/runtime2018.lua"), "runtime2018"))?;
         }
         let ext: Function = rt.get("extend")?;
-        Ok(Host { lua, dm, st, step, ext })
+        Ok(Host { lua, dm, st, step, ext, last_tick: None })
     }
 
     pub fn set_handler(&mut self, h: Box<dyn ApiHandler>) {
@@ -1447,8 +1448,30 @@ impl Host {
                 st.queue.push(Q::Stop(i));
             }
         }
+        let dt = self.last_tick.map(|l| (t - l).max(0.0)).unwrap_or(0.0);
+        self.last_tick = Some(t);
+        self.ext_call("step", t, dt);
         if let Err(e) = self.step.call::<()>(t) {
             self.st.borrow_mut().logs.push(LogLine { kind: "error".into(), msg: format!("scheduler: {}", e), id: 0 });
+        }
+    }
+
+    pub fn render_step(&mut self, dt: f64) {
+        let t = self.last_tick.unwrap_or(0.0);
+        self.ext_call("renderStep", t, dt);
+    }
+
+    fn ext_call(&mut self, name: &str, t: f64, dt: f64) {
+        let ext: mlua::Value = match self.lua.globals().get("__EXT") {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        if let mlua::Value::Table(tb) = ext {
+            if let Ok(f) = tb.get::<Function>(name) {
+                if let Err(e) = f.call::<()>((t, dt)) {
+                    self.st.borrow_mut().logs.push(LogLine { kind: "error".into(), msg: format!("{}: {}", name, e), id: 0 });
+                }
+            }
         }
     }
 

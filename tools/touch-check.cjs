@@ -31,6 +31,8 @@ const srv = http.createServer((req, res) => {
     res.end();
   });
 });
+const [TX, TY] = (process.env.TS || '73,287').split(',').map(Number);
+const [JX, JY] = (process.env.JB || '720,277').split(',').map(Number);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 srv.listen(0, async () => {
   const port = srv.address().port;
@@ -40,7 +42,7 @@ srv.listen(0, async () => {
   await pg.setViewport({ width: 844, height: 390, isMobile: true, hasTouch: true, deviceScaleFactor: 1 });
   const errs = [];
   pg.on('pageerror', (e) => errs.push(String(e).slice(0, 300)));
-  await pg.goto(`http://127.0.0.1:${port}/?swirlws=` + encodeURIComponent('ws://127.0.0.1:' + wsPort + '/ws'), { waitUntil: 'domcontentloaded' });
+  await pg.goto(`http://127.0.0.1:${port}/?${process.env.QS || ''}&swirlws=` + encodeURIComponent('ws://127.0.0.1:' + wsPort + '/ws'), { waitUntil: 'domcontentloaded' });
   await sleep(+process.env.SETTLE || 12000);
   const own = () => pg.evaluate(() => { const o = JSON.parse(window.solarApp.vm.own_state()); return o && { x: o.cf[0], y: o.cf[1], z: o.cf[2], state: o.state }; });
   const cam = () => pg.evaluate(() => window.solarApp.vm.cam_state());
@@ -53,8 +55,9 @@ srv.listen(0, async () => {
   await r.end();
   await sleep(2000);
   const c1pre = await cam();
-  const t = await pg.touchscreen.touchStart(73, 287);
-  for (let i = 1; i <= 6; i++) { await t.move(73 + i * 6, 287 - i * 8); await sleep(60); }
+  fs.writeFileSync(out + '-c.png', await pg.screenshot());
+  const t = await pg.touchscreen.touchStart(TX, TY);
+  for (let i = 1; i <= 6; i++) { await t.move(TX + i * 6, TY - i * 8); await sleep(60); }
   await sleep(1200);
   const pMove = await own();
   fs.writeFileSync(out + '-1.png', await pg.screenshot());
@@ -62,7 +65,7 @@ srv.listen(0, async () => {
   await sleep(500);
   const pStop = await own();
   const c1 = c1pre;
-  const jumpT = await pg.touchscreen.touchStart(720, 277);
+  const jumpT = await pg.touchscreen.touchStart(JX, JY);
   const pJump = [];
   for (let i = 0; i < 10; i++) { await sleep(250); const o = await own(); pJump.push(+o.y.toFixed(2)); }
   await jumpT.end();
