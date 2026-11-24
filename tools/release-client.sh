@@ -27,6 +27,17 @@ if ! TOL=${SPEC_TOL:-0.001} node tools/movement-spec-compare.cjs; then
     echo "controller parity failed for $version; not made current"
     exit 1
 fi
+echo "2018 app path check (Esc menu text, Players row, walk animation):"
+SWIRL_DEV_R15=1 ./target/release/swirl-server --port=4393 --place=3 --era=2018 --no-redeem > /tmp/swirl/mv/app2018-server.log 2>&1 &
+APP2018_PID=$!
+sleep 3
+if ! DIST="$out" timeout 150 node tools/app2018-check.cjs 4393 app; then
+    kill $APP2018_PID 2>/dev/null
+    echo "2018 app path check failed for $version; not made current"
+    exit 1
+fi
+kill $APP2018_PID 2>/dev/null
+wait $APP2018_PID 2>/dev/null
 if ! WALK=1 node tools/browser-check.cjs "$place" "$version" "/tmp/swirl/release-$version.png" > "/tmp/swirl/release-$version.json" 2>&1; then
     echo "browser check failed for $version, see /tmp/swirl/release-$version.json and .png; not made current"
     exit 1

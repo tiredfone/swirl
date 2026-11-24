@@ -2012,6 +2012,9 @@ impl LuaVm {
             let mut dm = self.dm.borrow_mut();
             st.an.step(&mut dm, dt)
         };
+        if let Some(ch) = self.chars.as_ref() {
+            ch.ph.borrow_mut().anim_cf = self.anim.borrow().an.anim.clone();
+        }
         if let Some(h) = self.host.as_mut() {
             for e in events {
                 let args = e.arg.map(|a| vec![swirl_lua::host::Wire::S(a)]).unwrap_or_default();
