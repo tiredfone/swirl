@@ -37,7 +37,7 @@ if ! DIST="$out" timeout 150 node tools/app2018-check.cjs 4393 app; then
     exit 1
 fi
 kill $APP2018_PID 2>/dev/null
-wait $APP2018_PID 2>/dev/null
+wait $APP2018_PID 2>/dev/null || true
 if ! WALK=1 node tools/browser-check.cjs "$place" "$version" "/tmp/swirl/release-$version.png" > "/tmp/swirl/release-$version.json" 2>&1; then
     echo "browser check failed for $version, see /tmp/swirl/release-$version.json and .png; not made current"
     exit 1
