@@ -17,6 +17,16 @@ if ! DIST="$out" node tools/movement-parity.cjs "/tmp/swirl/mv/parity-$version.j
     echo "movement parity failed for $version; not made current"
     exit 1
 fi
+echo "controller parity (Rust against Chocolate, R6 2012 and R15 2018):"
+cargo build --release -p swirl-server --example move_trace > /dev/null 2>&1 || { echo "move_trace build failed"; exit 1; }
+for v in r6 r15; do
+    node tools/movement-spec-run.mjs /var/www/html/chocolate $v /tmp/swirl/mv/js-$v.json
+    ./target/release/examples/move_trace tools/movement-spec.json $v /tmp/swirl/mv/rs-$v.json
+done
+if ! TOL=${SPEC_TOL:-0.001} node tools/movement-spec-compare.cjs; then
+    echo "controller parity failed for $version; not made current"
+    exit 1
+fi
 if ! WALK=1 node tools/browser-check.cjs "$place" "$version" "/tmp/swirl/release-$version.png" > "/tmp/swirl/release-$version.json" 2>&1; then
     echo "browser check failed for $version, see /tmp/swirl/release-$version.json and .png; not made current"
     exit 1

@@ -1050,6 +1050,37 @@ impl LuaVm {
                 }
             }
             for (kind, _who, id, ok) in finished {
+    fn face_dir(&self, pointer_locked: bool) -> Option<[f64; 3]> {
+        let dm = self.dm.borrow();
+        let ws = dm.services.get("Workspace").copied()?;
+        let cam = match dm.get_prop(ws, "CurrentCamera") {
+            Some(Val::Ref(Some(c))) => *c,
+            _ => return None,
+        };
+        if dm.era == 2018 {
+            let us = self.host.as_ref().and_then(|h| h.user_settings_id())?;
+            let gs = dm.find_child(us, "GameSettings", false)?;
+            if !matches!(dm.get_prop(gs, "RotationType"), Some(Val::Num(n)) if (*n as i64) == 1) {
+                return None;
+            }
+            return match dm.get_prop(cam, "CFrame") {
+                Some(Val::Arr(c)) if c.len() >= 12 && c[5].hypot(c[11]) > 1e-3 => Some([-c[5], 0.0, -c[11]]),
+                _ => None,
+            };
+        }
+        if !(pointer_locked && (self.cam.shift_lock || self.cam.first_person)) {
+            return None;
+        }
+        let t = match dm.get_prop(cam, "CameraType") {
+            Some(Val::Num(n)) => *n as i64,
+            _ => 0,
+        };
+        if t == 6 || t == 0 {
+            return None;
+        }
+        Some(self.cam.forward_flat())
+    }
+
                 if kind == "gamepass" {
                     h.fire(mps, "PromptGamePassPurchaseFinished", vec![Wire::I(lp), Wire::N(id as f64), Wire::B(ok)]);
                 } else if kind == "asset" {
@@ -1058,6 +1089,10 @@ impl LuaVm {
                     h.fire(mps, "PromptProductPurchaseFinished", vec![Wire::N(uid.unwrap_or(0.0)), Wire::N(id as f64), Wire::B(ok)]);
                 }
             }
+        let face = self.face_dir(pointer_locked);
+        if let Some(c) = self.chars.as_mut() {
+            c.face = face;
+        }
         }
     }
 

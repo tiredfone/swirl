@@ -265,7 +265,7 @@ impl Game {
         let proxy = CharacterProxy::new(&mut *self.physics.borrow_mut(), &dmr, model);
         self.physics.borrow_mut().remove_char_parts(&dmr, model);
         drop(dmr);
-        self.npcs.insert(model, Npc { owner, seat: None, net_angles: None, tp_seq: 1, move_budget: 6.0, last_update: self.t, fall_speed: 0.0, model, hum, rig, proxy: Some(proxy), ctrl: None, torso_cf, vel: [0.0; 3], state: humanoid::IDLE, dead: false, dirty: false, move_to: None, last_running: None, last_swim: None, last_step_cf: None });
+        self.npcs.insert(model, Npc { owner, seat: None, net_angles: None, tp_seq: 1, move_budget: 6.0, last_update: self.t - 0.05, fall_speed: 0.0, model, hum, rig, proxy: Some(proxy), ctrl: None, torso_cf, vel: [0.0; 3], state: humanoid::IDLE, dead: false, dirty: false, move_to: None, last_running: None, last_swim: None, last_step_cf: None });
     }
 
     fn physics_is_excluded(&self, model: InstId) -> bool {

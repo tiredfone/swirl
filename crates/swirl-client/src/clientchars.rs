@@ -51,6 +51,7 @@ pub struct ClientChars {
     pub own: Option<Own>,
     pub pending_own: Option<(InstId, CF, i64)>,
     pub input: ([f64; 3], bool),
+    pub face: Option<[f64; 3]>,
     pub tp_seq: i64,
     pub move_to: Option<[f64; 3]>,
     pub drive_in: [bool; 5],
@@ -77,7 +78,7 @@ impl ClientChars {
         }
         dm.journal.clear();
         ph.reset_cursor();
-        let mut c = ClientChars { cf_marks: vec![], remotes: HashMap::new(), rig_dirty: false, ph: Rc::new(RefCell::new(ph)), excluded: HashSet::new(), own: None, pending_own: None, input: ([0.0; 3], false), tp_seq: 0, move_to: None, drive_in: [false; 5], send_acc: 0.0, out: vec![] };
+        let mut c = ClientChars { cf_marks: vec![], remotes: HashMap::new(), rig_dirty: false, ph: Rc::new(RefCell::new(ph)), excluded: HashSet::new(), own: None, pending_own: None, input: ([0.0; 3], false), face: None, tp_seq: 0, move_to: None, drive_in: [false; 5], send_acc: 0.0, out: vec![] };
         c.track(dm);
         c
     }
@@ -227,7 +228,7 @@ impl ClientChars {
             } else if user {
                 self.move_to = None;
             }
-            let r = o.ctrl.update(&mut *self.ph.borrow_mut(), dm, dt, &Input { mv, jump, face: None });
+            let r = o.ctrl.update(&mut *self.ph.borrow_mut(), dm, dt, &Input { mv, jump, face: self.face });
             o.cf = r.cf;
             o.vel = r.vel;
             let prev = o.state;

@@ -1,0 +1,14 @@
+import path from 'path';
+import fs from 'fs';
+import { createRequire } from 'module';
+import { runSpec } from './movement-scenarios.mjs';
+const root = process.argv[2];
+const variant = process.argv[3];
+const out = process.argv[4];
+const require = createRequire('/var/www/html/chocolate/package.json');
+const RAPIER = require('@dimforge/rapier3d-compat');
+const spec = JSON.parse(fs.readFileSync(new URL('./movement-spec.json', import.meta.url)));
+const r15 = new Uint8Array(fs.readFileSync(path.join(root, 'content2018/avatar/characterR15V2.rbxm')));
+const traces = await runSpec((p) => import(path.join(root, p)), RAPIER, spec, variant, r15);
+fs.writeFileSync(out, JSON.stringify(traces));
+process.exit(0);

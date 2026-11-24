@@ -149,3 +149,53 @@ export async function runAll(load, RAPIER) {
   });
   return out;
 }
+
+export async function runSpec(load, RAPIER, spec, variant, r15bytes) {
+  const { DataModel } = await load('shared/instance.js');
+  const { Physics } = await load('shared/physics.js');
+  const { buildCharacter, buildR15, Controller } = await load('shared/humanoid.js');
+  const { parsePlace } = await load('shared/rbxl.js');
+  const C = await load('shared/cframe.js');
+  await RAPIER.init();
+  const out = {};
+  for (const [name, sc] of Object.entries(spec)) {
+    const dm = new DataModel('client');
+    dm.era = variant === 'r15' ? 2018 : 2012;
+    const ws = dm.service('Workspace');
+    for (const [pn, cf, size] of sc.parts) {
+      const p = dm.create('Part', null);
+      p.props.set('Name', pn);
+      p.props.set('Anchored', true);
+      p.props.set('Size', size);
+      p.props.set('CFrame', cf);
+      dm.setParent(p, ws);
+    }
+    const ph = new Physics(dm, RAPIER, { simulate: false, excluded: () => false });
+    ph.attachWorkspace(ws);
+    let model;
+    let humanoid;
+    if (variant === 'r15') {
+      const tpl = parsePlace(r15bytes)[0];
+      ({ model, humanoid } = buildR15(dm, tpl, 'Tester', [0, 4, 0], null));
+    } else {
+      ({ model, humanoid } = buildCharacter(dm, 'Tester', [0, 4, 0]));
+    }
+    const ctrl = new Controller(ph, model, humanoid);
+    ctrl.teleport(C.cf(0, 4, 0));
+    const trace = [];
+    const dts = sc.dts || [1 / 60];
+    let di = 0;
+    for (const st of sc.steps) {
+      let tt = 0;
+      while (tt < st.s - 1e-9) {
+        const dt = dts[di++ % dts.length];
+        tt += dt;
+        const r = ctrl.update(dt, { move: st.mv, jump: !!st.jump, face: st.face || null });
+        ph.world.step();
+        trace.push([r.cf[0], r.cf[1], r.cf[2], r.state]);
+      }
+    }
+    out[name] = trace;
+  }
+  return out;
+}

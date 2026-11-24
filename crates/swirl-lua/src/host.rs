@@ -1532,6 +1532,10 @@ impl Host {
         }
     }
 
+    pub fn user_settings_id(&self) -> Option<u32> {
+        self.st.borrow().user_settings
+    }
+
     pub fn take_requests(&mut self) -> Vec<Req> {
         std::mem::take(&mut self.st.borrow_mut().reqs)
     }
