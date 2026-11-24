@@ -20,13 +20,17 @@ cp crates/swirl-client/entry.js "$out.tmp/entry.js"
 cp crates/swirl-client/lua.js "$out.tmp/lua.js"
 cp crates/swirl-client/pack.js "$out.tmp/pack.js"
 cp crates/swirl-client/app.js "$out.tmp/app.js"
-awk '/@font-face/{skip=1} !skip{print} skip&&/}/{skip=0}' vendor/chocolate/client/style.css > "$out.tmp/gui.css"
-cp vendor/chocolate/client/content-index.json "$out.tmp/content-index.json"
-node tools/pack-vendor.mjs vendor/chocolate/content "$out.tmp/content"
-cp vendor/chocolate/client/content2018-index.json "$out.tmp/content2018-index.json"
-node tools/pack-vendor.mjs vendor/chocolate/content2018 "$out.tmp/content2018"
-node tools/pack-vendor.mjs vendor/chocolate/corescripts2018 "$out.tmp/corescripts2018"
-node tools/pack-vendor.mjs vendor/chocolate "$out.tmp/chocolate"
+content=${SWIRL_CONTENT:-/var/www/assets/swirl-content}
+[ -d "$content/content" ] || { echo "missing client content in $content" >&2; exit 1; }
+awk '/@font-face/{skip=1} !skip{print} skip&&/}/{skip=0}' "$content/style.css" > "$out.tmp/gui.css"
+cp "$content/content-index.json" "$out.tmp/content-index.json"
+node tools/pack-vendor.mjs "$content/content" "$out.tmp/content"
+cp "$content/content2018-index.json" "$out.tmp/content2018-index.json"
+node tools/pack-vendor.mjs "$content/content2018" "$out.tmp/content2018"
+node tools/pack-vendor.mjs "$content/corescripts2018" "$out.tmp/corescripts2018"
+skip=content,content2018,corescripts2018
+SKIP_DIRS=$skip node tools/pack-vendor.mjs vendor/chocolate "$out.tmp/chocolate"
+node tools/patch-content-root.mjs "$out.tmp/chocolate/client/assets.js"
 cat > "$out.tmp/manifest.json" <<JSON
 {"version":"$version","era":[2012,2018],"entry":"entry.js","build":"$short","profile":"$profile"}
 JSON

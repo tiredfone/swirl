@@ -48,6 +48,7 @@ export async function start(opts = {}) {
       inflight++;
       try {
         if (useAppEarly && r.id.startsWith('c:')) await window.solarContentReady;
+        for (let n = 0; r.id.startsWith('c:') && !window.solarContentUrl && n < 600; n++) await new Promise((res) => setTimeout(res, 50));
         for (let n = 0; r.k === 'tex' && !(window.solarLoadImage && window.solarWorldReady) && n < 600; n++) await new Promise((res) => setTimeout(res, 50));
         if (r.k === 'tex' && window.solarWorldReady) await window.solarWorldReady;
         if (r.k === 'tex' && window.solarLoadImage) {

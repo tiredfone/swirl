@@ -255,6 +255,7 @@ struct State {
     cp: Prog,
     atlas_fbo: Option<web_sys::WebGlFramebuffer>,
     atlases: HashMap<u32, String>,
+    atlases_r15: HashMap<(u32, u8), String>,
 }
 
 struct Mesh {
@@ -604,6 +605,7 @@ impl Client {
             cp,
             atlas_fbo,
             atlases: HashMap::new(),
+            atlases_r15: HashMap::new(),
         }));
         let s2 = st.clone();
         let down = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |e: web_sys::MouseEvent| {
@@ -1066,8 +1068,16 @@ impl Client {
         let fwd = dirv;
         let mut clothes: HashMap<u32, Option<swirl_net::world::Clothes>> = HashMap::new();
         for p in parts.iter() {
-            if p.limb > 0 && !clothes.contains_key(&p.model) {
+            if (p.limb > 0 || p.r15 > 0) && !clothes.contains_key(&p.model) {
                 clothes.insert(p.model, st.world.clothes(p.model));
+            }
+        }
+        let mut r15_groups: Vec<(u32, u8)> = parts.iter().filter(|p| p.r15 > 0).map(|p| (p.model, p.r15)).collect();
+        r15_groups.sort();
+        r15_groups.dedup();
+        for (model, group) in r15_groups {
+            if let Some(Some(cl)) = clothes.get(&model) {
+                compose_atlas_r15(&mut st, model, group, cl, &mut wants);
             }
         }
         for (model, cl) in clothes.iter() {
@@ -1532,7 +1542,27 @@ fn build_items(st: &State, parts: &[swirl_net::world::Part], eye: [f32; 3], fwd:
                             None => wants.push(("tex".into(), tid.clone())),
                         }
                     }
+                    let mut over: Option<Item> = None;
+                    if p.r15 > 0 {
+                        let aid = format!("atlas:{}:{}", p.model, p.r15);
+                        if let Some(Some(_)) = st.textures.get(&aid) {
+                            if let (Some(tid), Some(Some(_))) = (&mr.tex, mr.tex.as_ref().and_then(|t| st.textures.get(t))) {
+                                let mut o = item(Geo::Mesh(mr.mesh.clone()), m);
+                                o.color = [1.0, 1.0, 1.0];
+                                o.map = Some(tid.clone());
+                                o.cutoff = 0.1;
+                                o.offset = true;
+                                over = Some(o);
+                            }
+                            it.color = [1.0, 1.0, 1.0];
+                            it.map = Some(aid);
+                            it.cutoff = 0.0;
+                        }
+                    }
                     out.push(it);
+                    if let Some(o) = over {
+                        out.push(o);
+                    }
                 } else if !st.failed.contains(&key) {
                     wants.push(("mesh".into(), key));
                 }
@@ -1695,6 +1725,87 @@ fn lin(c: f32) -> f32 {
     } else {
         ((c + 0.055) / 1.055).powf(2.4)
     }
+}
+
+fn compose_atlas_r15(st: &mut State, model: u32, group: u8, cl: &swirl_net::world::Clothes, wants: &mut Vec<(String, String)>) {
+    let (base, w, h) = match group {
+        1 => ("c:avatar/compositing/R15CompositTorsoBase.mesh", 388.0f32, 272.0f32),
+        2 | 4 => ("c:avatar/compositing/R15CompositLeftArmBase.mesh", 264.0, 284.0),
+        _ => ("c:avatar/compositing/R15CompositRightArmBase.mesh", 264.0, 284.0),
+    };
+    let layers: Vec<&Option<String>> = match group {
+        1 => vec![&cl.pants, &cl.shirt],
+        2 | 3 => vec![&cl.shirt],
+        _ => vec![&cl.pants],
+    };
+    let tint = cl.r15_colors[(group - 1) as usize];
+    let mut key = format!("{:?}{:?}", layers, tint);
+    if !st.meshes.contains_key(base) {
+        if !st.failed.contains(base) {
+            wants.push(("mesh".into(), base.to_string()));
+        }
+        return;
+    }
+    let mut ready: Vec<Option<String>> = vec![];
+    for l in layers.iter() {
+        match l {
+            Some(t) => {
+                let ok = matches!(st.textures.get(t), Some(Some(_)));
+                if st.textures.get(t).is_none() {
+                    wants.push(("tex".into(), t.clone()));
+                }
+                key.push(if ok { '1' } else { '0' });
+                ready.push(if ok { Some(t.clone()) } else { None });
+            }
+            None => ready.push(None),
+        }
+    }
+    if st.atlases_r15.get(&(model, group)) == Some(&key) {
+        return;
+    }
+    let gl = st.gl.clone();
+    let (tw, th) = ((w * 2.0) as i32, (h * 2.0) as i32);
+    let tid = format!("atlas:{}:{}", model, group);
+    let tex = match st.textures.get(&tid) {
+        Some(Some(t)) => t.clone(),
+        _ => {
+            let t = gl.create_texture();
+            gl.bind_texture(G::TEXTURE_2D, t.as_ref());
+            gl.tex_storage_2d(G::TEXTURE_2D, 10, G::SRGB8_ALPHA8, tw, th);
+            st.textures.insert(tid.clone(), t.clone());
+            t.unwrap()
+        }
+    };
+    gl.bind_framebuffer(G::FRAMEBUFFER, st.atlas_fbo.as_ref());
+    gl.framebuffer_texture_2d(G::FRAMEBUFFER, G::COLOR_ATTACHMENT0, G::TEXTURE_2D, Some(&tex), 0);
+    gl.viewport(0, 0, tw, th);
+    gl.clear_color(lin(tint[0]), lin(tint[1]), lin(tint[2]), 1.0);
+    gl.clear(G::COLOR_BUFFER_BIT);
+    gl.disable(G::DEPTH_TEST);
+    gl.disable(G::CULL_FACE);
+    gl.enable(G::BLEND);
+    gl.use_program(Some(&st.cp.prog));
+    let vp = ortho(0.0, w, h, 0.0, -1000.0, 1000.0);
+    gl.uniform_matrix4fv_with_f32_array(st.cp.l(&gl, "vp").as_ref(), false, &vp);
+    gl.uniform1i(st.cp.l(&gl, "tex").as_ref(), 0);
+    gl.uniform1i(st.cp.l(&gl, "useTex").as_ref(), 1);
+    if let Some(m) = st.meshes.get(base) {
+        for t in ready.iter().flatten() {
+            if let Some(Some(img)) = st.textures.get(t) {
+                gl.active_texture(G::TEXTURE0);
+                gl.bind_texture(G::TEXTURE_2D, Some(img));
+                gl.bind_sampler(0, st.samp_clamp.as_ref());
+                gl.bind_vertex_array(m.vao.as_ref());
+                gl.draw_arrays(G::TRIANGLES, 0, m.count);
+            }
+        }
+    }
+    gl.bind_framebuffer(G::FRAMEBUFFER, None);
+    gl.bind_texture(G::TEXTURE_2D, Some(&tex));
+    gl.generate_mipmap(G::TEXTURE_2D);
+    gl.enable(G::DEPTH_TEST);
+    gl.enable(G::CULL_FACE);
+    st.atlases_r15.insert((model, group), key);
 }
 
 fn compose_atlas(st: &mut State, model: u32, cl: &swirl_net::world::Clothes, wants: &mut Vec<(String, String)>) {

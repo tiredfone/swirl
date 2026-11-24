@@ -669,8 +669,9 @@ impl Gui {
             } else {
                 style(&el, "background", "");
             }
-            let bs = num(d, c, "BorderSizePixel", 1.0);
-            let shadow = if bs > 0.0 && bt < 1.0 && style_attr.is_empty() { format!("0 0 0 {}px {}", bs, rgba(&color(d, c, "BorderColor3"), bt)) } else { "none".to_string() };
+            let bs = num(d, c, "BorderSizePixel", 0.0);
+            let bt_border = num(d, c, "BackgroundTransparency", 1.0);
+            let shadow = if bs > 0.0 && bt_border < 1.0 && style_attr.is_empty() { format!("0 0 0 {}px {}", bs, rgba(&color(d, c, "BorderColor3"), bt)) } else { "none".to_string() };
             style(&el, "box-shadow", &shadow);
             if is_btn {
                 let _ = el.class_list().toggle_with_force("auto", flag(d, c, "AutoButtonColor", true));

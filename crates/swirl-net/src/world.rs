@@ -39,6 +39,7 @@ pub struct Part {
     pub truss: bool,
     pub cast: bool,
     pub limb: u8,
+    pub r15: u8,
     pub model: u32,
     pub head_face: bool,
     pub dmesh: bool,
@@ -50,6 +51,7 @@ pub struct Clothes {
     pub pants: Option<String>,
     pub tshirt: Option<String>,
     pub colors: [[f32; 3]; 5],
+    pub r15_colors: [[f32; 3]; 5],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -789,9 +791,24 @@ impl World {
                 }
             }
             let mut limb = 0u8;
+            let mut r15 = 0u8;
             let mut model = 0u32;
             if let Some(pid) = i.parent {
                 if let Some(par) = self.insts.get(&pid) {
+                    if par.class == "Model" && mesh.is_some() && i.class == "MeshPart" {
+                        let group = match name {
+                            "UpperTorso" | "LowerTorso" => 1,
+                            "LeftUpperArm" | "LeftLowerArm" | "LeftHand" => 2,
+                            "RightUpperArm" | "RightLowerArm" | "RightHand" => 3,
+                            "LeftUpperLeg" | "LeftLowerLeg" | "LeftFoot" => 4,
+                            "RightUpperLeg" | "RightLowerLeg" | "RightFoot" => 5,
+                            _ => 0,
+                        };
+                        if group > 0 && par.children.iter().filter_map(|c| self.insts.get(c)).any(|c| c.class == "Humanoid") {
+                            r15 = group;
+                            model = pid;
+                        }
+                    }
                     if par.class == "Model" && mesh.is_none() && shape == 1 && classes::is_a(&i.class, "Part") {
                         let has_hum = par.children.iter().filter_map(|c| self.insts.get(c)).any(|c| c.class == "Humanoid");
                         if has_hum {
@@ -816,7 +833,7 @@ impl World {
             let refl = i.props.get("Reflectance").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
             let overlay_only = false;
             let _ = overlay_only;
-            out.push(Part { id, cf, size, color, alpha, shape, mesh, decals, top: surf[2], bottom: surf[3], material, refl, surf, truss: i.class == "TrussPart", cast: transp < 0.5 && !worn, limb, model, head_face, dmesh });
+            out.push(Part { id, cf, size, color, alpha, shape, mesh, decals, top: surf[2], bottom: surf[3], material, refl, surf, truss: i.class == "TrussPart", cast: transp < 0.5 && !worn, limb, r15, model, head_face, dmesh });
         }
         out
     }
@@ -838,7 +855,19 @@ impl World {
             let c = swirl_core::rbx::brick_rgb01(b);
             colors[k] = [c[0] as f32, c[1] as f32, c[2] as f32];
         }
-        Some(Clothes { shirt, pants, tshirt, colors })
+        let mut r15_colors = [[0.63, 0.63, 0.63]; 5];
+        for (k, n) in ["UpperTorso", "LeftUpperArm", "RightUpperArm", "LeftUpperLeg", "RightUpperLeg"].iter().enumerate() {
+            if let Some(i) = m.children.iter().filter_map(|c| self.insts.get(c)).find(|i| i.props.get("Name").and_then(|v| v.as_str()) == Some(n)) {
+                r15_colors[k] = match arr(i.props.get("Color"), 3) {
+                    Some(c) => [c[0], c[1], c[2]],
+                    None => {
+                        let c = swirl_core::rbx::brick_rgb01(i.props.get("BrickColor").and_then(|v| v.as_i64()).unwrap_or(194));
+                        [c[0] as f32, c[1] as f32, c[2] as f32]
+                    }
+                };
+            }
+        }
+        Some(Clothes { shirt, pants, tshirt, colors, r15_colors })
     }
 
     pub fn lighting_inst(&self) -> Option<&Inst> {

@@ -63,7 +63,17 @@ export async function startLua(opts) {
   let resolveWorld;
   window.solarWorldReady = new Promise((r) => { resolveWorld = r; });
   const pub = new URL('./chocolate', import.meta.url).href;
-  const cfg = Object.assign({}, opts.cfg, { publicPath: pub });
+  const distRoot = new URL('./', import.meta.url).href;
+  const rewrites = {};
+  await Promise.all(['content', 'content2018', 'corescripts2018'].map(async (d) => {
+    try {
+      const r = await fetch(distRoot + d + '/rewrite.json');
+      rewrites[d] = r.ok ? await r.json() : {};
+    } catch (e) {
+      rewrites[d] = {};
+    }
+  }));
+  const cfg = Object.assign({}, opts.cfg, { publicPath: pub, contentRoot: distRoot, contentRewrites: rewrites });
   addImportMap(pub);
   addStyle(pub);
   const terrainMod = await import(pub + '/shared/terrain.js');
@@ -99,7 +109,14 @@ export async function startLua(opts) {
     return id ? assets.endpointUrl('asset', id) : null;
   };
   const indexReady = assets.loadContentIndex();
-  indexReady.then(() => { window.solarLoadImage = assets.loadImage; });
+  indexReady.then(() => { window.solarLoadImage = assets.loadImage;
+    const era18 = Number((opts.cfg || {}).clientVersion) === 2018;
+    const timer = setInterval(() => {
+      if (era18 && assets.contentEra() !== 2018) return;
+      clearInterval(timer);
+      window.solarContentUrl = assets.contentUrl;
+    }, 50);
+  });
   
   const runtimeSrc = fetch(pub + '/shared/runtime.lua?v=' + (cfg.version || '')).then((r) => r.text());
   const rapierReady = RAPIER.init();
