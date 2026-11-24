@@ -1776,6 +1776,8 @@ fn compose_atlas_r15(st: &mut State, model: u32, group: u8, cl: &swirl_net::worl
             t.unwrap()
         }
     };
+    gl.active_texture(G::TEXTURE0);
+    gl.bind_texture(G::TEXTURE_2D, None);
     gl.bind_framebuffer(G::FRAMEBUFFER, st.atlas_fbo.as_ref());
     gl.framebuffer_texture_2d(G::FRAMEBUFFER, G::COLOR_ATTACHMENT0, G::TEXTURE_2D, Some(&tex), 0);
     gl.viewport(0, 0, tw, th);
@@ -1803,6 +1805,7 @@ fn compose_atlas_r15(st: &mut State, model: u32, group: u8, cl: &swirl_net::worl
     gl.bind_framebuffer(G::FRAMEBUFFER, None);
     gl.bind_texture(G::TEXTURE_2D, Some(&tex));
     gl.generate_mipmap(G::TEXTURE_2D);
+    gl.bind_texture(G::TEXTURE_2D, None);
     gl.enable(G::DEPTH_TEST);
     gl.enable(G::CULL_FACE);
     st.atlases_r15.insert((model, group), key);
@@ -1854,6 +1857,8 @@ fn compose_atlas(st: &mut State, model: u32, cl: &swirl_net::world::Clothes, wan
             t.unwrap()
         }
     };
+    gl.active_texture(G::TEXTURE0);
+    gl.bind_texture(G::TEXTURE_2D, None);
     gl.bind_framebuffer(G::FRAMEBUFFER, st.atlas_fbo.as_ref());
     gl.framebuffer_texture_2d(G::FRAMEBUFFER, G::COLOR_ATTACHMENT0, G::TEXTURE_2D, Some(&tex), 0);
     gl.viewport(0, 0, 1024, 512);
@@ -1891,6 +1896,7 @@ fn compose_atlas(st: &mut State, model: u32, cl: &swirl_net::world::Clothes, wan
     gl.bind_framebuffer(G::FRAMEBUFFER, None);
     gl.bind_texture(G::TEXTURE_2D, Some(&tex));
     gl.generate_mipmap(G::TEXTURE_2D);
+    gl.bind_texture(G::TEXTURE_2D, None);
     gl.enable(G::DEPTH_TEST);
     gl.enable(G::CULL_FACE);
     st.atlases.insert(model, key);
