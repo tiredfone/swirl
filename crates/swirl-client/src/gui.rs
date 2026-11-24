@@ -465,6 +465,23 @@ impl Gui {
         Kids { inner, area, objs, sizes, placed, scroll: is_scroll, canvas }
     }
 
+    fn measure_hidden(d: &mut DataModel, parent: InstId, p_pos: [f64; 2], p_size: [f64; 2], depth: u32, fired: &mut Vec<(InstId, &'static str, Vec<Wire>)>) {
+        if depth > 40 {
+            return;
+        }
+        let kids = Self::measure_kids(d, parent, p_size, false, fired);
+        for c in kids.objs.clone() {
+            let [x, y] = Self::pos_of(d, c, &kids);
+            let abs = [p_pos[0] + x, p_pos[1] + y];
+            let size = kids.sizes[&c];
+            Self::set_abs(d, c, "AbsolutePosition", abs, fired);
+            Self::set_abs(d, c, "AbsoluteSize", size, fired);
+            if d.get(c).map(|i| !i.children.is_empty()).unwrap_or(false) {
+                Self::measure_hidden(d, c, abs, size, depth + 1, fired);
+            }
+        }
+    }
+
     fn pos_of(d: &DataModel, c: InstId, k: &Kids) -> [f64; 2] {
         let [w, h] = k.sizes[&c];
         let (x, y) = match k.placed.as_ref().and_then(|p| p.get(&c)) {
@@ -631,6 +648,9 @@ impl Gui {
                 }
             }
             if !visible {
+                if d.era == 2018 && d.get(c).map(|i| !i.children.is_empty()).unwrap_or(false) {
+                    Self::measure_hidden(d, c, abs, [w, h], 0, fired);
+                }
                 continue;
             }
             style(&el, "left", &format!("{}px", x));
@@ -708,13 +728,30 @@ impl Gui {
         let era = d.era;
         let font = num(d, c, "Font", 0.0) as i64;
         let txt = text(d, c);
-        let mut px = if era == 2018 && d.get(c).map(|i| i.props.contains_key("TextSize")).unwrap_or(false) { num(d, c, "TextSize", 14.0) } else { FONT_SIZES.get(num(d, c, "FontSize", 0.0) as usize).copied().unwrap_or(12.0) };
+        let mut px = if era == 2018 && d.get(c).map(|i| i.props.contains_key("TextSize")).unwrap_or(false) { match num(d, c, "TextSize", 14.0) { n if n != 0.0 => n, _ => 14.0 } } else { FONT_SIZES.get(num(d, c, "FontSize", 0.0) as usize).copied().unwrap_or(12.0) };
+
+        let wrap = flag(d, c, "TextWrapped", false) || flag(d, c, "TextWrap", false);
         if flag(d, c, "TextScaled", false) {
-            px = (h * 0.85).min(w / (txt.chars().count().max(1) as f64) * 1.8).floor().min(100.0).max(6.0);
+            px = if era == 2018 {
+                let (lo, hi) = swirl_lua::gui_layout::scaled_limits(d, c);
+                swirl_lua::gui_layout::scaled_px_2018(&crate::luavm::WebMeasure::new(), &txt, font, w, h, lo, hi)
+            } else {
+                (h * 0.85).min(w / (txt.chars().count().max(1) as f64) * 1.8).floor().min(100.0).max(6.0)
+            };
         }
-        style(&e, "font-family", "Arial, Helvetica, sans-serif");
-        style(&e, "font-weight", if matches!(font, 0 | 2 | 4) { "700" } else { "400" });
+        let (family, weight) = swirl_lua::gui_layout::font_family_css(era, font);
+        style(&e, "font-family", &family);
+        style(&e, "font-weight", weight);
         style(&e, "font-size", &format!("{}px", px));
+        if era == 2018 {
+            let lh = if d.get(c).map(|i| i.props.contains_key("LineHeight")).unwrap_or(false) { format!("{}", num(d, c, "LineHeight", 1.0) * 1.15) } else { String::new() };
+            style(&e, "line-height", &lh);
+            let trunc = num(d, c, "TextTruncate", 0.0) as i64 == 1;
+            style(&e, "text-overflow", if trunc { "ellipsis" } else { "" });
+            style(&e, "overflow", if trunc { "hidden" } else { "visible" });
+            style(&e, "max-width", if trunc || wrap { "100%" } else { "none" });
+            style(&e, "flex-shrink", if trunc || wrap { "" } else { "0" });
+        }
         let tt = num(d, c, "TextTransparency", 0.0);
         style(&e, "color", &rgba(&color(d, c, "TextColor3"), tt));
         let stroke = num(d, c, "TextStrokeTransparency", 1.0);
@@ -724,7 +761,6 @@ impl Gui {
         } else {
             style(&e, "text-shadow", "none");
         }
-        let wrap = flag(d, c, "TextWrapped", false) || flag(d, c, "TextWrap", false);
         style(&e, "white-space", if wrap { "pre-wrap" } else { "pre" });
         let xa = num(d, c, "TextXAlignment", 2.0) as i64;
         let ya = num(d, c, "TextYAlignment", 1.0) as i64;

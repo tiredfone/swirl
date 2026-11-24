@@ -5,12 +5,12 @@ use swirl_lua::Host;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
-struct WebMeasure {
+pub(crate) struct WebMeasure {
     ctx: Option<web_sys::OffscreenCanvasRenderingContext2d>,
 }
 
 impl WebMeasure {
-    fn new() -> WebMeasure {
+    pub(crate) fn new() -> WebMeasure {
         let ctx = web_sys::OffscreenCanvas::new(1, 1).ok().and_then(|c| c.get_context("2d").ok().flatten()).and_then(|c| c.dyn_into::<web_sys::OffscreenCanvasRenderingContext2d>().ok());
         WebMeasure { ctx }
     }

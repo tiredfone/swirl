@@ -98,6 +98,12 @@ export async function startApp({ client, cfg, canvas }) {
     return id ? assetUrl(id[1]) : null;
   };
   window.solarImageUrl = imageUrl;
+  const FONT_FILES = [['ch-arial', 'fonts/arial.ttf'], ['ch-arialbd', 'fonts/arialbd.ttf'], ['ch-ss', 'fonts/SourceSansPro-Regular.ttf'], ['ch-ssb', 'fonts/SourceSansPro-Bold.ttf'], ['ch-sssb', 'fonts/SourceSansPro-Semibold.ttf'], ['ch-ssl', 'fonts/SourceSansPro-Light.ttf'], ['ch-ssi', 'fonts/SourceSansPro-It.ttf'], ['ch-bodoni', 'fonts/AccanthisADFStd-Regular.otf'], ['ch-garamond', 'fonts/Guru-Regular.otf'], ['ch-cartoon', 'fonts/ComicNeue-Angular-Bold.ttf'], ['ch-code', 'fonts/Inconsolata-Regular.ttf'], ['ch-highway', 'fonts/HWYGOTH.ttf'], ['ch-scifi', 'fonts/zekton_rg.ttf'], ['ch-arcade', 'fonts/PressStart2P-Regular.ttf'], ['ch-fantasy', 'fonts/Balthazar-Regular.ttf'], ['ch-antique', 'fonts/RomanAntique.otf']];
+  const loadFonts2018 = () => Promise.all(FONT_FILES.map(([name, file]) => {
+    if (typeof FontFace !== 'function') return null;
+    const face = new FontFace(name, 'url("' + contentUrl(file) + '")');
+    return face.load().then((ff) => document.fonts.add(ff)).catch(() => {});
+  }));
   window.solarContentUrl = contentUrl;
   if (window.__resolveContent) window.__resolveContent();
   const loadImage = async (url) => {
@@ -569,7 +575,7 @@ export async function startApp({ client, cfg, canvas }) {
         continue;
       }
       if (m.t === 'init' && m.era === 2018 && bundle === null) {
-        if (!bundleP) bundleP = fetch(here + 'corescripts2018/bundle.json').then((r) => (r.ok ? r.text() : '{}')).catch(() => '{}').then((t) => { bundle = t; });
+        if (!bundleP) bundleP = Promise.all([fetch(here + 'corescripts2018/bundle.json').then((r) => (r.ok ? r.text() : '{}')).catch(() => '{}'), loadFonts2018()]).then(([t]) => { bundle = t; });
         holdMsgs = raws.slice(ri);
         break;
       }

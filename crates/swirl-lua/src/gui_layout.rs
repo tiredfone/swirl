@@ -6,12 +6,8 @@ pub trait Measure {
 
 const FONT_SIZES: [f64; 15] = [8.0, 9.0, 10.0, 11.0, 12.0, 14.0, 18.0, 24.0, 36.0, 48.0, 28.0, 32.0, 42.0, 60.0, 96.0];
 
-pub fn font_css(era: i32, font: i64, px: f64) -> String {
-    if era != 2018 {
-        let weight = if matches!(font, 0 | 2 | 4) { "700" } else { "400" };
-        return format!("{} {}px Arial, Helvetica, sans-serif", weight, px);
-    }
-    let family = match font {
+pub fn font_family(font: i64) -> &'static str {
+    match font {
         1 => "ch-arial",
         2 | 0 => "ch-arialbd",
         4 => "ch-ssb",
@@ -28,8 +24,37 @@ pub fn font_css(era: i32, font: i64, px: f64) -> String {
         14 => "ch-fantasy",
         15 => "ch-antique",
         _ => "ch-ss",
-    };
-    format!("400 {}px \"{}\", \"Source Sans 3\", Arial, sans-serif", px, family)
+    }
+}
+
+pub fn font_family_css(era: i32, font: i64) -> (String, &'static str) {
+    if era != 2018 {
+        let weight = if matches!(font, 0 | 2 | 4) { "700" } else { "400" };
+        return ("Arial, Helvetica, sans-serif".to_string(), weight);
+    }
+    (format!("\"{}\", \"Source Sans 3\", Arial, sans-serif", font_family(font)), "400")
+}
+
+pub fn font_css(era: i32, font: i64, px: f64) -> String {
+    let (family, weight) = font_family_css(era, font);
+    format!("{} {}px {}", weight, px, family)
+}
+
+pub fn scaled_px_2018(m: &dyn Measure, text: &str, font: i64, w: f64, h: f64, lo: f64, hi: f64) -> f64 {
+    let mut a = lo.max(1.0);
+    let mut b = hi.min(100.0);
+    let lines = text.split('\n').count() as f64;
+    while b - a > 1.0 {
+        let mid = ((a + b) / 2.0).floor();
+        let css = font_css(2018, font, mid);
+        let tw = text.split('\n').map(|l| m.width(&css, l)).fold(0.0, f64::max);
+        if tw <= w && mid * 1.15 * lines <= h {
+            a = mid;
+        } else {
+            b = mid;
+        }
+    }
+    a
 }
 
 fn num(d: &DataModel, id: InstId, k: &str) -> Option<f64> {
@@ -97,7 +122,7 @@ pub fn text_bounds(d: &DataModel, id: InstId, m: &dyn Measure, fallback: [f64; 2
     if scaled {
         let s = size.unwrap();
         let n = text.chars().count().max(1) as f64;
-        px = (s[1] * 0.85).min(s[0] / n * 1.8).floor().min(100.0).max(6.0);
+        px = if era == 2018 { scaled_limits_px(d, id, m, &text, font, s) } else { (s[1] * 0.85).min(s[0] / n * 1.8).floor().min(100.0).max(6.0) };
     }
     let css = font_css(era, font, px);
     let mut lines: Vec<String> = vec![];
@@ -141,4 +166,17 @@ pub fn text_bounds(d: &DataModel, id: InstId, m: &dyn Measure, fallback: [f64; 2
     let maxw = lines.iter().map(|l| m.width(&css, l)).fold(0.0, f64::max);
     let lh = if scaled { (px * 1.15).round() } else { line_h };
     [maxw, lines.len() as f64 * lh]
+}
+
+pub fn scaled_limits(d: &DataModel, id: InstId) -> (f64, f64) {
+    let lim = d.get(id).and_then(|i| i.children.iter().copied().find(|k| d.get(*k).map(|x| x.class == "UITextSizeConstraint").unwrap_or(false)));
+    match lim {
+        Some(k) => (num(d, k, "MinTextSize").filter(|v| *v != 0.0).unwrap_or(1.0), num(d, k, "MaxTextSize").filter(|v| *v != 0.0).unwrap_or(100.0)),
+        None => (1.0, 100.0),
+    }
+}
+
+fn scaled_limits_px(d: &DataModel, id: InstId, m: &dyn Measure, text: &str, font: i64, s: [f64; 2]) -> f64 {
+    let (lo, hi) = scaled_limits(d, id);
+    scaled_px_2018(m, text, font, s[0], s[1], lo, hi)
 }

@@ -701,7 +701,7 @@ async fn ws_connection(stream: TcpStream, cid: u32, sup: Rc<RefCell<Sup>>, env: 
             }
             }
         }
-        None => json!({"ok": true, "mode": "play", "placeId": env.default_place.unwrap_or(0), "userId": 1000 + cid as i64, "username": format!("Player{}", cid), "clientVersion": env.default_era, "maxPlayers": 20, "allowGear": true}),
+        None => json!({"ok": true, "mode": "play", "placeId": env.default_place.unwrap_or(0), "userId": std::env::var("SWIRL_DEV_USER").ok().and_then(|v| v.parse::<i64>().ok()).unwrap_or(1000 + cid as i64), "username": format!("Player{}", cid), "clientVersion": env.default_era, "maxPlayers": 20, "allowGear": true}),
     };
     if info["mode"].as_str().map(|m| m != "play").unwrap_or(false) {
         let _ = tx.send(Message::Text(kick("This server only hosts game sessions.".into()))).await;

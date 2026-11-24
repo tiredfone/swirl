@@ -260,7 +260,16 @@ impl DataModel {
             }
         }
         self.journal.push(Change::Prop(id, canon.clone()));
+        let link = match (&value, canon.as_str()) {
+            (Val::Num(n), "TextSize") if classes::prop_info(&class, "FontSize").is_some() => Some(("FontSize", font_size_of(*n))),
+            (Val::Num(n), "FontSize") if classes::prop_info(&class, "TextSize").is_some() => Some(("TextSize", FONT_SIZE_PX.get(*n as usize).copied().unwrap_or(12.0))),
+            _ => None,
+        };
         self.get_mut(id).unwrap().props.insert(canon, value);
+        if let Some((k, v)) = link {
+            self.journal.push(Change::Prop(id, k.to_string()));
+            self.get_mut(id).unwrap().props.insert(k.to_string(), Val::Num(v));
+        }
         Ok(())
     }
 
@@ -521,4 +530,16 @@ impl DataModel {
         }
         Some(id)
     }
+}
+
+const FONT_SIZE_PX: [f64; 15] = [8.0, 9.0, 10.0, 11.0, 12.0, 14.0, 18.0, 24.0, 36.0, 48.0, 28.0, 32.0, 42.0, 60.0, 96.0];
+
+fn font_size_of(px: f64) -> f64 {
+    let mut best = 0;
+    for (i, v) in FONT_SIZE_PX.iter().enumerate() {
+        if (v - px).abs() < (FONT_SIZE_PX[best] - px).abs() {
+            best = i;
+        }
+    }
+    best as f64
 }

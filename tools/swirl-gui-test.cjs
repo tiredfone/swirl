@@ -51,6 +51,25 @@ const srv = http.createServer((req, res) => {
   await pg.waitForFunction('window.solarLua && window.solarLua.ready() || window.solarLuaFailed', { timeout: 60000 }).catch(() => console.log('lua not ready'));
   console.log('luaFailed', await pg.evaluate(() => window.solarLuaFailed || null));
   await wait(+(process.env.SETTLE || 8000));
+  if (process.env.RDRAG) {
+    const [dx, dy] = process.env.RDRAG.split(',').map(Number);
+    await pg.mouse.move(550, 350);
+    await pg.mouse.down({ button: 'right' });
+    for (let i = 1; i <= 10; i++) await pg.mouse.move(550 + (dx * i) / 10, 350 + (dy * i) / 10);
+    await pg.mouse.up({ button: 'right' });
+    await wait(500);
+  }
+  if (process.env.WHEEL) {
+    for (let i = 0; i < Math.abs(+process.env.WHEEL); i++) {
+      await pg.mouse.wheel({ deltaY: +process.env.WHEEL > 0 ? -100 : 100 });
+      await wait(150);
+    }
+    await wait(1500);
+  }
+  if (process.env.PRE) {
+    await pg.evaluate(process.env.PRE);
+    await wait(+(process.env.PREWAIT || 3000));
+  }
   const info = () => pg.evaluate(() => {
     const L = window.solarLua;
     if (!L) return null;
@@ -74,6 +93,7 @@ const srv = http.createServer((req, res) => {
       }
     }
   }
+  if (process.env.SHOT2) await pg.screenshot({ path: out + '-2.png' });
   if (process.env.MCLICK) {
     const [x, y, n] = process.env.MCLICK.split(',').map(Number);
     for (let i = 0; i < (n || 1); i++) {
