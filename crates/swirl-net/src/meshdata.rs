@@ -2,7 +2,7 @@ use swirl_core::meshfile::parse_mesh;
 
 pub fn parse(bytes: &[u8]) -> Option<Vec<f32>> {
     let m = parse_mesh(bytes).ok()?;
-    let flip = !bytes.starts_with(b"version 1.");
+    let flip = bytes.starts_with(b"version 1.");
     let mut out = Vec::with_capacity(m.pos.len() * 8);
     let n = m.pos.len();
     let mut i = 0;
