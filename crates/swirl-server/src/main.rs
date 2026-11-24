@@ -662,6 +662,7 @@ async fn ws_connection(stream: TcpStream, cid: u32, sup: Rc<RefCell<Sup>>, env: 
         Err(_) => return,
     };
     let guard = IpGuard::new(ip.borrow().clone());
+    let join_deadline = Instant::now() + JOIN_TIMEOUT;
     let (mut tx, mut rx) = ws.split();
     let ticket = uri.borrow().split("ticket=").nth(1).map(|s| s.split('&').next().unwrap_or("").to_string()).unwrap_or_default();
     let kick = |reason: String| serde_json::json!({"t": "kick", "m": reason}).to_string();
@@ -679,7 +680,15 @@ async fn ws_connection(stream: TcpStream, cid: u32, sup: Rc<RefCell<Sup>>, env: 
                 let _ = tx.close().await;
                 return;
             }
-            let res = r.redeem(&ticket).await;
+            let res = match tokio::time::timeout(join_deadline.saturating_duration_since(Instant::now()), r.redeem(&ticket)).await {
+                Ok(v) => v,
+                Err(_) => {
+                    drop(slot);
+                    let _ = tx.send(Message::Text(kick("Joining the game took too long. Reload the page to try again.".into()))).await;
+                    let _ = tx.close().await;
+                    return;
+                }
+            };
             drop(slot);
             guard.release();
             match res {
@@ -732,7 +741,8 @@ async fn ws_connection(stream: TcpStream, cid: u32, sup: Rc<RefCell<Sup>>, env: 
     };
     let user = user_from(&info);
     let allow_gear = sup.borrow().places.get(&job).map(|p| p.allow_gear).unwrap_or(false);
-    let look = match &env.site {
+    let look_fut = async {
+        match &env.site {
         Some(st) => {
             let mut l = appearance::fetch(st, &env.assets, user.id).await;
             if allow_gear {
@@ -746,7 +756,18 @@ async fn ws_connection(stream: TcpStream, cid: u32, sup: Rc<RefCell<Sup>>, env: 
             l
         }
         None => appearance::Look::default(),
+        }
     };
+    let look = match tokio::time::timeout(join_deadline.saturating_duration_since(Instant::now()), look_fut).await {
+        Ok(l) => l,
+        Err(_) => {
+            sup.borrow_mut().socks.remove(&cid);
+            let _ = tx.send(Message::Text(kick("Joining the game took too long. Reload the page to try again.".into()))).await;
+            let _ = tx.close().await;
+            return;
+        }
+    };
+
     let cmd_tx = {
         let mut s = sup.borrow_mut();
         let p = match s.places.get_mut(&job) {
