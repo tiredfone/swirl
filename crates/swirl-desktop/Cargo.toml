@@ -1,6 +1,6 @@
 [package]
 name = "swirl-desktop"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 
 [[bin]]
@@ -8,18 +8,7 @@ name = "SolarPlayer"
 path = "src/main.rs"
 
 [dependencies]
-swirl-net = { path = "../swirl-net" }
 serde_json = "1"
-winit = { version = "0.30", default-features = false, features = ["x11", "rwh_06"] }
-glutin = { version = "0.32", default-features = false, features = ["x11", "glx", "egl"] }
-glutin-winit = { version = "0.5", default-features = false, features = ["x11", "glx", "egl"] }
-glow = "0.16"
-raw-window-handle = "0.6"
-tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 ureq = { version = "2", default-features = false, features = ["tls"] }
-png = "0.17"
-
-[target.'cfg(windows)'.dependencies]
-glutin = { version = "0.32", default-features = false, features = ["wgl"] }
-glutin-winit = { version = "0.5", default-features = false, features = ["wgl"] }
-winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+tao = "0.30"
+wry = "0.47"

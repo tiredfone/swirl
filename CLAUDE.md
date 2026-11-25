@@ -14,7 +14,7 @@ Rust rewrite of Chocolate (browser game client and node game server) and vanilla
 | `crates/swirl-server` | Chocolate `server/`, same WebSocket protocol |
 | `crates/swirl-client` | Chocolate `client/`, wasm |
 | `crates/swirl-bootstrapper` | Solar desktop launchers `SolarPlayer2012Launcher` and `SolarPlayer2018Launcher` (install, auto-update, protocol, window) |
-| `crates/swirl-desktop` | native client `SolarPlayer` (winit, glutin, glow, tungstenite) over `swirl-net` |
+| `crates/swirl-desktop` | webview client `SolarPlayer` (wry, tao) that redeems the launch token and hosts `/desktop-host.html` |
 | `tools/parity/` | PHP side of the parity harness and the pixel diff runner |
 
 ## Commands

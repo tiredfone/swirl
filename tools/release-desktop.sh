@@ -25,6 +25,7 @@ launcher=$base/launcher/SolarPlayer${era}Launcher$exe
 player=$base/client/SolarPlayer$exe
 zipdir=$(mktemp -d)
 cp "$player" "$zipdir/SolarPlayer$exe"
+[ "$platform" = windows-x64 ] && cp $(ls -d $HOME/.cargo/registry/src/*/webview2-com-sys-*/x64 | head -1)/WebView2Loader.dll "$zipdir/WebView2Loader.dll"
 zipname=SolarPlayer$era-$platform-$version.zip
 rm -f "$out/$zipname"
 python3 - "$zipdir" "$out/$zipname" <<'PY'

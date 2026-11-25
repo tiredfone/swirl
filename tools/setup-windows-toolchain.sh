@@ -5,6 +5,8 @@ mkdir -p $t/bin
 python3 -m pip install --quiet --target $t/zigpy ziglang
 z=$t/zigpy/ziglang/zig
 w=$(ls -d $HOME/.cargo/registry/src/*/winapi-x86_64-pc-windows-gnu-0.4.0/lib | head -1)
+w2=$(ls -d $HOME/.cargo/registry/src/*/webview2-com-sys-*/x64 | head -1)
+wg=$(ls -d $HOME/.cargo/registry/src/*/windows_x86_64_gnu-0.52.6/lib | head -1)
 cat > $t/unwind_stub.c <<'C'
 #include <stdlib.h>
 #define STUB(n) void n(void) { abort(); }
@@ -27,7 +29,7 @@ $z cc -target x86_64-windows-gnu -c $t/unwind_stub.c -o $t/unwind_stub.o
 cat > $t/zcc-win.sh <<EOF2
 #!/bin/sh
 extra=$t/unwind_stub.o
-for a in "\$@"; do shift; case "\$a" in -c|-E|-S) extra=;; esac; case "\$a" in --target=*|-lgcc_eh|-lgcc|-lmsvcrt|-lpthread|-l:libpthread.a) ;; -lsynchronization) set -- "\$@" -lapi-ms-win-core-synch-l1-2-0;; -lwinapi_*) set -- "\$@" "$w/lib\${a#-l}.a";; *) set -- "\$@" "\$a";; esac; done
+for a in "\$@"; do shift; case "\$a" in -c|-E|-S) extra=;; esac; case "\$a" in --target=*|-lgcc_eh|-lgcc|-lmsvcrt|-lpthread|-l:libpthread.a) ;; -lsynchronization) set -- "\$@" -lapi-ms-win-core-synch-l1-2-0;; -lwinapi_*) set -- "\$@" "$w/lib\${a#-l}.a";; -lWebView2Loader.dll) set -- "\$@" "$w2/WebView2Loader.dll.lib";; -lwindows.*) set -- "\$@" "$wg/lib\${a#-l}.a";; *) set -- "\$@" "\$a";; esac; done
 exec $z cc -target x86_64-windows-gnu "\$@" \$extra
 EOF2
 printf '#!/bin/sh\nexec %s ar "$@"\n' $z > $t/zar.sh
