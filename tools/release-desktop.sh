@@ -15,7 +15,8 @@ out=${OUT:-/var/www/swirl/dist/desktop/$era/$platform}
 mkdir -p "$out"
 tflag=""
 if [ "$platform" = windows-x64 ]; then
-    command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 || { echo "x86_64-w64-mingw32-gcc is not installed; install mingw-w64 to build for Windows"; exit 1; }
+    [ -f /var/www/swirl/.toolchain/env.sh ] || sh /var/www/swirl/tools/setup-windows-toolchain.sh
+    . /var/www/swirl/.toolchain/env.sh
     tflag="--target $target"
 fi
 SOLAR_BOOTSTRAPPER_VERSION=$version cargo build --profile launcher $tflag -p swirl-bootstrapper --bin SolarPlayer${era}Launcher
