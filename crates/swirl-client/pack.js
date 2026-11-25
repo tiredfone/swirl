@@ -2,7 +2,7 @@ const base = new URL('./chocolate/', import.meta.url).href;
 let map = {};
 const appParam = new URLSearchParams(location.search).get('swirlapp');
 
-export const useApp = appParam !== '0';
+export const useApp = appParam === '1';
 const skip = useApp;
 try {
   if (skip) throw new Error('skip');

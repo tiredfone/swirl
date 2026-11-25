@@ -1,22 +1,27 @@
-import './pack.js';
-import init, { Client, client_version } from './swirl_client.js';
+import { useApp as appMode } from './pack.js';
+import init, { Client, Boot, client_version } from './swirl_client.js';
 
 const byId = (id) => document.getElementById(id);
 
 function failed(reason) {
+  if (window.solarBoot) window.solarBoot.fail();
   if (typeof window.solarClientFailed === 'function') window.solarClientFailed(reason);
 }
 
 export async function start(opts = {}) {
   const cfg = opts.config || window.solarClientConfig || {};
   const status = byId('swirl-status');
+  let boot = null;
   const setStatus = (s) => {
-    if (status) status.textContent = s;
+    if (boot && boot.present()) boot.set_status(s);
+    else if (status) status.textContent = s;
   };
   try {
     setStatus('Loading Swirl');
     await init({ module_or_path: new URL('./swirl_client_bg.wasm', import.meta.url) });
-    setStatus('Swirl ' + client_version());
+    boot = new Boot();
+    window.solarBoot = boot;
+    window.solarSetStatus = setStatus;
     setStatus('Requesting a server');
     const override = new URLSearchParams(location.search).get('swirlws');
     let t = opts.ticket;
@@ -37,14 +42,18 @@ export async function start(opts = {}) {
     const canvas = opts.canvas || byId('swirl-canvas');
     const client = new Client(canvas);
     window.solarClient = client;
-    setStatus('Joining');
+    setStatus('Connecting');
     client.connect(base + '?ticket=' + encodeURIComponent(t.ticket));
     setInterval(() => client.ping(), 5000);
-    const assetUrl = (id) => (id.startsWith('c:') ? new URL('./chocolate/content/' + id.slice(2), import.meta.url).href : ((cfg.endpoints && cfg.endpoints.asset) || '/asset/?id={id}').replace('{id}', id));
+    const useAppEarly = appMode;
+    if (useAppEarly) window.solarContentReady = new Promise((res) => { window.__resolveContent = res; });
+    const assetUrl = (id) => (id.startsWith('c:') ? (window.solarContentUrl ? window.solarContentUrl(id.slice(2)) : new URL('./chocolate/content/' + id.slice(2), import.meta.url).href) : ((cfg.endpoints && cfg.endpoints.asset) || '/asset/?id={id}').replace('{id}', id));
     let inflight = 0;
     const fetchAsset = async (r) => {
       inflight++;
       try {
+        if (useAppEarly && r.id.startsWith('c:')) await window.solarContentReady;
+        for (let n = 0; r.id.startsWith('c:') && !window.solarContentUrl && n < 600; n++) await new Promise((res) => setTimeout(res, 50));
         for (let n = 0; r.k === 'tex' && !(window.solarLoadImage && window.solarWorldReady) && n < 600; n++) await new Promise((res) => setTimeout(res, 50));
         if (r.k === 'tex' && window.solarWorldReady) await window.solarWorldReady;
         if (r.k === 'tex' && window.solarLoadImage) {
@@ -72,22 +81,42 @@ export async function start(opts = {}) {
       while (inflight < 6 && pending.length) fetchAsset(pending.shift());
     }, 80);
     let lua = null;
-    const luaStart = import('./lua.js').then((m) => m.startLua({ client, cfg, canvas, reference: new URLSearchParams(location.search).get('swirlref') === 'three' })).then((l) => { lua = l; }).catch((e) => {
+    let luaDone = false;
+    const useApp = appMode;
+    const luaStart = (useApp ? import('./app.js').then((m) => m.startApp({ client, cfg, canvas })) : import('./lua.js').then((m) => m.startLua({ client, cfg, canvas, reference: new URLSearchParams(location.search).get('swirlref') === 'three' }))).then((l) => { lua = l; luaDone = true; }).catch((e) => {
+      luaDone = true;
       window.solarLuaFailed = String(e && e.stack ? e.stack : e);
       console.error(e);
     });
     void luaStart;
     let shown = false;
+    let loaded = false;
+    let loadedAt = 0;
+    let ownSince = 0;
     const loop = () => {
       const now = performance.now();
       if (lua) lua.frame(now);
       client.frame(now);
-      if (client.ready() && !shown) {
+      if (client.ready() && !loaded) {
+        loaded = true;
+        loadedAt = now;
+        setStatus('Loading the world');
+      }
+      let ownOk = true;
+      if (useApp && loaded && !shown) {
+        const v = window.solarApp && window.solarApp.vm;
+        if (v && v.own_ready()) ownSince = ownSince || now;
+        ownOk = (ownSince && now - ownSince > 600) || now - loadedAt > 30000;
+      }
+      if (loaded && !shown && luaDone && ownOk) {
         shown = true;
-        setStatus('');
-        if (status) status.hidden = true;
+        setStatus('Starting');
+        const c = client.boot_counts();
+        boot.finish(client.era(), c[0], c[1], now);
+        if (!boot.present() && status) status.hidden = true;
         if (typeof window.solarClientReady === 'function') window.solarClientReady();
       }
+      boot.step(now);
       if (client.status().startsWith('Disconnected')) {
         failed('disconnected');
         return;

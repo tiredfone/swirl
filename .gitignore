@@ -8,3 +8,4 @@ data/store/
 dist/client/content/
 dist/client/content2018/
 dist/client/corescripts2018/
+start-dev-session.sh

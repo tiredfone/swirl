@@ -54,7 +54,7 @@ const pass = acct.password || acct.Password;
   }) : await pg.evaluate(() => {
     const L = window.solarLua;
     if (!L) return { present: false, failed: window.solarLuaFailed || null };
-    const names = L.world.robloxGui.children.map((c) => c.props.get('Name'));
+    const names = (L.world && L.world.robloxGui ? L.world.robloxGui.children : []).map((c) => c.props.get('Name'));
     const pl = L.world.player;
     const pgui = pl && pl.findChildOfClass('PlayerGui');
     return { present: true, ready: L.ready(), era: L.world.era, playerList: names.includes('PlayerListScreen') || names.includes('PlayerListContainer'), hotbarOrTopbar: names.includes('CurrentLoadout') || names.includes('TopBarContainer'), coreChildren: names.length, playerGui: pgui ? pgui.children.length : -1, errors: L.errors.slice(0, 10) };
