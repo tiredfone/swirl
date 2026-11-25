@@ -98,7 +98,7 @@ fn main() {
     };
     #[cfg(not(target_os = "linux"))]
     let webview = builder.build(&window);
-    let _webview = match webview {
+    let webview = match webview {
         Ok(w) => w,
         Err(e) => fail(&format!("The web view could not start ({})", e)),
     };
@@ -106,7 +106,9 @@ fn main() {
         *flow = ControlFlow::Wait;
         match event {
             Event::UserEvent(m) => {
-                if m == "ready" {
+                if m == "boot" {
+                    let _ = webview.evaluate_script(&format!("{} window.dispatchEvent(new Event('solarboot'));", script));
+                } else if m == "ready" {
                     say("SOLAR_READY");
                 } else if let Some(e) = m.strip_prefix("error:") {
                     fail(e);
