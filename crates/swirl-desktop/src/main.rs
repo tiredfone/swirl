@@ -87,8 +87,16 @@ fn main() {
         Err(e) => fail(&format!("No window ({})", e)),
     };
     let url = format!("{}/desktop-host.html", o.base);
+    let nav_proxy = proxy.clone();
+    let host = url.clone();
     let builder = WebViewBuilder::new().with_url(&url).with_initialization_script(&script).with_ipc_handler(move |req| {
         let _ = proxy.send_event(req.body().to_string());
+    }).with_navigation_handler(move |to: String| {
+        if to.starts_with(&host) || to.starts_with("about:") || to.starts_with("data:") || to.starts_with("blob:") {
+            return true;
+        }
+        let _ = nav_proxy.send_event("leave".to_string());
+        false
     });
     #[cfg(target_os = "linux")]
     let webview = {
@@ -106,7 +114,9 @@ fn main() {
         *flow = ControlFlow::Wait;
         match event {
             Event::UserEvent(m) => {
-                if m == "boot" {
+                if m == "leave" {
+                    *flow = ControlFlow::Exit;
+                } else if m == "boot" {
                     let _ = webview.evaluate_script(&format!("{} window.dispatchEvent(new Event('solarboot'));", script));
                 } else if m == "ready" {
                     say("SOLAR_READY");
