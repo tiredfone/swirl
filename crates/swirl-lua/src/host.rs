@@ -695,6 +695,9 @@ fn can_run_client(d: &DataModel, i: &swirl_core::instance::Instance) -> bool {
                     return true;
                 }
             }
+            if d.era == 2018 && d.services.get("Chat").map(|c| in_model(*c)).unwrap_or(false) {
+                return true;
+            }
             d.services.get("ReplicatedFirst").map(|rf| in_model(*rf)).unwrap_or(false)
         }
         _ => false,
@@ -714,6 +717,9 @@ fn can_run(d: &DataModel, id: InstId) -> bool {
     }
     if i.class != "Script" && i.class != "CoreScript" {
         return false;
+    }
+    if d.era == 2018 && i.class == "Script" && d.services.get("Chat").map(|c| d.is_descendant_of(i.id, *c)).unwrap_or(false) {
+        return true;
     }
     let mut cur = i.parent;
     let mut guard = 0;
@@ -1249,6 +1255,7 @@ impl Host {
                                     if let Ok(gs) = d.create_any("UserGameSettings", Some(g)) {
                                         d.set_prop_quiet(gs, "Name", Val::Str("GameSettings".into()));
                                         d.get_mut_name(gs, "GameSettings");
+                                        d.set_prop_quiet(gs, "ChatVisible", Val::Bool(true));
                                     }
                                     st2.borrow_mut().user_settings = Some(g);
                                     ok(Wire::I(g))

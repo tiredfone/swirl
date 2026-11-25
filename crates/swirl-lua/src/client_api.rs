@@ -25,6 +25,9 @@ pub struct CoreState {
     pub sound_ops: Vec<serde_json::Value>,
     pub fire_later: Vec<(InstId, &'static str)>,
     pub focus_req: Vec<(InstId, bool)>,
+    pub focused: Option<InstId>,
+    pub core_gui: HashMap<i64, bool>,
+    pub fire_args: Vec<(InstId, &'static str, Vec<Wire>)>,
     pub kicked: Option<String>,
     pub leave: bool,
     pub own_state: Option<(InstId, u8)>,
@@ -295,6 +298,18 @@ impl ApiHandler for ClientApi {
                     _ => String::new(),
                 }));
             }
+            "AbsoluteSize" if is("GuiObject") => {
+                let stored = match d.get_prop(id, "AbsoluteSize") {
+                    Some(Val::Arr(a)) if a.len() >= 2 => [a[0], a[1]],
+                    _ => [0.0, 0.0],
+                };
+                if stored[0] > 0.0 || stored[1] > 0.0 {
+                    return Some(Wire::V2(stored));
+                }
+                let (w, h) = self.core.borrow().screen;
+                return Some(Wire::V2(crate::gui_layout::abs_size(d, id, [w, h])));
+            }
+            "TextFits" if is("GuiObject") => return Some(Wire::B(true)),
             "Playing" if class == "Sound" => return Some(Wire::B(matches!(d.get_prop(id, "IsPlaying"), Some(Val::Bool(true))))),
             "SeatPart" if class == "Humanoid" => {
                 let c = self.core.borrow();

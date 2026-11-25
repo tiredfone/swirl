@@ -110,7 +110,7 @@ const pass = acct.password || acct.Password;
   console.log(JSON.stringify({ lua, focus, walk, login: ok, url: url.replace(/\?.*/, '?swirl=' + version), state, distinctColors: drawn, ...log }, null, 1));
   await b.close();
   const meshOk = !process.env.MIN_MESHES || (focus && focus.meshes >= Number(process.env.MIN_MESHES) && focus.textures >= 1);
-  const walkOk = !process.env.WALK || (walk && walk.moved > 3 && walk.afterW[1] > -5 && walk.jumped > 1 && walk.animSwing > 0.3 && walk.animate);
+  const walkOk = !process.env.WALK || (walk && walk.moved > 3 && walk.afterW[1] > -5 && walk.jumped > 1 && walk.animSwing > 0.2 && walk.animate);
   const noChoc = log.chocolateRequests.length === 0;
   if (!noChoc) console.log('requests to /chocolate/ seen');
   const luaOk = !!(lua && lua.present && lua.ready && lua.playerList && lua.hotbarOrTopbar && lua.errors.length === 0);

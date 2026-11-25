@@ -112,6 +112,8 @@ fn user_from(info: &J) -> UserInfo {
     let dev_avatar = std::env::var("SWIRL_DEV_R15").is_ok();
     let dev_scale: J = if dev_avatar { std::env::var("SWIRL_DEV_SCALE").ok().and_then(|v| serde_json::from_str(&v).ok()).unwrap_or(J::Null) } else { J::Null };
     let info = &if dev_scale.is_object() { let mut i = info.clone(); i["scale"] = dev_scale; i } else { info.clone() };
+    let dev_badge = if dev_avatar { std::env::var("SWIRL_DEV_BADGE").ok() } else { None };
+    let info = &if let Some(b) = dev_badge { let mut i = info.clone(); i["perks"] = json!({"badge": b, "nameColor": "#ffaa00"}); i } else { info.clone() };
     let perks = &info["perks"];
     let badge = perks["badge"].as_str().filter(|b| b.starts_with("/asset/?id=") && b[11..].len() <= 12 && b[11..].bytes().all(|c| c.is_ascii_digit()) && b.len() > 11).unwrap_or("").to_string();
     let mut scale = json!({"height": 1.0, "width": 1.0, "depth": 1.0, "head": 1.0});

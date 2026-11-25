@@ -564,6 +564,36 @@ export async function startApp({ client, cfg, canvas }) {
 
   const CURSOR_URLS = { arrow: 'rbxasset://textures/ArrowCursor.png', far: 'rbxasset://textures/ArrowFarCursor.png', hand: 'rbxasset://textures/DragCursor.png', lock: 'rbxasset://textures/MouseLockedCursor.png' };
   let cursorKey = null;
+  let cursorCur = null;
+  const cursorPos = { x: 0, y: 0 };
+  const cursorOverlay = document.createElement('img');
+  cursorOverlay.alt = '';
+  cursorOverlay.draggable = false;
+  cursorOverlay.style.cssText = 'position:fixed;left:0;top:0;pointer-events:none;z-index:2147483646;display:none;image-rendering:pixelated';
+  document.body.appendChild(cursorOverlay);
+  window.addEventListener('pointermove', (e) => {
+    if (document.pointerLockElement) return;
+    cursorPos.x = e.clientX;
+    cursorPos.y = e.clientY;
+  }, true);
+  const placeCursor = (center) => {
+    const c = cursorCur;
+    if (!c || (!locked() && !center)) {
+      cursorOverlay.style.display = 'none';
+      return;
+    }
+    let x = cursorPos.x, y = cursorPos.y;
+    if (center) {
+      const r = canvas.getBoundingClientRect();
+      x = r.left + r.width / 2;
+      y = r.top + r.height / 2;
+    }
+    cursorOverlay.style.width = c.w + 'px';
+    cursorOverlay.style.height = c.h + 'px';
+    cursorOverlay.style.transform = `translate(${Math.round(x - c.w / 2)}px, ${Math.round(y - c.h / 2)}px)`;
+    cursorOverlay.style.display = 'block';
+  };
+  document.addEventListener('pointerlockchange', () => placeCursor(false));
   const cursorCache = new Map();
   const resolveCursor = (key) => {
     let p = cursorCache.get(key);
@@ -584,6 +614,8 @@ export async function startApp({ client, cfg, canvas }) {
     cursorKey = key;
     resolveCursor(key).then((c) => {
       if (cursorKey !== key) return;
+      cursorCur = c;
+      if (c) cursorOverlay.src = c.src;
       const css = c ? `url("${c.src}") ${c.w >> 1} ${c.h >> 1}, default` : 'default';
       canvas.style.cursor = css;
       document.documentElement.style.setProperty('--ch-cursor', css);
@@ -740,6 +772,7 @@ export async function startApp({ client, cfg, canvas }) {
       } else if (mb === 0 && locked()) document.exitPointerLock();
       const cs = JSON.parse(vm.cam_state());
       const centered = locked() && (cs.shift || cs.fp);
+      if (locked() || centered) placeCursor(centered);
       const k = guiK();
       if (k !== screenK || canvas.clientWidth !== screenW || canvas.clientHeight !== screenH) {
         screenK = k;

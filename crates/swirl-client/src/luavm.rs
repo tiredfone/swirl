@@ -2028,6 +2028,8 @@ impl LuaVm {
                     g.focus_box(i, on);
                 }
             }
+            let focused = self.gui_dom.as_ref().and_then(|g| g.focused.get());
+            self.core.borrow_mut().focused = focused;
             let st = self.chars.as_ref().and_then(|c| c.own.as_ref()).map(|o| (o.hum, o.state));
             let seat = self.chars.as_ref().and_then(|c| c.own.as_ref()).and_then(|o| o.seated_on);
             let mut cs = self.core.borrow_mut();
@@ -2234,6 +2236,8 @@ impl LuaVm {
         {
             let later = std::mem::take(&mut self.core.borrow_mut().fire_later);
             self.fired_later.extend(later.into_iter().map(|(i, n)| (i, n, vec![])));
+            let with_args = std::mem::take(&mut self.core.borrow_mut().fire_args);
+            self.fired_later.extend(with_args);
         }
         if let Some(h) = self.host.as_mut() {
             for (inst, name, args) in std::mem::take(&mut self.fired_later) {

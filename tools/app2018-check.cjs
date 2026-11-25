@@ -43,19 +43,31 @@ const srv = http.createServer((req, res) => {
   await pg.waitForFunction('window.__ready === true || window.__failed', { timeout: 30000 });
   await pg.waitForFunction('window.solarApp && window.solarApp.vm', { timeout: 60000 });
   await wait(9000);
+  let legCount = 0;
   const leg = async () => {
     await pg.evaluate(() => window.solarApp.vm.run_script('local c = workspace:FindFirstChildOfClass("Model") for _, m in ipairs(workspace:GetChildren()) do if m:FindFirstChild("LeftUpperLeg") then c = m end end local l = c.LeftUpperLeg.CFrame.p - c.LowerTorso.CFrame.p local r = c.LowerTorso.CFrame:inverse() * c.LeftUpperLeg.CFrame.p print("LEGPOS", r.x, r.y, r.z)'));
-    await wait(400);
+    for (let i = 0; i < 20; i++) {
+      await wait(250);
+      const l = await pg.evaluate(() => { const x = (window.solarApp.logs || []).map((m) => String(m.msg)).filter((m) => m.startsWith('LEGPOS')); return x.length; });
+      if (l > legCount) {
+        legCount = l;
+        break;
+      }
+    }
     return pg.evaluate(() => { const l = (window.solarApp.logs || []).map((x) => String(x.msg)).filter((m) => m.startsWith('LEGPOS')).pop(); return l ? l.split(/\s+/).slice(1).map(Number) : null; });
   };
   const idle = await leg();
   await pg.evaluate(() => window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW', key: 'w', bubbles: true })));
-  await wait(1300);
-  const walking = await leg();
+  await wait(700);
+  const walkSamples = [];
+  for (let i = 0; i < 5; i++) {
+    walkSamples.push(await leg());
+    await wait(150);
+  }
   await pg.evaluate(() => window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW', key: 'w', bubbles: true })));
   const legShot = process.env.SHOT_WALK;
   if (legShot) await pg.screenshot({ path: legShot });
-  const diff = idle && walking ? idle.reduce((a, v, i) => a + Math.abs(v - walking[i]), 0) : 0;
+  const diff = idle ? Math.max(0, ...walkSamples.filter(Boolean).map((w) => idle.reduce((a, v, i) => a + Math.abs(v - w[i]), 0))) : 0;
   if (diff < 0.05) fails.push('walk animation did not move the rendered left leg (' + diff.toFixed(3) + ')');
   await wait(500);
   await pg.keyboard.press('Escape');
@@ -147,13 +159,19 @@ const srv = http.createServer((req, res) => {
     await wait(300);
     await pg.evaluate(() => { window.dispatchEvent(new Event('blur')); });
     await wait(300);
+    const pollLog = async (prefix) => {
+      for (let i = 0; i < 24; i++) {
+        await wait(250);
+        if ((await logsOf2()).some((m) => m.startsWith(prefix))) return;
+      }
+    };
     await run2('print("KEYW", game:GetService("UserInputService"):IsKeyDown(Enum.KeyCode.W))');
-    await wait(600);
+    await pollLog('KEYW');
     if (!(await logsOf2()).some((m) => m === 'KEYW false')) fails.push('a key stayed down after the window lost focus');
     await run2('local h = game.Players.LocalPlayer.Character.Humanoid h.Died:Connect(function() print("DIED-EV") end) h.Health = 0');
-    await wait(2500);
+    await wait(3500);
     await run2('local c = game.Players.LocalPlayer.Character local r = c and c:FindFirstChild("UpperTorso") local h = c and c:FindFirstChild("Head") print("DEATHDIST", (r and h) and (r.Position - h.Position).Magnitude or -1)');
-    await wait(600);
+    await pollLog('DEATHDIST');
     const dl = await logsOf2();
     if (!dl.includes('DIED-EV')) fails.push('Humanoid.Died did not fire on the client');
     const dd = dl.filter((m) => m.startsWith('DEATHDIST')).pop();

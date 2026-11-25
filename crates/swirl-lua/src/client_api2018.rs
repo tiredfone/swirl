@@ -114,7 +114,11 @@ impl ClientApi {
                 ok(vec![Wire::B(self.core.borrow().buttons_down.contains(&b))])
             }
             "GetKeysPressed" if class == "UserInputService" => ok(vec![Wire::List(vec![])]),
-            "GetFocusedTextBox" if class == "UserInputService" => nil(),
+            "GetFocusedTextBox" if class == "UserInputService" => match self.core.borrow().focused {
+                Some(i) => ok(vec![Wire::I(i)]),
+                None => nil(),
+            },
+            "IsFocused" if class == "TextBox" => ok(vec![Wire::B(self.core.borrow().focused == Some(id))]),
             "GetStringForKeyCode" if class == "UserInputService" => {
                 let v = n(args, 0).unwrap_or(0.0) as u32;
                 let s = if (32..127).contains(&v) { (v as u8 as char).to_ascii_uppercase().to_string() } else { String::new() };
@@ -154,7 +158,38 @@ impl ClientApi {
             "GetPlayer" | "CloseConnection" if class == "NetworkReplicator" => nil(),
             "GetTopbarTransparency" if class == "PlayerGui" => ok(vec![Wire::N(0.5)]),
             "SetTopbarTransparency" if class == "PlayerGui" => nil(),
-            "SetCoreGuiEnabled" | "SetCore" if class == "StarterGui" => nil(),
+            "SetCore" if class == "StarterGui" => nil(),
+            "SetCoreGuiEnabled" if class == "StarterGui" => {
+                let t = match args.first() {
+                    Some(Wire::E(_, v)) => *v as i64,
+                    Some(Wire::N(v)) => *v as i64,
+                    _ => return nil(),
+                };
+                let on = matches!(args.get(1), Some(Wire::B(true)));
+                let all = enum_value("CoreGuiType", "All").unwrap_or(-1);
+                let mut c = self.core.borrow_mut();
+                if t == all {
+                    for n in ["PlayerList", "Health", "Backpack", "Chat", "EmotesMenu"] {
+                        if let Some(v) = enum_value("CoreGuiType", n) {
+                            c.core_gui.insert(v, on);
+                        }
+                    }
+                }
+                c.core_gui.insert(t, on);
+                c.fire_args.push((id, "CoreGuiChangedSignal", vec![Wire::E("CoreGuiType".into(), t as f64), Wire::B(on)]));
+                nil()
+            }
+            "GetCoreGuiEnabled" if class == "StarterGui" => {
+                let t = match args.first() {
+                    Some(Wire::E(_, v)) => *v as i64,
+                    Some(Wire::N(v)) => *v as i64,
+                    _ => return ok(vec![Wire::B(true)]),
+                };
+                let c = self.core.borrow();
+                let all = enum_value("CoreGuiType", "All").unwrap_or(-1);
+                let v = if t == all { c.core_gui.values().all(|b| *b) } else { c.core_gui.get(&t).copied().unwrap_or(true) };
+                ok(vec![Wire::B(v)])
+            }
             "Set3dRenderingEnabled" if class == "RunService" => nil(),
             "GetTextSize" if class == "TextService" => {
                 let text = match args.first() {
@@ -366,7 +401,8 @@ impl ClientApi {
             "GetNotificationTypeList" if class == "GuiService" => ok(vec![Wire::Dict(vec![])]),
             "GetEmotesMenuOpen" if class == "GuiService" => ok(vec![Wire::B(false)]),
             "GetSafeZoneOffsets" if class == "GuiService" => ok(vec![Wire::Dict(["top", "bottom", "left", "right"].iter().map(|k| (k.to_string(), Wire::N(0.0))).collect())]),
-            "GetCameraYInvertValue" | "GetOnboardingCompleted" if class == "UserGameSettings" => ok(vec![Wire::N(0.0)]),
+            "GetCameraYInvertValue" if class == "UserGameSettings" => ok(vec![Wire::N(1.0)]),
+            "GetOnboardingCompleted" if class == "UserGameSettings" => ok(vec![Wire::N(0.0)]),
             "SetCameraYInvertValue" | "SetCameraYInvertVisible" | "SetGamepadCameraSensitivityVisible" | "SetOnboardingCompleted" if class == "UserGameSettings" => nil(),
             "IsUserFeatureEnabled" if class == "UserSettings" => ok(vec![Wire::B(false)]),
             "SetPlayerIsUsing" | "SetIsExemptFromUGCAnalytics" => nil(),

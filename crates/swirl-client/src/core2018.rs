@@ -37,11 +37,26 @@ fn script_class(file: &str, top: bool) -> (&'static str, String) {
     (if top { "LocalScript" } else { "ModuleScript" }, n)
 }
 
+fn patch_playerlist(src: &str) -> String {
+    let a = "      if CUSTOM_ICONS[userIdStr] then\n        return CUSTOM_ICONS[userIdStr]";
+    let a2 = "      local perkFolder = player:FindFirstChild(\"SolarPerks\")\n      local perkBadge = perkFolder and perkFolder:FindFirstChild(\"Badge\")\n      if perkBadge and perkBadge.Value ~= \"\" then\n        return perkBadge.Value\n      elseif CUSTOM_ICONS[userIdStr] then\n        return CUSTOM_ICONS[userIdStr]";
+    let b = "      local iconImage = getCustomPlayerIcon(player)\n";
+    let b2 = "      local iconImage = getCustomPlayerIcon(player)\n      local perkFolder = player:FindFirstChild(\"SolarPerks\")\n      local perkBadge = perkFolder and perkFolder:FindFirstChild(\"Badge\")\n      if perkBadge and perkBadge.Value ~= \"\" then\n        iconImage = perkBadge.Value\n      end\n";
+    src.replacen(a, &a2, 1).replacen(b, &b2, 1)
+}
+
 fn make(dm: &mut DataModel, class: &str, name: &str, source: Option<&str>) -> Option<InstId> {
     let id = dm.create_any(class, None).ok()?;
     dm.set_prop_quiet(id, "Name", Val::Str(name.to_string()));
     dm.get_mut_name(id, name);
     if let Some(s) = source {
+        let patched;
+        let s = if name == "PlayerlistModule" {
+            patched = patch_playerlist(s);
+            patched.as_str()
+        } else {
+            s
+        };
         dm.set_prop_quiet(id, "Source", Val::Str(s.to_string()));
     }
     Some(id)
