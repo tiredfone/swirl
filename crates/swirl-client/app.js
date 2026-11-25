@@ -251,12 +251,39 @@ export async function startApp({ client, cfg, canvas }) {
     const lua = k === ' ' ? ' ' : k === 'enter' ? '\r' : k === 'shift' ? '0' : k.length === 1 ? k : null;
     if (lua) vm.key_event(lua, false);
   });
-  window.addEventListener('blur', () => {
-    if (vm && window.solarEra === 2018) vm.input_blur();
+  const releaseInputs = () => {
+    if (vm && window.solarEra === 2018) {
+      vm.input_blur();
+      for (const b of [0, 1, 2]) vm.input_button(b, false, false);
+    } else if (vm) {
+      vm.mouse_button(0, false);
+    }
     held.clear();
     codes.clear();
     keyYaw = 0;
+    dragging = false;
+    jumpQueued = false;
+    if (document.pointerLockElement) {
+      try { document.exitPointerLock(); } catch (err) {}
+    }
+  };
+  window.addEventListener('blur', releaseInputs);
+  window.addEventListener('pagehide', releaseInputs);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      releaseInputs();
+      if (typeof send === 'function') send({ t: 'ping', x: Date.now() });
+    } else {
+      try { last = 0; due = 0; } catch (err) {}
+      if (typeof send === 'function') send({ t: 'ping', x: Date.now() });
+    }
   });
+  try {
+    const src = 'let t=null;onmessage=(e)=>{if(e.data==="start"&&!t)t=setInterval(()=>postMessage(1),4000)};';
+    const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+    w.onmessage = () => { if (document.hidden) send({ t: 'ping', x: Date.now() }); };
+    w.postMessage('start');
+  } catch (err) {}
   canvas.addEventListener('pointermove', (e) => {
     if (e.pointerType === 'touch') return;
     const r = canvas.getBoundingClientRect();

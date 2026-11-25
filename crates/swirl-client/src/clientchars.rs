@@ -175,8 +175,59 @@ impl ClientChars {
         }
     }
 
+    fn hum_dead(dm: &DataModel, model: InstId) -> bool {
+        match dm.find_child_of_class(model, "Humanoid") {
+            Some(h) => matches!(dm.get_prop(h, "Health"), Some(Val::Num(v)) if *v <= 0.0),
+            None => false,
+        }
+    }
+
+    fn fall_apart(&mut self, dm: &mut DataModel, model: InstId, vel: [f64; 3]) {
+        let parts: Vec<InstId> = {
+            let mut all = vec![];
+            dm.descendants(model, &mut all);
+            all.into_iter().filter(|i| dm.is_a(*i, "BasePart")).collect()
+        };
+        let mut seed = (model as u64).wrapping_mul(0x9e3779b97f4a7c15) | 1;
+        let mut rnd = || -> [f64; 2] {
+            let mut n = || {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                ((seed % 1000) as f64 / 1000.0 - 0.5) * 8.0
+            };
+            [n(), n()]
+        };
+        let mut ph = self.ph.borrow_mut();
+        ph.include_model(model);
+        ph.activate_parts(dm, &parts, vel, &mut rnd);
+    }
+
+    pub fn handle_deaths(&mut self, dm: &mut DataModel, fired: &mut Vec<Fired>) {
+        let own_dead = self.own.as_ref().map(|o| Self::hum_dead(dm, o.model)).unwrap_or(false);
+        if own_dead {
+            if let Some(mut o) = self.own.take() {
+                self.out.push("{\"t\":\"hp\",\"v\":0}".to_string());
+                fired.push((o.hum, "Died", vec![]));
+                o.ctrl.destroy(&mut *self.ph.borrow_mut());
+                self.fall_apart(dm, o.model, o.vel);
+            }
+        }
+        let dead: Vec<InstId> = self.remotes.keys().copied().filter(|m| Self::hum_dead(dm, *m)).collect();
+        for m in dead {
+            if let Some(mut r) = self.remotes.remove(&m) {
+                if let Some(h) = dm.find_child_of_class(m, "Humanoid") {
+                    fired.push((h, "Died", vec![]));
+                }
+                r.proxy.destroy(&mut *self.ph.borrow_mut());
+                self.fall_apart(dm, m, r.vel);
+            }
+        }
+    }
+
     pub fn update(&mut self, dm: &mut DataModel, dt: f64) -> Vec<Fired> {
         let mut fired: Vec<Fired> = vec![];
+        self.handle_deaths(dm, &mut fired);
         let era18 = dm.era == 2018;
         let (mv, jump) = self.input;
         if let Some(o) = self.own.as_mut() {

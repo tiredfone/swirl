@@ -26,6 +26,7 @@ pub struct CoreState {
     pub fire_later: Vec<(InstId, &'static str)>,
     pub focus_req: Vec<(InstId, bool)>,
     pub kicked: Option<String>,
+    pub leave: bool,
     pub own_state: Option<(InstId, u8)>,
     pub friends: HashMap<InstId, f64>,
     pub prompt_req: Vec<(String, u64, bool)>,
@@ -570,7 +571,11 @@ impl ApiHandler for ClientApi {
             }
             "IsLoaded" if id == d.root => ok(vec![Wire::B(true)]),
             "GetMessage" if id == d.root => ok(vec![Wire::S(String::new())]),
-            "SetMessage" | "ClearMessage" | "FinishShutdown" | "Shutdown" if id == d.root => ok(vec![]),
+            "Shutdown" if id == d.root => {
+                self.core.borrow_mut().leave = true;
+                ok(vec![])
+            }
+            "SetMessage" | "ClearMessage" | "FinishShutdown" if id == d.root => ok(vec![]),
             "GetJobsInfo" if id == d.root => ok(vec![Wire::List(vec![])]),
             "IsDefaultLoadingGuiRemoved" if class == "ReplicatedFirst" => ok(vec![Wire::B(true)]),
             "RemoveDefaultLoadingGui" if class == "ReplicatedFirst" => ok(vec![]),
@@ -888,6 +893,20 @@ impl ApiHandler for ClientApi {
             "ReportAssetSale" | "ReportRobuxUpsellStarted" if class == "MarketplaceService" => ok(vec![]),
             "CaptureFocus" | "ReleaseFocus" if class == "TextBox" => {
                 self.core.borrow_mut().focus_req.push((id, method == "CaptureFocus"));
+                ok(vec![])
+            }
+            "BreakJoints" | "breakJoints" if class == "Model" || d.is_a(id, "BasePart") => {
+                let own = self.core.borrow().own_model;
+                if let Some(om) = own {
+                    let mut all = vec![id];
+                    d.descendants(id, &mut all);
+                    let msgs: Vec<String> = all
+                        .into_iter()
+                        .filter(|p| d.is_a(*p, "BasePart") && (*p == om || d.is_descendant_of(*p, om)))
+                        .map(|p| format!("{{\"t\":\"break\",\"id\":{}}}", p))
+                        .collect();
+                    self.core.borrow_mut().out.extend(msgs);
+                }
                 ok(vec![])
             }
             "Kick" if class == "Player" => {

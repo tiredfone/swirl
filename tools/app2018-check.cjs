@@ -140,6 +140,52 @@ const srv = http.createServer((req, res) => {
       } else fails.push('report text box missing');
     }
   }
+  if (mode !== 'js') {
+    const logsOf2 = () => pg.evaluate(() => (window.solarApp.logs || []).map((x) => String(x.msg)));
+    const run2 = (code) => pg.evaluate((c) => window.solarApp.vm.run_script(c), code);
+    await pg.evaluate(() => window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW', key: 'w', bubbles: true })));
+    await wait(300);
+    await pg.evaluate(() => { window.dispatchEvent(new Event('blur')); });
+    await wait(300);
+    await run2('print("KEYW", game:GetService("UserInputService"):IsKeyDown(Enum.KeyCode.W))');
+    await wait(600);
+    if (!(await logsOf2()).some((m) => m === 'KEYW false')) fails.push('a key stayed down after the window lost focus');
+    await run2('local h = game.Players.LocalPlayer.Character.Humanoid h.Died:Connect(function() print("DIED-EV") end) h.Health = 0');
+    await wait(2500);
+    await run2('local c = game.Players.LocalPlayer.Character local r = c and c:FindFirstChild("UpperTorso") local h = c and c:FindFirstChild("Head") print("DEATHDIST", (r and h) and (r.Position - h.Position).Magnitude or -1)');
+    await wait(600);
+    const dl = await logsOf2();
+    if (!dl.includes('DIED-EV')) fails.push('Humanoid.Died did not fire on the client');
+    const dd = dl.filter((m) => m.startsWith('DEATHDIST')).pop();
+    const dv = dd ? Number(dd.split(' ')[1]) : -1;
+    if (!(dv > 1.45)) fails.push('character did not fall apart on death (head to torso ' + dv + ')');
+    await wait(7500);
+    const menuUp = await pg.evaluate(() => [...document.querySelectorAll('[data-ipath]')].some((e) => /LeaveGameButtonButton$/.test(e.getAttribute('data-ipath')) && e.getBoundingClientRect().width > 0));
+    if (!menuUp) {
+      await pg.keyboard.press('Escape');
+      await wait(1200);
+    }
+    await pg.mouse.move(540, 640, { steps: 3 });
+    await pg.mouse.move(550, 645, { steps: 2 });
+    await wait(300);
+    await pg.mouse.down();
+    await wait(120);
+    await pg.mouse.up();
+    await wait(1500);
+    let sel = null;
+    for (let i = 0; i < 8; i++) {
+      sel = await pg.evaluate(() => { for (const e of document.querySelectorAll('[data-ipath]')) if (/LeaveButtonContainer\.LeaveGameButton$/.test(e.getAttribute('data-ipath')) && e.getBoundingClientRect().width > 0) return (e.querySelector('img') || {}).src || ''; return null; });
+      if (sel && /MenuButtonSelected/.test(sel)) break;
+      await wait(500);
+    }
+    if (sel === null) fails.push('leave prompt did not open');
+    else if (!/MenuButtonSelected/.test(sel)) fails.push('leave confirm button is not highlighted: ' + sel);
+    await pg.evaluate(() => { window.__marker = 1; });
+    await pg.keyboard.press('Enter');
+    await wait(2500);
+    const stayed = await pg.evaluate(() => window.__marker === 1).catch(() => false);
+    if (stayed) fails.push('Enter did not confirm leaving the game');
+  }
   console.log(JSON.stringify({ info, diff, fails }));
   await b.close();
   srv.close();

@@ -52,6 +52,7 @@ pub struct LuaVm {
     tools: crate::clientchars::Tools,
     remote_moved: std::collections::HashSet<u32>,
     fired_later: Vec<(u32, &'static str, Vec<swirl_lua::host::Wire>)>,
+    sel_last: [Option<u32>; 2],
     gui_ptr: Option<[f64; 2]>,
     gui_down: Vec<u32>,
     t: f64,
@@ -92,7 +93,7 @@ impl LuaVm {
         let mut dm = DataModel::new("client");
         dm.local_alloc = true;
         let dm = Rc::new(RefCell::new(dm));
-        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), gui: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), screen: [800.0, 600.0], gui_dom: None, gui_dirty: true, cam: Default::default(), init_terrain: None, terrain_keys: vec![], bridge: Default::default(), hidden: Default::default(), now_ms: 0.0, friends: Default::default(), tags: None, tools: Default::default(), remote_moved: Default::default(), fired_later: vec![], gui_ptr: None, gui_down: vec![], t: 0.0, pack: Default::default(), io_keys: Default::default(), io_btn: Default::default(), io_move: None, io_wheel: None, io_destroy: vec![], last_behavior: 0.0, behavior_req: None, touches: Default::default(), menu: None, exit_btns: vec![], leave_req: false, clicks: vec![], own_cam: None })
+        Ok(LuaVm { dm, host: None, run: false, core: Rc::new(RefCell::new(Default::default())), anim: Rc::new(RefCell::new(Default::default())), gui: Rc::new(RefCell::new(Default::default())), chars: None, mouse_state: Default::default(), screen: [800.0, 600.0], gui_dom: None, gui_dirty: true, cam: Default::default(), init_terrain: None, terrain_keys: vec![], bridge: Default::default(), hidden: Default::default(), now_ms: 0.0, friends: Default::default(), tags: None, tools: Default::default(), remote_moved: Default::default(), fired_later: vec![], sel_last: [None, None], gui_ptr: None, gui_down: vec![], t: 0.0, pack: Default::default(), io_keys: Default::default(), io_btn: Default::default(), io_move: None, io_wheel: None, io_destroy: vec![], last_behavior: 0.0, behavior_req: None, touches: Default::default(), menu: None, exit_btns: vec![], leave_req: false, clicks: vec![], own_cam: None })
     }
 
     fn make_io(&mut self, ty: &str, key: i64) -> Option<u32> {
@@ -207,11 +208,65 @@ impl LuaVm {
             self.core.borrow_mut().keys_code.insert(key);
             self.set_last_input("Keyboard");
             self.send_input(io, typing, "b");
+            if !typing && (code == "Enter" || code == "NumpadEnter") {
+                self.activate_selected();
+            }
         } else if let Some(io) = self.io_keys.remove(&key) {
             self.core.borrow_mut().keys_code.remove(&key);
             self.dm.borrow_mut().set_prop_quiet(io, "UserInputState", Val::Num(2.0));
             self.send_input(io, typing, "e");
             self.io_destroy.push((io, self.t + 1.0));
+        }
+    }
+
+    fn selected_objects(&self) -> [Option<u32>; 2] {
+        let dm = self.dm.borrow();
+        let get = |id: Option<u32>, name: &str| match id.and_then(|i| dm.get_prop(i, name)) {
+            Some(Val::Ref(Some(r))) if dm.get(*r).map(|x| !x.destroyed).unwrap_or(false) => Some(*r),
+            _ => None,
+        };
+        let gs = dm.services.get("GuiService").copied();
+        let pg = dm.local_player.and_then(|p| dm.find_child_of_class(p, "PlayerGui"));
+        [get(gs, "SelectedCoreObject"), get(pg, "SelectedObject")]
+    }
+
+    fn track_selection(&mut self, fired: &mut Vec<(u32, &'static str, Vec<swirl_lua::host::Wire>)>) {
+        let now = self.selected_objects();
+        for i in 0..2 {
+            let old = self.sel_last[i];
+            if old == now[i] {
+                continue;
+            }
+            if let Some(o) = old {
+                if self.dm.borrow().get(o).map(|x| !x.destroyed).unwrap_or(false) {
+                    fired.push((o, "SelectionLost", vec![]));
+                }
+            }
+            if let Some(n) = now[i] {
+                fired.push((n, "SelectionGained", vec![]));
+            }
+            self.sel_last[i] = now[i];
+        }
+    }
+
+    fn activate_selected(&mut self) {
+        let now = self.selected_objects();
+        let target = now[0].or(now[1]);
+        let t = match target {
+            Some(t) => t,
+            None => return,
+        };
+        let ok = {
+            let dm = self.dm.borrow();
+            dm.is_a(t, "GuiButton") && !matches!(dm.get_prop(t, "Visible"), Some(Val::Bool(false)))
+        };
+        if !ok {
+            return;
+        }
+        self.clicks.push(t);
+        if let Some(h) = self.host.as_mut() {
+            h.fire(t, "MouseButton1Click", vec![]);
+            h.fire(t, "Activated", vec![]);
         }
     }
 
@@ -250,7 +305,8 @@ impl LuaVm {
     }
 
     pub fn take_leave(&mut self) -> bool {
-        std::mem::take(&mut self.leave_req)
+        let lua_leave = std::mem::take(&mut self.core.borrow_mut().leave);
+        std::mem::take(&mut self.leave_req) || lua_leave
     }
 
     pub fn set_touch(&mut self, on: bool) {
@@ -745,9 +801,7 @@ impl LuaVm {
                         h.fire(id, key, vec![]);
                         if class == "Player" && name == "Character" {
                             if let (Val::Ref(Some(o)), true) = (old.clone().unwrap_or(Val::Ref(None)), old != Some(new.clone())) {
-                                if dm.get(o).map(|i| !i.destroyed).unwrap_or(false) {
-                                    h.fire(id, "CharacterRemoving", vec![swirl_lua::host::Wire::I(o)]);
-                                }
+                                h.fire(id, "CharacterRemoving", vec![swirl_lua::host::Wire::I(o)]);
                             }
                             if let Val::Ref(Some(n)) = new {
                                 h.fire(id, "CharacterAdded", vec![swirl_lua::host::Wire::I(n)]);
@@ -1145,6 +1199,7 @@ impl LuaVm {
                 }
             }
         }
+        self.track_selection(&mut fired);
         if let Some(h) = self.host.as_mut() {
             for (inst, name, args) in fired {
                 h.fire(inst, name, args);
