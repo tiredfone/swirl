@@ -411,7 +411,7 @@ pub fn copy_player_scripts(dm: &mut DataModel, player: InstId) {
     };
     let kids: Vec<InstId> = dm.get(sps).map(|s| s.children.clone()).unwrap_or_default();
     for k in kids {
-        if let Some(c) = dm.clone_tree(k) {
+        if let Some(c) = dm.clone_tree_always(k) {
             let _ = dm.set_parent(c, Some(ps));
         }
     }
@@ -432,7 +432,7 @@ pub fn copy_character_scripts(dm: &mut DataModel, model: InstId) {
         if let Some(old) = dm.find_child(model, &name, false) {
             dm.destroy(old);
         }
-        if let Some(c) = dm.clone_tree(k) {
+        if let Some(c) = dm.clone_tree_always(k) {
             let _ = dm.set_parent(c, Some(model));
         }
     }

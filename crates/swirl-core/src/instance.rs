@@ -389,6 +389,30 @@ impl DataModel {
         Some(n)
     }
 
+    pub fn clone_tree_always(&mut self, id: InstId) -> Option<InstId> {
+        let was = self.get(id)?.props.get("Archivable").cloned();
+        if let Some(i) = self.get_mut(id) {
+            i.props.insert("Archivable".into(), Val::Bool(true));
+        }
+        let n = self.clone_tree(id);
+        if let Some(i) = self.get_mut(id) {
+            match &was {
+                Some(v) => {
+                    i.props.insert("Archivable".into(), v.clone());
+                }
+                None => {
+                    i.props.remove("Archivable");
+                }
+            }
+        }
+        if let (Some(n), Some(v)) = (n, was) {
+            if let Some(i) = self.get_mut(n) {
+                i.props.insert("Archivable".into(), v);
+            }
+        }
+        n
+    }
+
     fn clone_rec(&mut self, id: InstId, map: &mut HashMap<InstId, InstId>) -> Option<InstId> {
         let (class, name, props, tags, kids) = {
             let i = self.get(id)?;
